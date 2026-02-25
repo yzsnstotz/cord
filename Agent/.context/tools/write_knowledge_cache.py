@@ -26,6 +26,58 @@ except ImportError:
 
 CACHE_VERSION = "1.0"
 
+# ── Shard path helpers ──────────────────────────────────────────────────────
+SHARD_DIR_NAME = "knowledge"
+META_FILENAME = "_meta.json"
+
+
+def _knowledge_dir(project_path: str) -> str:
+    return os.path.join(os.path.abspath(project_path), ".context", SHARD_DIR_NAME)
+
+
+def _shard_path(project_path: str, shard_name: str) -> str:
+    return os.path.join(_knowledge_dir(project_path), shard_name + ".json")
+
+
+def _meta_path(project_path: str) -> str:
+    return os.path.join(_knowledge_dir(project_path), META_FILENAME)
+
+
+def _load_shard(shard_path: str, shard_name: str, project_name: str = "") -> dict:
+    if os.path.isfile(shard_path):
+        with open(shard_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "version": CACHE_VERSION,
+        "shard": shard_name,
+        "description": "",
+        "last_updated": _now_iso(),
+        "entries": {},
+    }
+
+
+def _load_meta(meta_path: str, project_name: str = "") -> dict:
+    if os.path.isfile(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"version": CACHE_VERSION, "project": project_name, "shards": {}}
+
+
+def _update_meta(project_path: str, shard_name: str, shard_data: dict) -> None:
+    meta_p = _meta_path(project_path)
+    project_name = os.path.basename(os.path.abspath(project_path).rstrip(os.sep))
+    meta = _load_meta(meta_p, project_name)
+    meta["shards"][shard_name] = {
+        "description": shard_data.get("description", ""),
+        "entry_count": len(shard_data.get("entries", {})),
+        "last_updated": shard_data.get("last_updated", _now_iso()),
+    }
+    _atomic_write(meta_p, meta)
+
+
+def _uses_shards(project_path: str) -> bool:
+    return os.path.isdir(_knowledge_dir(project_path))
+
 
 def _cache_path(project_path: str) -> str:
     """Resolve knowledge_cache.json path under project .context."""
@@ -169,6 +221,78 @@ def writer_executor(
         _atomic_write(cache_path, data)
 
 
+def writer_pm_shard(project_path: str, task_id: str, shard_name: str, entry_data: dict) -> None:
+    """PM mode with shard support: write task entry to a specific shard file."""
+    kdir = _knowledge_dir(project_path)
+    os.makedirs(kdir, exist_ok=True)
+    shard_p = _shard_path(project_path, shard_name)
+    lock_p = shard_p + ".lock"
+    fd = os.open(lock_p, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        data = _load_shard(shard_p, shard_name)
+        key = f"task:{task_id}"
+        entry = dict(entry_data)
+        if "type" not in entry:
+            entry["type"] = "task"
+        if "written_by" not in entry:
+            entry["written_by"] = "PM"
+        data["entries"][key] = entry
+        data["last_updated"] = _now_iso()
+        _atomic_write(shard_p, data)
+        _update_meta(project_path, shard_name, data)
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def writer_executor_shard(project_path: str, task_id: str, shard_name: str, final_summary_path: str) -> None:
+    """Executor mode with shard support: merge knowledge_entries into a specific shard."""
+    with open(final_summary_path, "r", encoding="utf-8") as f:
+        summary = json.load(f)
+    knowledge_entries = summary.get("knowledge_entries") or {}
+    if not knowledge_entries:
+        return
+    kdir = _knowledge_dir(project_path)
+    os.makedirs(kdir, exist_ok=True)
+    shard_p = _shard_path(project_path, shard_name)
+    lock_p = shard_p + ".lock"
+    fd = os.open(lock_p, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        data = _load_shard(shard_p, shard_name)
+        now = _now_iso()
+        for filepath, summary_text in knowledge_entries.items():
+            if not isinstance(summary_text, str):
+                summary_text = json.dumps(summary_text) if summary_text is not None else ""
+            interface_hash = hashlib.sha256(summary_text.encode()).hexdigest()[:8]
+            data["entries"][filepath] = {
+                "type": "file",
+                "owner_task": task_id,
+                "summary": summary_text,
+                "interface_hash": interface_hash,
+                "last_modified_by": task_id,
+                "last_modified_at": now,
+                "written_by": "executor",
+            }
+        data["last_updated"] = now
+        _atomic_write(shard_p, data)
+        _update_meta(project_path, shard_name, data)
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Atomic write to knowledge_cache.json (PM or executor mode)."
@@ -194,6 +318,12 @@ def main() -> int:
         default="",
         help="Path to final_summary.json containing knowledge_entries (executor mode)",
     )
+    # Shard support
+    parser.add_argument(
+        "--shard",
+        default="",
+        help="Shard name (e.g. auth, api). When set, writes to .context/knowledge/<shard>.json instead of knowledge_cache.json.",
+    )
     args = parser.parse_args()
 
     if args.writer == "pm":
@@ -205,14 +335,20 @@ def main() -> int:
         else:
             print("PM mode requires --entry-json or --entry-file", file=sys.stderr)
             return 1
-        writer_pm(args.project_path, args.task_id, entry_data)
+        if args.shard:
+            writer_pm_shard(args.project_path, args.task_id, args.shard, entry_data)
+        else:
+            writer_pm(args.project_path, args.task_id, entry_data)
         return 0
 
     if args.writer == "executor":
         if not args.final_summary or not os.path.isfile(args.final_summary):
             print("Executor mode requires --final-summary pointing to existing file", file=sys.stderr)
             return 1
-        writer_executor(args.project_path, args.task_id, args.final_summary)
+        if args.shard:
+            writer_executor_shard(args.project_path, args.task_id, args.shard, args.final_summary)
+        else:
+            writer_executor(args.project_path, args.task_id, args.final_summary)
         return 0
 
     return 1

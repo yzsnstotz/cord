@@ -18,6 +18,7 @@ RDLOOP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${RDLOOP_OUT_DIR:-${RDLOOP_ROOT}/out}"
 WORKTREES_DIR="${RDLOOP_ROOT}/worktrees"
 LIB_DIR="${RDLOOP_ROOT}/coordinator/lib"
+export COORDINATOR_LIB="$LIB_DIR"
 PROMPTS_DIR="${RDLOOP_ROOT}/prompts"
 
 LOCK_STALE_SECONDS=1800
@@ -997,14 +998,38 @@ run_attempt() {
     [ -z "$coder_model" ] && coder_model=$(json_read "$config_json" "default_coder_model" "")
     [ -z "$judge_model" ] && judge_model=$(json_read "$config_json" "default_judge_model" "")
   fi
-  # execution_mode (v3.0): auto -> bridge adapter, semi-auto -> ccb adapter; overrides coder/judge when set
-  local execution_mode; execution_mode=$(json_read "$TASK_JSON" "execution_mode" "auto")
-  if [ "$execution_mode" = "auto" ]; then
-    coder_type="bridge"
-    judge_type="bridge"
-  elif [ "$execution_mode" = "semi-auto" ]; then
-    coder_type="ccb"
-    judge_type="ccb"
+  # workflow_mode (v4.0): takes precedence over execution_mode
+  local workflow_mode; workflow_mode=$(json_read "$TASK_JSON" "workflow_mode" "")
+  if [ -n "$workflow_mode" ]; then
+    case "$workflow_mode" in
+      single)
+        coder_type="cliproxy"
+        local judge_enabled_flag; judge_enabled_flag=$(json_read "$TASK_JSON" "judge_enabled" "true")
+        if [ "$judge_enabled_flag" = "false" ]; then
+          judge_type="none"
+        else
+          judge_type="cliproxy"
+        fi
+        ;;
+      solo)
+        coder_type="solo"
+        judge_type="none"  # agent self-reviews via coordinator loop
+        ;;
+      collab)
+        coder_type="ccb"
+        judge_type="ccb"
+        ;;
+    esac
+  else
+    # Legacy: execution_mode routing (v3.0)
+    local execution_mode; execution_mode=$(json_read "$TASK_JSON" "execution_mode" "auto")
+    if [ "$execution_mode" = "auto" ]; then
+      coder_type="bridge"
+      judge_type="bridge"
+    elif [ "$execution_mode" = "semi-auto" ]; then
+      coder_type="ccb"
+      judge_type="ccb"
+    fi
   fi
   [ -z "$coder_type" ] && coder_type="mock"
   [ -z "$judge_type" ] && judge_type="mock"
@@ -1248,6 +1273,24 @@ print(json.dumps(cs))
     fi
   fi
 
+  # Skip judge entirely if judge_type is "none" (solo mode, or judge_enabled=false)
+  local skip_judge=0
+  if [ "$judge_type" = "none" ]; then
+    mkdir -p "${att_dir}/judge"
+    local coder_rc_val; coder_rc_val=$(cat "${att_dir}/coder/rc.txt" 2>/dev/null || echo "1")
+    if [ "$coder_rc_val" = "0" ]; then
+      echo '{"verdict":"PASS","score":8,"reasoning":"Solo mode auto-pass (coder exit 0)","dimensions":{}}' > "${att_dir}/judge/verdict.json"
+    elif [ "$coder_rc_val" = "2" ]; then
+      echo '{"verdict":"NEED_USER_INPUT","score":0,"reasoning":"Agent requested user input","dimensions":{}}' > "${att_dir}/judge/verdict.json"
+    else
+      echo '{"verdict":"FAIL","score":3,"reasoning":"Coder exited with non-zero: '"$coder_rc_val"'","dimensions":{}}' > "${att_dir}/judge/verdict.json"
+    fi
+    echo "0" > "${att_dir}/judge/rc.txt"
+    log_info "Judge skipped (judge_type=none), auto-verdict based on coder rc=${coder_rc_val}"
+    skip_judge=1
+  fi
+
+  if [ "$skip_judge" = "0" ]; then
   local judge_script="${LIB_DIR}/call_judge_${judge_script_suffix}.sh"
   if [ ! -f "$judge_script" ]; then
     log_error "Judge script not found: ${judge_script}"
@@ -1334,6 +1377,8 @@ print(json.dumps(cs))
     # act_on_decision exits for PAUSED/FAILED; should not reach here
     NORMAL_EXIT=1; exit 0
   fi
+
+  fi  # end skip_judge=0
 
   check_control_pause "AFTER_JUDGE"
 

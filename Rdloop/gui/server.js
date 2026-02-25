@@ -1673,6 +1673,31 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   // P20: Strip TMUX/WEZTERM vars so spawned ccb does not think it runs inside tmux (avoids taking instance lock in GUI's session)
   const noTmuxEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !['TMUX', 'TMUX_PANE', 'WEZTERM_PANE'].includes(k)));
 
+  // Check for existing CCB session before spawning a new one
+  const preList = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
+  const preNames = (preList.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const existingCcb = preNames.find(n => isCcbNativeSessionName(n) || n.startsWith('ai-'));
+  if (existingCcb) {
+    // Session exists — skip spawn, just ping providers and return status
+    const sessions = [];
+    for (const provider of validProviders) {
+      const pingCmd = CCB_PING_CMD[provider];
+      let status = 'off';
+      if (pingCmd) {
+        const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
+        status = pingResult.status === 'ok' ? 'ok' : 'unavailable';
+      } else {
+        status = 'ok';
+      }
+      sessions.push({ provider, session_name: existingCcb, status });
+    }
+    return res.json({
+      ok: true, sessions,
+      session_ids: [existingCcb],
+      errors: [], hint: 'Reused existing CCB session: ' + existingCcb
+    });
+  }
+
   let stderrChunks = [];
   const child = spawn('python3', [ccbScript, ...validProviders], {
     env: { ...noTmuxEnv, CCB_GUI_LAUNCH: '1' },
@@ -1683,13 +1708,25 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   child.stderr.on('data', (chunk) => { stderrChunks.push(chunk); });
   child.unref();
 
-  await new Promise(r => setTimeout(r, 2000));
+  // Retry polling: CCB needs time to create tmux session and start providers
+  let foundSession = null;
+  for (const delay of [1500, 2000, 3000, 4000]) {
+    await new Promise(r => setTimeout(r, delay));
+    const checkResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
+    const checkNames = (checkResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+    foundSession = checkNames.find(n => isCcbNativeSessionName(n) || n.startsWith('ai-'));
+    if (foundSession) break;
+  }
+  if (!foundSession) {
+    // Final fallback: check once more after full 10s
+    await new Promise(r => setTimeout(r, 3000));
+  }
 
   const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
   const allNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
   const ccbSessionNames = allNames.filter(n => isCcbNativeSessionName(n));
   const aiSessionNames = allNames.filter(n => n.startsWith('ai-'));
-  const firstCcbSession = ccbSessionNames[0] || aiSessionNames[0] || null;
+  const firstCcbSession = foundSession || ccbSessionNames[0] || aiSessionNames[0] || null;
 
   const sessions = [];
   const errors = [];
@@ -1715,7 +1752,8 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   const stderrSnippet = stderrChunks.length
     ? Buffer.concat(stderrChunks).toString('utf8').trim().split('\n').slice(-12).join('\n').slice(0, 500)
     : null;
-  if (sessions.every(s => s.status !== 'ok') && stderrSnippet) {
+  // Always include stderr snippet (not just on total failure)
+  if (stderrSnippet) {
     errors.push('CCB stderr: ' + stderrSnippet);
   }
 
@@ -2311,6 +2349,166 @@ app.get('/api/knowledge', (req, res) => {
   }
 });
 
+// ── Knowledge Shard CRUD API ─────────────────────────────────────────────
+const VALID_SHARD_NAME = /^[a-z0-9_-]+$/;
+
+function getKnowledgeDir() {
+  const projectPath = getProjectPath();
+  if (!projectPath) return null;
+  return path.join(projectPath, '.context', 'knowledge');
+}
+
+function readShardFile(shardPath) {
+  if (!fs.existsSync(shardPath)) return null;
+  try { return JSON.parse(fs.readFileSync(shardPath, 'utf8')); } catch { return null; }
+}
+
+function writeShardFileAtomic(shardPath, data) {
+  const dir = path.dirname(shardPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const tmp = shardPath + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
+  fs.renameSync(tmp, shardPath);
+}
+
+function updateShardMeta(knowledgeDir, shardName, shardData) {
+  const metaPath = path.join(knowledgeDir, '_meta.json');
+  let meta = { version: '1.0', project: '', shards: {} };
+  if (fs.existsSync(metaPath)) {
+    try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch {}
+  }
+  meta.shards[shardName] = {
+    description: shardData.description || '',
+    entry_count: Object.keys(shardData.entries || {}).length,
+    last_updated: shardData.last_updated || new Date().toISOString()
+  };
+  writeShardFileAtomic(metaPath, meta);
+}
+
+// GET /api/knowledge/shards — list all shards from _meta.json
+app.get('/api/knowledge/shards', (req, res) => {
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const metaPath = path.join(kdir, '_meta.json');
+  if (!fs.existsSync(metaPath)) {
+    // Check for legacy knowledge_cache.json
+    const projectPath = getProjectPath();
+    const legacyPath = path.join(projectPath, '.context', 'knowledge_cache.json');
+    if (fs.existsSync(legacyPath)) {
+      return res.json({ shards: {}, legacy: true, hint: 'Run migration to convert to shards' });
+    }
+    return res.json({ shards: {} });
+  }
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    res.json(meta);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/knowledge/shards/:shard — entries for one shard
+app.get('/api/knowledge/shards/:shard', (req, res) => {
+  const shard = req.params.shard;
+  if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const shardPath = path.join(kdir, shard + '.json');
+  const data = readShardFile(shardPath);
+  if (!data) return res.status(404).json({ error: 'Shard not found: ' + shard });
+  res.json(data);
+});
+
+// POST /api/knowledge/shards — create new shard
+app.post('/api/knowledge/shards', requireWritable, (req, res) => {
+  const { name, description } = req.body || {};
+  if (!name || !VALID_SHARD_NAME.test(name)) return res.status(400).json({ error: 'Invalid shard name (lowercase alphanumeric, underscore, hyphen)' });
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  if (!fs.existsSync(kdir)) fs.mkdirSync(kdir, { recursive: true });
+  const shardPath = path.join(kdir, name + '.json');
+  if (fs.existsSync(shardPath)) return res.status(409).json({ error: 'Shard already exists' });
+  const data = {
+    version: '1.0', shard: name, description: description || '',
+    last_updated: new Date().toISOString(), entries: {}
+  };
+  writeShardFileAtomic(shardPath, data);
+  updateShardMeta(kdir, name, data);
+  res.json({ ok: true, shard: name });
+});
+
+// PUT /api/knowledge/shards/:shard — update shard metadata
+app.put('/api/knowledge/shards/:shard', requireWritable, (req, res) => {
+  const shard = req.params.shard;
+  if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const shardPath = path.join(kdir, shard + '.json');
+  const data = readShardFile(shardPath);
+  if (!data) return res.status(404).json({ error: 'Shard not found' });
+  if (req.body.description !== undefined) data.description = req.body.description;
+  data.last_updated = new Date().toISOString();
+  writeShardFileAtomic(shardPath, data);
+  updateShardMeta(kdir, shard, data);
+  res.json({ ok: true });
+});
+
+// PUT /api/knowledge/shards/:shard/entries/:key — create/update entry
+app.put('/api/knowledge/shards/:shard/entries/:key', requireWritable, (req, res) => {
+  const shard = req.params.shard;
+  const key = decodeURIComponent(req.params.key);
+  if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
+  if (!key) return res.status(400).json({ error: 'Missing entry key' });
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const shardPath = path.join(kdir, shard + '.json');
+  let data = readShardFile(shardPath);
+  if (!data) return res.status(404).json({ error: 'Shard not found' });
+  const entry = req.body || {};
+  data.entries[key] = entry;
+  data.last_updated = new Date().toISOString();
+  writeShardFileAtomic(shardPath, data);
+  updateShardMeta(kdir, shard, data);
+  res.json({ ok: true, key });
+});
+
+// DELETE /api/knowledge/shards/:shard/entries/:key — delete entry
+app.delete('/api/knowledge/shards/:shard/entries/:key', requireWritable, (req, res) => {
+  const shard = req.params.shard;
+  const key = decodeURIComponent(req.params.key);
+  if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const shardPath = path.join(kdir, shard + '.json');
+  let data = readShardFile(shardPath);
+  if (!data) return res.status(404).json({ error: 'Shard not found' });
+  delete data.entries[key];
+  data.last_updated = new Date().toISOString();
+  writeShardFileAtomic(shardPath, data);
+  updateShardMeta(kdir, shard, data);
+  res.json({ ok: true });
+});
+
+// DELETE /api/knowledge/shards/:shard — delete entire shard
+app.delete('/api/knowledge/shards/:shard', requireWritable, (req, res) => {
+  const shard = req.params.shard;
+  if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const shardPath = path.join(kdir, shard + '.json');
+  if (fs.existsSync(shardPath)) fs.unlinkSync(shardPath);
+  // Remove from _meta.json
+  const metaPath = path.join(kdir, '_meta.json');
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      delete meta.shards[shard];
+      writeShardFileAtomic(metaPath, meta);
+    } catch {}
+  }
+  res.json({ ok: true });
+});
+
 // P10: Validate agent_root — must exist and contain .context/rules/collab_context.md
 function validateAgentRoot(agentRoot) {
   if (!agentRoot || typeof agentRoot !== 'string') return { valid: true, value: '' };
@@ -2643,6 +2841,9 @@ function validateTaskSpecData(spec) {
   if (spec.execution_mode !== undefined && !['auto', 'semi-auto'].includes(spec.execution_mode)) {
     errors.push('execution_mode: must be auto or semi-auto');
   }
+  if (spec.workflow_mode !== undefined && !['single', 'solo', 'collab'].includes(spec.workflow_mode)) {
+    errors.push('workflow_mode: must be single, solo, or collab');
+  }
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
   if (spec.collab_roles !== undefined && spec.collab_roles !== null) {
     if (typeof spec.collab_roles !== 'object' || Array.isArray(spec.collab_roles)) {
@@ -2831,6 +3032,101 @@ app.delete('/api/task_specs/:taskId', requireWritable, (req, res) => {
 
   auditLog({ action: 'task_spec_delete', task_id: taskId, trash_path: trashPath });
   res.json({ ok: true, task_id: taskId, trash_path: trashPath });
+});
+
+// ── Solo Agent Progress API ──────────────────────────────────────────────────
+
+// GET /api/task/:taskId/attempt/:n/solo-steps — read solo agent step progress
+app.get('/api/task/:taskId/attempt/:n/solo-steps', (req, res) => {
+  const { taskId, n } = req.params;
+  const outDir = path.join(RDLOOP_ROOT, 'out');
+  const taskDir = path.join(outDir, taskId);
+  if (!fs.existsSync(taskDir)) return res.status(404).json({ error: 'Task not found' });
+
+  const attDir = path.join(taskDir, 'attempts', `attempt_${n}`);
+  if (!fs.existsSync(attDir)) return res.status(404).json({ error: 'Attempt not found' });
+
+  const soloDir = path.join(attDir, 'solo');
+  if (!fs.existsSync(soloDir)) return res.json({ steps: [], mode: 'not_solo' });
+
+  // Read step_NNN directories
+  const steps = [];
+  let stepDirs = [];
+  try { stepDirs = fs.readdirSync(soloDir).filter(d => d.startsWith('step_')).sort(); } catch {}
+
+  for (const stepDir of stepDirs) {
+    const stepPath = path.join(soloDir, stepDir);
+    const responsePath = path.join(stepPath, 'response.json');
+    const agentLogPath = path.join(stepPath, 'agent.log');
+
+    let response = null;
+    if (fs.existsSync(responsePath)) {
+      try { response = JSON.parse(fs.readFileSync(responsePath, 'utf8')); } catch {}
+    }
+
+    const stepNum = parseInt(stepDir.replace('step_', ''), 10);
+    steps.push({
+      step: stepNum,
+      dir: stepDir,
+      has_response: !!response,
+      self_eval: response?.self_eval || null,
+      confidence: response?.confidence || null,
+      summary: response?.summary || null,
+      test_result: response?.test_result || null,
+      files_modified: response?.files_modified || [],
+      issues: response?.issues || [],
+      next_action: response?.next_action || null,
+      has_agent_log: fs.existsSync(agentLogPath),
+    });
+  }
+
+  // Read solo_config from task.json for max_iterations
+  let maxIterations = 10;
+  const taskJsonPath = path.join(taskDir, 'task.json');
+  if (fs.existsSync(taskJsonPath)) {
+    try {
+      const task = JSON.parse(fs.readFileSync(taskJsonPath, 'utf8'));
+      maxIterations = task.solo_config?.max_iterations || 10;
+    } catch {}
+  }
+
+  res.json({
+    steps,
+    max_iterations: maxIterations,
+  });
+});
+
+// POST /api/task/:taskId/attempt/:n/solo-proceed — approve paused solo step
+app.post('/api/task/:taskId/attempt/:n/solo-proceed', requireWritable, (req, res) => {
+  const { taskId, n } = req.params;
+  const outDir = path.join(RDLOOP_ROOT, 'out');
+  const taskDir = path.join(outDir, taskId);
+  if (!fs.existsSync(taskDir)) return res.status(404).json({ error: 'Task not found' });
+
+  const soloDir = path.join(taskDir, 'attempts', `attempt_${n}`, 'solo');
+  if (!fs.existsSync(soloDir)) return res.status(404).json({ error: 'Solo dir not found' });
+
+  const feedback = req.body?.feedback || '';
+  const controlPath = path.join(soloDir, 'control.json');
+  const control = { action: 'proceed', feedback, timestamp: new Date().toISOString() };
+  fs.writeFileSync(controlPath, JSON.stringify(control, null, 2) + '\n');
+  res.json({ ok: true });
+});
+
+// POST /api/task/:taskId/attempt/:n/solo-abort — abort solo agent
+app.post('/api/task/:taskId/attempt/:n/solo-abort', requireWritable, (req, res) => {
+  const { taskId, n } = req.params;
+  const outDir = path.join(RDLOOP_ROOT, 'out');
+  const taskDir = path.join(outDir, taskId);
+  if (!fs.existsSync(taskDir)) return res.status(404).json({ error: 'Task not found' });
+
+  const soloDir = path.join(taskDir, 'attempts', `attempt_${n}`, 'solo');
+  if (!fs.existsSync(soloDir)) return res.status(404).json({ error: 'Solo dir not found' });
+
+  const controlPath = path.join(soloDir, 'control.json');
+  const control = { action: 'exit', reason: 'user_abort', timestamp: new Date().toISOString() };
+  fs.writeFileSync(controlPath, JSON.stringify(control, null, 2) + '\n');
+  res.json({ ok: true });
 });
 
 // POST /api/task_specs/:taskId/run — new instance: unique task_id per run (spec_id + timestamp) so sidebar shows each run
