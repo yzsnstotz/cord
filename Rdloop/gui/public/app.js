@@ -179,6 +179,29 @@ async function openSettingsPanel() {
           <div style="font-size:12px;margin-top:4px;color:#8b949e">${cfg.wezterm_available ? '勾选后，点击任意 provider 的「打开终端」将改为在 WezTerm 中打开并传入当前配置的全部 providers。' : '需安装 WezTerm：brew install wezterm'}</div>
         </div>
 
+        <div style="margin-bottom:12px">
+          <details>
+            <summary class="form-label" style="cursor:pointer">Knowledge Agent</summary>
+            <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+              <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
+                <input type="checkbox" id="settings-knowledge-enabled" ${cfg.knowledge_enabled ? 'checked' : ''}>
+                <span>Enable knowledge agent</span>
+              </label>
+              <div style="margin-bottom:8px">
+                <label class="form-label" style="font-size:11px">Provider</label>
+                <select id="settings-knowledge-provider" class="form-select" style="width:auto">
+                  ${['codex','gemini','claude','opencode'].map(p => '<option value="'+p+'" '+(cfg.knowledge_provider===p?'selected':'')+'>'+p+'</option>').join('')}
+                </select>
+              </div>
+              <div style="margin-bottom:8px">
+                <label class="form-label" style="font-size:11px">Project path</label>
+                <input type="text" id="settings-knowledge-project" class="form-input" value="${escapeHtml(cfg.knowledge_project_path || cfg.ccb_work_dir || '')}" placeholder="/path/to/project" style="width:100%">
+              </div>
+              <button type="button" class="btn" onclick="openKnowledgeViewer()" style="font-size:12px">View Knowledge</button>
+            </div>
+          </details>
+        </div>
+
         <div style="margin-bottom:12px" id="settings-roles-section">
           <label class="form-label">Role configuration (collab_context.md)</label>
           <div id="settings-roles-wrap" style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;${execMode === 'auto' ? 'opacity:0.6;pointer-events:none' : ''}">${rolesHtml}</div>
@@ -383,7 +406,10 @@ async function submitSettings() {
     default_judge: payloadJudge,
     default_coder_model: payloadCoderModel,
     default_judge_model: payloadJudgeModel,
-    use_wezterm_for_all
+    use_wezterm_for_all,
+    knowledge_enabled: document.getElementById('settings-knowledge-enabled')?.checked || false,
+    knowledge_provider: document.getElementById('settings-knowledge-provider')?.value || 'codex',
+    knowledge_project_path: (document.getElementById('settings-knowledge-project')?.value || '').trim()
   };
 
   try {
@@ -692,7 +718,7 @@ async function ccbStartProviders(providers) {
     return;
   }
 
-  if (notice) { notice.textContent = 'Starting ' + providers.join(', ') + '...'; notice.style.color = '#8b949e'; }
+  if (notice) { notice.textContent = 'Starting ' + providers.join(', ') + '... (waiting for session)'; notice.style.color = '#8b949e'; }
   try {
     const res = await fetch('/api/ccb/session/start', {
       method: 'POST',
@@ -721,7 +747,7 @@ async function ccbStartProviders(providers) {
       }, 1500);
     }
     // Poll status so cards update
-    [2000, 4000, 6000, 8000].forEach(ms => setTimeout(refreshCcbPanelContent, ms));
+    [2000, 4000, 6000, 8000, 12000, 16000].forEach(ms => setTimeout(refreshCcbPanelContent, ms));
   } catch (e) {
     if (notice) notice.textContent = '';
     alert(e?.message || 'Start failed');
@@ -2274,6 +2300,33 @@ async function onTaskTypeChange() {
   container.innerHTML = buildThresholdsUI(taskType, null);
 }
 
+// ── Three-Mode workflow toggle ───────────────────────────────────────────────
+let _currentWorkflowMode = 'solo';
+
+function setWorkflowMode(mode) {
+  _currentWorkflowMode = mode;
+  // Update toggle button highlights
+  ['single', 'solo', 'collab'].forEach(m => {
+    const btn = document.getElementById('mode-btn-' + m);
+    if (btn) btn.classList.toggle('btn-primary', m === mode);
+  });
+  // Show/hide sections based on mode
+  const showIf = (id, show) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = show ? '' : 'none';
+  };
+  showIf('section-adapter-grid', mode !== 'solo');
+  showIf('collab-config-wrap', mode === 'collab');
+  showIf('section-repo-git', mode !== 'single');
+  showIf('section-loop-config', mode === 'solo');
+  showIf('section-knowledge', mode !== 'single');
+  showIf('section-observation', mode === 'solo');
+  showIf('section-acceptance', mode !== 'solo');
+  showIf('section-channel-type', false);
+  showIf('section-execution-mode', false);
+  showIf('section-attempt-context', mode !== 'solo');
+}
+
 // A2-1: Open "New Task" modal (A6: apply saved default adapters when no template selected)
 async function openNewSpecModal() {
   await loadAdapters();
@@ -2362,13 +2415,12 @@ async function openNewSpecModal() {
         <h3 style="margin-top:0">New Task Spec</h3>
 
         <div style="margin-bottom:12px">
-          <label class="form-label">Template</label>
-          <select id="modal-template" class="form-select" onchange="applyTemplate()">
-            <option value="">— blank —</option>
-            <option value="hello_world">hello_world</option>
-            <option value="requirements_doc">requirements_doc</option>
-            <option value="engineering_impl">engineering_impl</option>
-          </select>
+          <label class="form-label">Workflow Mode</label>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="btn" id="mode-btn-single" onclick="setWorkflowMode('single')">Single Flow</button>
+            <button type="button" class="btn btn-primary" id="mode-btn-solo" onclick="setWorkflowMode('solo')">Solo Agent</button>
+            <button type="button" class="btn" id="mode-btn-collab" onclick="setWorkflowMode('collab')">Collab</button>
+          </div>
         </div>
 
         <div style="margin-bottom:12px">
@@ -2378,7 +2430,7 @@ async function openNewSpecModal() {
         </div>
 
         <div style="margin-bottom:12px">
-          <label class="form-label">Task Type (A4)</label>
+          <label class="form-label">Type</label>
           <select id="modal-task-type" class="form-select" onchange="onTaskTypeChange(); syncFormToJson()">
             <option value="">— none —</option>
             <option value="requirements_doc">requirements_doc</option>
@@ -2389,7 +2441,7 @@ async function openNewSpecModal() {
           </select>
         </div>
 
-        <div style="margin-bottom:12px">
+        <div id="section-attempt-context" style="margin-bottom:12px">
           <label class="form-label">Attempt context mode</label>
           <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch (divergent). iterative: n+1 gets previous coder output as context (convergent)." onchange="syncFormToJson()">
             <option value="fresh_each">fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
@@ -2397,7 +2449,7 @@ async function openNewSpecModal() {
           </select>
         </div>
 
-        <div style="margin-bottom:12px">
+        <div id="section-execution-mode" style="margin-bottom:12px;display:none">
           <label class="form-label">Execution mode (v3.3)</label>
           <select id="modal-execution-mode" class="form-select" style="width:auto" onchange="onExecutionModeChange()">
             <option value="auto" ${(defaultExecutionMode || 'auto') === 'auto' ? 'selected' : ''}>auto — 全自动无人介入</option>
@@ -2422,7 +2474,7 @@ async function openNewSpecModal() {
           </details>
         </div>
 
-        <div style="margin-bottom:12px">
+        <div id="section-channel-type" style="margin-bottom:12px;display:none">
           <label class="form-label">Execution channel (v3.3)</label>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <select id="adapter-channel-type" class="form-select" style="width:auto" onchange="onChannelTypeChange()">
@@ -2432,21 +2484,86 @@ async function openNewSpecModal() {
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-          <div>
-            <label class="form-label">Coder Adapter (A5)</label>
-            <div id="coder-adapter-selector">${buildAdapterSelector('coder', defaultCoder, defaultCoderModel, defaultChannel)}</div>
+        <div id="section-adapter-grid" style="margin-bottom:12px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+            <div>
+              <label class="form-label">Coder Adapter (A5)</label>
+              <div id="coder-adapter-selector">${buildAdapterSelector('coder', defaultCoder, defaultCoderModel, defaultChannel)}</div>
+            </div>
+            <div>
+              <label class="form-label">Judge Adapter (A5)</label>
+              <div id="judge-adapter-selector">${buildAdapterSelector('judge', defaultJudge, defaultJudgeModel, defaultChannel)}</div>
+            </div>
           </div>
-          <div>
-            <label class="form-label">Judge Adapter (A5)</label>
-            <div id="judge-adapter-selector">${buildAdapterSelector('judge', defaultJudge, defaultJudgeModel, defaultChannel)}</div>
+          <div style="margin-bottom:12px">
+            <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
           </div>
-        </div>
-        <div style="margin-bottom:12px">
-          <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
         </div>
 
-        <div class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <div id="section-loop-config" style="margin-bottom:12px;display:none">
+          <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+            <strong class="form-label">Agent Loop Config</strong>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
+              <div>
+                <label class="form-label" style="font-size:11px">Max iterations</label>
+                <input type="number" id="modal-max-iterations" class="form-input" value="10" min="1" max="100">
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">Auto-pass threshold</label>
+                <input type="number" id="modal-auto-pass-threshold" class="form-input" value="0.85" min="0" max="1" step="0.05">
+              </div>
+            </div>
+            <div style="margin-bottom:8px">
+              <label class="form-label" style="font-size:11px">Test command</label>
+              <input type="text" id="modal-test-cmd-solo" class="form-input" placeholder="bash run_tests.sh">
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <div>
+                <label class="form-label" style="font-size:11px">Approval mode</label>
+                <select id="modal-approval-mode" class="form-select">
+                  <option value="agent_decides">Agent decides when to exit</option>
+                  <option value="step2step">Step-by-step approval</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">Session strategy</label>
+                <select id="modal-session-strategy" class="form-select">
+                  <option value="continuous">Continuous session</option>
+                  <option value="fresh_per_step">Fresh session per step</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="section-observation" style="margin-bottom:12px;display:none">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="modal-open-terminal" checked>
+            <span class="form-label" style="display:inline;margin:0">Open agent terminal on start</span>
+          </label>
+        </div>
+
+        <div id="section-knowledge" style="margin-bottom:12px;display:none">
+          <details>
+            <summary class="form-label" style="cursor:pointer">Knowledge Settings</summary>
+            <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+              <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
+                <input type="checkbox" id="modal-knowledge-enabled" checked>
+                <span>Enable knowledge read/write</span>
+              </label>
+              <div style="margin-bottom:8px">
+                <label class="form-label" style="font-size:11px">Project path</label>
+                <input type="text" id="modal-knowledge-project" class="form-input" placeholder="/path/to/project">
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">Relevant shards (comma-separated)</label>
+                <input type="text" id="modal-knowledge-shards" class="form-input" placeholder="auth, api, frontend">
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div id="section-acceptance" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <strong class="form-label">需求与验收</strong>
           <div style="margin-top:8px">
             <label class="form-label" style="font-size:11px">instruction / goal <span style="color:#f85149">*</span></label>
@@ -2478,7 +2595,7 @@ async function openNewSpecModal() {
           </div>
         </div>
 
-        <div class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <div id="section-repo-git" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <strong class="form-label">Repo &amp; Git</strong>
           <div style="margin-top:8px">
             <label class="form-label" style="font-size:11px">repo_path (absolute path to git repo)</label>
@@ -2524,6 +2641,9 @@ async function openNewSpecModal() {
   onChannelTypeChange();
   refreshModelSelector('coder').catch(() => {});
   refreshModelSelector('judge').catch(() => {});
+
+  // Apply default workflow mode
+  setWorkflowMode('solo');
 
   // Store templates for use in applyTemplate
   window._specTemplates = TEMPLATES;
@@ -2735,6 +2855,34 @@ async function saveNewSpec() {
   if (spec.task_type) {
     const thresholds = readThresholdsFromUI(spec.task_type);
     if (thresholds) spec.rubric_thresholds = thresholds;
+  }
+
+  // workflow_mode (v4.0)
+  spec.workflow_mode = _currentWorkflowMode;
+  if (_currentWorkflowMode === 'single') {
+    spec.execution_mode = 'auto';
+  } else if (_currentWorkflowMode === 'solo') {
+    spec.execution_mode = 'auto';
+    spec.solo_config = {
+      max_iterations: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
+      approval_mode: document.getElementById('modal-approval-mode')?.value || 'agent_decides',
+      session_strategy: document.getElementById('modal-session-strategy')?.value || 'continuous',
+      auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
+      knowledge_shards: (document.getElementById('modal-knowledge-shards')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
+      open_terminal: document.getElementById('modal-open-terminal')?.checked || false
+    };
+    const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
+    if (testCmdSolo) spec.test_cmd = testCmdSolo;
+  } else if (_currentWorkflowMode === 'collab') {
+    spec.execution_mode = 'semi-auto';
+  }
+  // Knowledge settings for solo + collab
+  if (_currentWorkflowMode !== 'single') {
+    const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
+    if (knEnabled) {
+      spec.knowledge_enabled = true;
+      spec.knowledge_project_path = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+    }
   }
 
   try {
@@ -3260,6 +3408,226 @@ setInterval(refreshCurrentTaskMeta, 5000);
     if (taskId) selectTask(taskId);
   });
 })();
+
+// ── Solo Progress Panel ──────────────────────────────────────────────────────
+async function renderSoloProgress(taskId, attemptNum, container) {
+  try {
+    const data = await api(`/task/${encodeURIComponent(taskId)}/attempt/${attemptNum}/solo-steps`);
+    if (data.mode === 'not_solo' || !data.steps || data.steps.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    let html = '<div style="border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px;background:#0d1117">';
+    html += '<h4 style="margin-top:0;color:#58a6ff">Solo Agent Progress</h4>';
+    for (const step of data.steps) {
+      const isGoalMet = step.self_eval === 'goal_met';
+      const isPartial = step.self_eval === 'partial' || step.self_eval === 'progress';
+      const isFailed = step.self_eval === 'dead_loop';
+      const isInProgress = !step.has_response;
+      let icon = '\u25CB'; let color = '#8b949e';
+      if (isGoalMet) { icon = '\u2713'; color = '#3fb950'; }
+      else if (isPartial) { icon = '\u25D0'; color = '#d29922'; }
+      else if (isFailed) { icon = '\u2717'; color = '#f85149'; }
+      else if (isInProgress) { icon = '\u25CF'; color = '#58a6ff'; }
+      html += '<div style="margin-bottom:12px;padding:8px;border-left:3px solid ' + color + ';padding-left:12px">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center">';
+      html += '<strong style="color:' + color + '">' + icon + ' Step ' + (step.step + 1) + '/' + data.max_iterations + '</strong>';
+      if (step.self_eval) html += '<span style="font-size:11px;color:#8b949e">' + escapeHtml(step.self_eval) + (step.confidence ? ' (' + Math.round(step.confidence * 100) + '%)' : '') + '</span>';
+      html += '</div>';
+      if (step.summary) html += '<div style="font-size:12px;margin-top:4px;color:#c9d1d9">' + escapeHtml(step.summary.slice(0, 300)) + '</div>';
+      if (step.test_result) {
+        const t = step.test_result;
+        html += '<div style="font-size:11px;margin-top:4px;color:#8b949e">Tests: ' + (t.passed || 0) + '/' + (t.total || 0) + ' pass</div>';
+      }
+      if (step.files_modified && step.files_modified.length > 0) {
+        html += '<div style="font-size:11px;margin-top:4px;color:#8b949e">Files: ' + step.files_modified.map(f => escapeHtml(f)).join(', ') + '</div>';
+      }
+      html += '</div>';
+    }
+    html += '<div style="display:flex;gap:8px;margin-top:12px">';
+    html += '<button class="btn btn-danger write-action" style="font-size:12px" onclick="abortSoloAgent(\'' + escapeHtml(taskId) + '\',' + attemptNum + ')">Abort</button>';
+    html += '<button class="btn write-action" style="font-size:12px" onclick="proceedSoloStep(\'' + escapeHtml(taskId) + '\',' + attemptNum + ')">Proceed</button>';
+    html += '</div></div>';
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<div style="color:#f85149;font-size:12px">Failed to load solo progress: ' + escapeHtml(e?.message || 'unknown') + '</div>';
+  }
+}
+
+async function abortSoloAgent(taskId, attemptNum) {
+  if (!confirm('Abort the solo agent? This will terminate the current run.')) return;
+  try {
+    await fetch('/api/task/' + encodeURIComponent(taskId) + '/attempt/' + attemptNum + '/solo-abort', { method: 'POST' });
+    showFlash && showFlash('Solo agent abort signal sent', 'info');
+  } catch (e) {
+    alert('Failed to abort: ' + (e?.message || ''));
+  }
+}
+
+async function proceedSoloStep(taskId, attemptNum) {
+  const feedback = prompt('Optional feedback for next step (leave blank to just proceed):') || '';
+  try {
+    await fetch('/api/task/' + encodeURIComponent(taskId) + '/attempt/' + attemptNum + '/solo-proceed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback })
+    });
+    showFlash && showFlash('Proceed signal sent', 'info');
+  } catch (e) {
+    alert('Failed: ' + (e?.message || ''));
+  }
+}
+
+// ── Knowledge Viewer Modal ───────────────────────────────────────────────────
+let currentKnowledgeShard = null;
+
+async function openKnowledgeViewer() {
+  const old = document.getElementById('knowledge-modal');
+  if (old) old.remove();
+  const modalHtml = `
+    <div id="knowledge-modal" class="modal-overlay" onclick="if(event.target===this)closeKnowledgeViewer()">
+      <div class="modal-box" style="max-width:900px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
+        <h3 style="margin-top:0;flex-shrink:0">Knowledge Viewer</h3>
+        <div style="display:flex;flex:1;gap:12px;overflow:hidden;min-height:0">
+          <div id="knowledge-shard-list" style="width:180px;flex-shrink:0;overflow-y:auto;border-right:1px solid #30363d;padding-right:12px">
+            <div style="color:#8b949e;font-size:12px">Loading shards...</div>
+          </div>
+          <div id="knowledge-entry-panel" style="flex:1;overflow-y:auto">
+            <div style="color:#8b949e;font-size:12px">Select a shard to view entries.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-shrink:0">
+          <button class="btn" onclick="closeKnowledgeViewer()">Close</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  await loadKnowledgeShardList();
+}
+
+function closeKnowledgeViewer() {
+  const m = document.getElementById('knowledge-modal');
+  if (m) m.remove();
+}
+
+async function loadKnowledgeShardList() {
+  const wrap = document.getElementById('knowledge-shard-list');
+  if (!wrap) return;
+  try {
+    const data = await api('/knowledge/shards');
+    const shards = data.shards || {};
+    const names = Object.keys(shards).sort();
+    if (names.length === 0 && data.legacy) {
+      wrap.innerHTML = '<div style="font-size:12px;color:#d29922">Legacy knowledge_cache.json found. Run migration to use shards.</div>';
+      return;
+    }
+    if (names.length === 0) {
+      wrap.innerHTML = '<div style="font-size:12px;color:#8b949e">No shards yet.</div>';
+    } else {
+      wrap.innerHTML = names.map(n => {
+        const s = shards[n];
+        return '<div class="knowledge-shard-item" data-shard="'+escapeHtml(n)+'" onclick="selectKnowledgeShard(\''+escapeHtml(n)+'\')" style="padding:6px 8px;cursor:pointer;border-radius:4px;margin-bottom:4px;font-size:13px'+(currentKnowledgeShard===n?';background:#30363d':'')+'">'+escapeHtml(n)+' <span style="color:#8b949e;font-size:11px">('+escapeHtml(String(s.entry_count || 0))+')</span></div>';
+      }).join('');
+    }
+    wrap.innerHTML += '<div style="margin-top:8px"><button class="btn write-action" style="font-size:11px;width:100%" onclick="createKnowledgeShard()">+ New Shard</button></div>';
+  } catch (e) {
+    wrap.innerHTML = '<div style="font-size:12px;color:#f85149">'+escapeHtml(e?.message || 'Failed')+'</div>';
+  }
+}
+
+async function selectKnowledgeShard(name) {
+  currentKnowledgeShard = name;
+  await loadKnowledgeShardList();
+  const panel = document.getElementById('knowledge-entry-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="color:#8b949e;font-size:12px">Loading...</div>';
+  try {
+    const data = await api('/knowledge/shards/' + encodeURIComponent(name));
+    const entries = data.entries || {};
+    const keys = Object.keys(entries).sort();
+    let html = '<div style="margin-bottom:8px;display:flex;align-items:center;justify-content:space-between"><strong>'+escapeHtml(name)+'</strong> <span style="font-size:11px;color:#8b949e">'+escapeHtml(data.description||'')+'</span></div>';
+    if (keys.length === 0) {
+      html += '<div style="color:#8b949e;font-size:12px">No entries.</div>';
+    } else {
+      html += '<table style="width:100%;font-size:12px;border-collapse:collapse">';
+      html += '<thead><tr><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Key</th><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Type</th><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Summary</th><th style="padding:4px;border-bottom:1px solid #30363d;width:40px"></th></tr></thead><tbody>';
+      for (const k of keys) {
+        const e = entries[k];
+        html += '<tr data-key="'+escapeHtml(k)+'">';
+        html += '<td style="padding:4px;font-family:monospace;font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escapeHtml(k)+'">'+escapeHtml(k)+'</td>';
+        html += '<td style="padding:4px">'+escapeHtml(e.type||'')+'</td>';
+        html += '<td style="padding:4px;cursor:pointer" onclick="editKnowledgeEntry(\''+escapeHtml(name)+'\',\''+escapeHtml(k)+'\')" title="Click to edit">'+escapeHtml((e.summary||'').slice(0,120))+'</td>';
+        html += '<td style="padding:4px"><button class="btn btn-danger write-action" style="padding:1px 6px;font-size:10px" onclick="deleteKnowledgeEntry(\''+escapeHtml(name)+'\',\''+escapeHtml(k)+'\')">x</button></td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+    }
+    html += '<div style="margin-top:8px;display:flex;gap:8px"><button class="btn write-action" style="font-size:11px" onclick="addKnowledgeEntry(\''+escapeHtml(name)+'\')">+ Add Entry</button>';
+    html += '<button class="btn btn-danger write-action" style="font-size:11px" onclick="deleteKnowledgeShard(\''+escapeHtml(name)+'\')">Delete Shard</button></div>';
+    panel.innerHTML = html;
+  } catch (e) {
+    panel.innerHTML = '<div style="color:#f85149;font-size:12px">'+escapeHtml(e?.message||'Failed')+'</div>';
+  }
+}
+
+async function createKnowledgeShard() {
+  const name = prompt('Shard name (lowercase, alphanumeric, underscore, hyphen):');
+  if (!name || !/^[a-z0-9_-]+$/.test(name)) { if (name) alert('Invalid name'); return; }
+  const desc = prompt('Description (optional):') || '';
+  try {
+    await fetch('/api/knowledge/shards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, description: desc }) });
+    await loadKnowledgeShardList();
+    selectKnowledgeShard(name);
+  } catch (e) { alert(e?.message || 'Failed'); }
+}
+
+async function deleteKnowledgeShard(name) {
+  if (!confirm('Delete shard "'+name+'" and all its entries?')) return;
+  try {
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(name), { method: 'DELETE' });
+    currentKnowledgeShard = null;
+    await loadKnowledgeShardList();
+    document.getElementById('knowledge-entry-panel').innerHTML = '<div style="color:#8b949e;font-size:12px">Select a shard.</div>';
+  } catch (e) { alert(e?.message || 'Failed'); }
+}
+
+async function addKnowledgeEntry(shardName) {
+  const key = prompt('Entry key (e.g. src/auth.py or task:T01):');
+  if (!key) return;
+  const type = prompt('Type (file or task):', 'file') || 'file';
+  const summary = prompt('Summary:') || '';
+  try {
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, summary, written_by: 'manual', last_modified_at: new Date().toISOString() })
+    });
+    selectKnowledgeShard(shardName);
+  } catch (e) { alert(e?.message || 'Failed'); }
+}
+
+async function editKnowledgeEntry(shardName, key) {
+  const data = await api('/knowledge/shards/' + encodeURIComponent(shardName));
+  const entry = (data.entries || {})[key];
+  if (!entry) { alert('Entry not found'); return; }
+  const summary = prompt('Edit summary:', entry.summary || '');
+  if (summary === null) return;
+  entry.summary = summary;
+  entry.last_modified_at = new Date().toISOString();
+  try {
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry)
+    });
+    selectKnowledgeShard(shardName);
+  } catch (e) { alert(e?.message || 'Failed'); }
+}
+
+async function deleteKnowledgeEntry(shardName, key) {
+  if (!confirm('Delete entry "'+key+'"?')) return;
+  try {
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), { method: 'DELETE' });
+    selectKnowledgeShard(shardName);
+  } catch (e) { alert(e?.message || 'Failed'); }
+}
 
 // Initial load (K7-1: load health for read_only first so banner and button state are correct)
 loadHealth().then(() => {
