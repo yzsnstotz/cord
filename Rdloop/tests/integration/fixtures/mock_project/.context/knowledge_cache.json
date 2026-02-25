@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "project": "mock_project",
+  "last_updated": "2026-02-24T20:29:26Z",
+  "entries": {
+    "task:T01": {
+      "type": "task",
+      "title": "Mock task",
+      "design_rationale": "E2E",
+      "acceptance_criteria": [
+        "Pass"
+      ],
+      "written_by": "PM"
+    },
+    "src/auth.py": {
+      "type": "file",
+      "owner_task": "T01",
+      "summary": "JWT auth. verify_token().",
+      "interface_hash": "823213db",
+      "last_modified_by": "T01",
+      "last_modified_at": "2026-02-24T20:29:26Z",
+      "written_by": "executor"
+    }
+  }
+}

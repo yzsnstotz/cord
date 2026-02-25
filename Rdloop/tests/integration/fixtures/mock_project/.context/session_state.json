@@ -1,0 +1,28 @@
+{
+  "project": "mock_project",
+  "dev_root": "",
+  "goal": "E2E test for v3.0",
+  "current_actor": "test",
+  "tasks": [
+    {
+      "task_id": "T01",
+      "title": "Mock task",
+      "requirement_ref": "",
+      "status": "in_progress",
+      "assigned_to": null,
+      "acceptance_criteria": "Pass e2e",
+      "output_files": [],
+      "completed_at": null,
+      "notes": ""
+    }
+  ],
+  "session_history": [],
+  "shared_contracts": {
+    "src/auth.py": {
+      "owner_task": "T01",
+      "interface_hash": "abc123",
+      "dependents": []
+    }
+  },
+  "last_updated": "2026-02-25T00:00:00Z"
+}

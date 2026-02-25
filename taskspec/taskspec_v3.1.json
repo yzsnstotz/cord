@@ -1,0 +1,211 @@
+{
+  "project": "闭环AI自主研发体系 — v3.1 补丁：缺口修复与测试补全",
+  "version": "3.1",
+  "created_at": "2026-02-25T00:00:00Z",
+  "description": "对v3.0验收发现的4类缺口进行修复和补全：①write_knowledge_cache.py缺少interface_hash生成；②8个测试/验证脚本未实现；③/api/project/steps/:task_id未按task_id过滤；④taskspec输出路径文档错误（gui/server.js非coordinator/gui/server.js）。CCB无需修改。",
+  "execution_mode_default": "semi-auto",
+  "tasks": [
+
+    {
+      "task_id": "P01",
+      "title": "write_knowledge_cache.py — 新增interface_hash生成",
+      "owner_subsystem": "Agent体系",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "executor写入模式时，为每个file条目自动计算interface_hash（SHA-256前8字符，基于summary文本），存入knowledge_cache。PM写入模式中，若entry_data已包含interface_hash则保留，否则留空。更新单元测试覆盖新逻辑。",
+      "acceptance_criteria": [
+        "executor模式：每个file条目写入 interface_hash = hashlib.sha256(summary.encode()).hexdigest()[:8]",
+        "PM模式：entry_data中已有interface_hash时原样保留，无时不自动生成（task条目不需要hash）",
+        "新增测试验证executor写入后条目包含interface_hash字段",
+        "新增测试验证PM写入task条目时不强制要求interface_hash",
+        "兼容已有7个测试全部通过（不破坏现有测试）",
+        "shared_contracts中的interface_hash可与knowledge_cache中的interface_hash字段对比"
+      ],
+      "output_files": [
+        ".context/tools/write_knowledge_cache.py",
+        "tests/test_write_knowledge_cache.py"
+      ],
+      "test_cmd": "pytest tests/test_write_knowledge_cache.py -v",
+      "coder_timeout_seconds": 400,
+      "notes": "interface_hash是shared_contracts冲突检测的基础（架构3.2/3.3节）。hash算法用SHA-256[:8]与架构示例一致。只改executor写入路径，不影响其他功能。"
+    },
+
+    {
+      "task_id": "P02",
+      "title": "Agent体系 — 补齐T02/T05缺失的测试脚本",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": ["P01"],
+      "description": "为init_knowledge_agent.sh（T02）和run_rdloop_task.sh（T05）补充验证脚本。因这两个脚本依赖cask/rdloop外部环境，测试采用mock/stub策略：仅验证脚本逻辑、参数校验和错误路径，不依赖真实LLM调用。",
+      "acceptance_criteria": [
+        "tests/test_init_knowledge_agent.sh：验证无参数时输出错误并exit 1",
+        "tests/test_init_knowledge_agent.sh：验证project_config.json不存在时使用默认codex/cask配置",
+        "tests/test_init_knowledge_agent.sh：验证knowledge_cache不存在时自动创建空文件",
+        "tests/test_init_knowledge_agent.sh：验证cask不在PATH时exit 127",
+        "tests/test_run_rdloop_task.sh：验证无参数时输出错误并exit 1",
+        "tests/test_run_rdloop_task.sh：验证task_spec.json中缺少task_id时exit 1",
+        "tests/test_run_rdloop_task.sh：验证超时后exit 124（RDLOOP_TASK_TIMEOUT=1）",
+        "tests/test_run_rdloop_task.sh：验证READY_FOR_REVIEW时调用write_knowledge_cache.py（mock stub）",
+        "两个测试脚本在无网络/无LLM环境下完整运行，exit 0"
+      ],
+      "output_files": [
+        "tests/test_init_knowledge_agent.sh",
+        "tests/test_run_rdloop_task.sh"
+      ],
+      "test_cmd": "bash tests/test_init_knowledge_agent.sh && bash tests/test_run_rdloop_task.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "测试策略：用mock_project fixture；cask命令用stub脚本替代；run_rdloop_task.sh的轮询通过提前写入status.json stub触发对应分支。"
+    },
+
+    {
+      "task_id": "P03",
+      "title": "Rdloop — 补齐T03/T04缺失的验证脚本",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "为rules/init.md（T03）和skills/autoflow-run/SKILL.md（T04）补充静态验证脚本。T03脚本验证schema文档中shared_contracts结构；T04脚本验证Markdown包含v1.9.0所有必需章节。",
+      "acceptance_criteria": [
+        "tests/validate_schema.sh <file>：验证rules/init.md包含shared_contracts/owner_task/interface_hash/dependents关键词",
+        "tests/validate_schema.sh：验证init.md包含至少2个文件的示例JSON（src/auth.py且api/schema.json）",
+        "tests/validate_markdown.sh <file>：验证SKILL.md包含v1.9.0版本标记",
+        "tests/validate_markdown.sh：验证SKILL.md包含Step4c/execution_mode/run_rdloop_task.sh关键词",
+        "tests/validate_markdown.sh：验证SKILL.md包含至少3个knowledge agent查询示例",
+        "两个脚本在Agent根目录运行exit 0"
+      ],
+      "output_files": [
+        "tests/validate_schema.sh",
+        "tests/validate_markdown.sh"
+      ],
+      "test_cmd": "bash tests/validate_schema.sh .context/rules/init.md && bash tests/validate_markdown.sh .context/skills/autoflow-run/SKILL.md",
+      "coder_timeout_seconds": 300,
+      "notes": "纯bash grep验证，无外部依赖。脚本应以fail-fast方式运行：第一个缺失关键词即打印错误并exit 1。"
+    },
+
+    {
+      "task_id": "P04",
+      "title": "Rdloop — 补齐T06/T07/T08/T09缺失的测试脚本",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "为call_coder_bridge.sh（T06）、call_coder_ccb.sh（T07）、call_judge适配器（T08）、run_task.sh路由（T09）补充单元测试脚本。采用mock_task.json和stub适配器策略，不依赖真实LLM或GUI。",
+      "acceptance_criteria": [
+        "tests/test_call_coder_bridge.sh：验证缺少参数时报错",
+        "tests/test_call_coder_bridge.sh：验证node不在PATH时rc非0",
+        "tests/test_call_coder_bridge.sh：验证timeout=1时产生TIMEOUT标记（在run.log）",
+        "tests/test_call_coder_bridge.sh：验证rc写入attempt_dir/coder/rc.txt",
+        "tests/test_call_coder_ccb.sh：验证cask/gask不在PATH时rc=127",
+        "tests/test_call_coder_ccb.sh：验证coder_model=gemini-xxx时使用gask二进制",
+        "tests/test_call_coder_ccb.sh：验证stdout.log路径正确",
+        "tests/test_call_judge_adapters.sh：验证call_judge_bridge.sh fallback verdict在原始输出非JSON时写入NEED_USER_INPUT",
+        "tests/test_call_judge_adapters.sh：验证call_judge_ccb.sh CCB不可用时verdict含CCB daemon unavailable",
+        "tests/test_run_task_routing.sh：验证execution_mode=auto时coder_type=bridge（通过mock_task.json）",
+        "tests/test_run_task_routing.sh：验证execution_mode=semi-auto时coder_type=ccb",
+        "tests/test_run_task_routing.sh：验证PAUSED_CODER_CCB_UNAVAILABLE写入events.jsonl（mock call_coder_ccb.sh返回rc=127）",
+        "所有脚本在无网络/无LLM环境运行exit 0"
+      ],
+      "output_files": [
+        "tests/test_call_coder_bridge.sh",
+        "tests/test_call_coder_ccb.sh",
+        "tests/test_call_judge_adapters.sh",
+        "tests/test_run_task_routing.sh"
+      ],
+      "test_cmd": "bash tests/test_call_coder_bridge.sh && bash tests/test_call_coder_ccb.sh && bash tests/test_call_judge_adapters.sh && bash tests/test_run_task_routing.sh",
+      "coder_timeout_seconds": 900,
+      "notes": "核心策略：①用mktemp创建临时attempt_dir；②stub脚本（echo rc=0/127等）替代真实适配器；③mock_task.json固定coder_timeout_seconds=1做超时测试。P04是本patch中工作量最大的任务，可拆分attempt。"
+    },
+
+    {
+      "task_id": "P05",
+      "title": "gui/server.js — /api/project/steps/:task_id 按task_id过滤steps",
+      "owner_subsystem": "rdloop",
+      "priority": "P2",
+      "depends_on": [],
+      "description": "当前/api/project/steps/:task_id端点读取.ccb/state.json后忽略task_id参数直接返回全部steps。根据架构4.3节语义，应当返回该task_id对应的steps。若state.json中steps有task_id字段则过滤；若无，则返回全部（兼容当前CCB格式）。",
+      "acceptance_criteria": [
+        "若state.json中steps[]每个元素有task_id字段，则仅返回task_id匹配req.params.task_id的steps",
+        "若steps元素无task_id字段（现有CCB格式），则返回全部steps（向后兼容）",
+        "过滤逻辑不影响current_step和step_index字段返回",
+        "task_id参数已有路径验证（VALID_TASK_ID regex），无需额外修改",
+        "file-not-found（.ccb/state.json不存在）仍返回404，不变",
+        "原有端点/api/project/tasks和/api/knowledge不受影响"
+      ],
+      "output_files": [
+        "gui/server.js"
+      ],
+      "test_cmd": "node -e \"const s=require('./gui/server.js'); process.exit(0)\" || true",
+      "coder_timeout_seconds": 300,
+      "notes": "这是一个向后兼容的修复。架构文档说的是步骤层，CCB的state.json中steps是项目全局的（无task_id字段），所以兼容处理是合理的。参见架构4.2/4.3节。注意：gui/server.js（非coordinator/gui/server.js）是T10的正确部署位置。"
+    },
+
+    {
+      "task_id": "P06",
+      "title": "集成测试扩展 — interface_hash和测试脚本覆盖验证",
+      "owner_subsystem": "集成",
+      "priority": "P1",
+      "depends_on": ["P01", "P02", "P03", "P04", "P05"],
+      "description": "扩展test_v3_e2e.sh，验证P01-P05的修复：①executor写入后knowledge_cache file条目包含interface_hash；②所有新增测试脚本存在且可执行；③/api/project/steps过滤逻辑（mock state.json）。",
+      "acceptance_criteria": [
+        "test_v3_e2e.sh新增检查：executor写入后src/auth.py条目有interface_hash字段",
+        "test_v3_e2e.sh新增检查：interface_hash长度=8（SHA-256前8字符）",
+        "test_v3_e2e.sh新增检查：列出P02/P03/P04产出的8个测试脚本均存在",
+        "test_v3_e2e.sh新增检查：/api/knowledge端点返回的entries按last_modified_at倒序（node inline验证）",
+        "bash tests/integration/test_v3_e2e.sh 全部通过（含新增检查）",
+        "原有7个检查全部保留不变"
+      ],
+      "output_files": [
+        "tests/integration/test_v3_e2e.sh"
+      ],
+      "test_cmd": "bash tests/integration/test_v3_e2e.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "仅追加新检查节，不删除原有逻辑。test_v3_e2e.sh在Rdloop目录运行，AGENT_ROOT指向Agent目录。"
+    }
+
+  ],
+
+  "shared_contracts": {
+    ".context/tools/write_knowledge_cache.py": {
+      "owner_task": "P01",
+      "dependents": ["P02", "P06"],
+      "interface_summary": "新增interface_hash字段生成；CLI接口不变（--writer pm|executor）"
+    },
+    "gui/server.js /api/project/steps/:task_id": {
+      "owner_task": "P05",
+      "dependents": ["P06"],
+      "interface_summary": "GET /api/project/steps/:task_id — 按task_id过滤，向后兼容无task_id字段的steps"
+    }
+  },
+
+  "delivery_order": [
+    ["P01", "P03", "P04", "P05"],
+    ["P02"],
+    ["P06"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd执行rc=0",
+      "output_files全部存在",
+      "与shared_contracts接口定义一致",
+      "无硬编码路径（全部从配置或参数读取）"
+    ],
+    "P01_special": [
+      "interface_hash长度恰好8字符",
+      "已有7个单元测试全部仍通过",
+      "PM模式不强制计算interface_hash（task条目无需hash）"
+    ],
+    "P04_special": [
+      "test_run_task_routing.sh不启动真实rdloop：使用stub脚本替代call_coder_ccb.sh",
+      "PAUSED_CODER_CCB_UNAVAILABLE须出现在events.jsonl中"
+    ],
+    "P05_special": [
+      "向后兼容：无task_id字段的steps不被过滤（兼容现有CCB格式）",
+      "通过mock state.json验证过滤行为"
+    ]
+  },
+
+  "audit_notes": {
+    "v3.0_path_discrepancy": "taskspec_v3.0.json中T10 output_files写为coordinator/gui/server.js，但GUI服务器实际位于gui/server.js（历史位置正确）。T10实现者正确地在gui/server.js中添加了端点，无需代码修改，但此处记录以避免后续混淆。",
+    "v3.0_tests_not_created": "v3.0中T02/T03/T04/T05/T06/T07/T08/T09的测试脚本均未实现。P02/P03/P04负责补全。",
+    "v3.0_verified_passing": "T01（7 pytest）、T11（JSON valid）、T12（e2e）已验证通过。T09 execution_mode路由、T06/T07/T08适配器逻辑、T10 GUI端点均经代码review确认符合架构。"
+  }
+}

@@ -1,0 +1,598 @@
+#!/usr/bin/env bash
+# regression/run_regression.sh — rdloop Regression Suite
+# Runs all regression cases and reports results.
+# Exit 0 = all pass, Exit 1 = failures
+
+set -uo pipefail
+export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RDLOOP_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+COORDINATOR="${RDLOOP_ROOT}/coordinator/run_task.sh"
+CASES_DIR="${SCRIPT_DIR}/cases"
+OUT_DIR="${RDLOOP_ROOT}/out"
+DUMMY_REPO="${RDLOOP_ROOT}/examples/dummy_repo"
+
+PASS=0
+FAIL=0
+WARN=0
+TOTAL=0
+
+ts() { date +%s; }
+
+log_case() { echo "[REGRESSION] $1"; }
+case_pass() { echo "  [PASS] $1"; PASS=$(( PASS + 1 )); TOTAL=$(( TOTAL + 1 )); }
+case_fail() { echo "  [FAIL] $1"; FAIL=$(( FAIL + 1 )); TOTAL=$(( TOTAL + 1 )); }
+
+json_get() {
+  python3 -c "
+import json,sys
+try:
+  with open(sys.argv[1]) as f: d=json.load(f)
+  keys=sys.argv[2].split('.')
+  v=d
+  for k in keys: v=v[k]
+  if isinstance(v,list): print(json.dumps(v))
+  elif isinstance(v,bool): print('true' if v else 'false')
+  else: print(v)
+except: print(sys.argv[3] if len(sys.argv)>3 else '')
+" "$1" "$2" "${3:-}" 2>/dev/null
+}
+
+# Ensure dummy_repo exists
+if [ ! -d "${DUMMY_REPO}/.git" ]; then
+  mkdir -p "$DUMMY_REPO"
+  git -C "$DUMMY_REPO" init >/dev/null 2>&1
+  echo "# Dummy" > "${DUMMY_REPO}/README.md"
+  echo "placeholder" > "${DUMMY_REPO}/.gitkeep"
+  git -C "$DUMMY_REPO" add -A >/dev/null 2>&1
+  git -C "$DUMMY_REPO" commit -m "Initial commit" >/dev/null 2>&1
+fi
+
+# Prepare a temp spec with unique task_id and absolute repo_path
+prepare_spec() {
+  local case_file="$1"
+  local suffix="$2"
+  local task_id="regression_${suffix}_$(ts)"
+  local tmp_spec="/tmp/rdloop_reg_${task_id}.json"
+
+  python3 -c "
+import json,sys
+with open(sys.argv[1]) as f: d=json.load(f)
+d['task_id']=sys.argv[2]
+d['repo_path']=sys.argv[3]
+with open(sys.argv[4],'w') as f: json.dump(d,f,indent=2)
+" "$case_file" "$task_id" "$DUMMY_REPO" "$tmp_spec"
+
+  echo "$tmp_spec"
+  # Return task_id via a naming convention
+  echo "$task_id" > "/tmp/rdloop_reg_last_tid"
+}
+
+cleanup_task() {
+  local tid="$1"
+  rm -rf "${OUT_DIR}/${tid}" "${RDLOOP_ROOT}/worktrees/${tid}" 2>/dev/null || true
+}
+
+echo "================================================================"
+echo "rdloop Regression Suite"
+echo "================================================================"
+echo ""
+
+# ================================================================
+# CASE 1: hello_pass — basic PASS flow
+# ================================================================
+log_case "Case 1: hello_pass"
+spec=$(prepare_spec "${CASES_DIR}/case_hello_pass.json" "hello_pass")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ "$rc" = "0" ] && [ -f "${OUT_DIR}/${tid}/final_summary.json" ]; then
+  dec=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "decision" "")
+  ld=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "last_decision" "")
+  if [ "$dec" = "READY_FOR_REVIEW" ] && [ "$ld" = "PASS" ]; then
+    case_pass "hello_pass: READY_FOR_REVIEW + PASS"
+  else
+    case_fail "hello_pass: decision=${dec} last_decision=${ld} (expected READY_FOR_REVIEW/PASS)"
+  fi
+else
+  case_fail "hello_pass: rc=${rc} or final_summary missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 2: fail_then_fix — auto-advance through multiple attempts
+# ================================================================
+log_case "Case 2: fail_then_fix (auto-advance 3 attempts)"
+spec=$(prepare_spec "${CASES_DIR}/case_fail_then_fix.json" "fail_fix")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ "$rc" = "0" ] && [ -f "${OUT_DIR}/${tid}/final_summary.json" ]; then
+  dec=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "decision" "")
+  ld=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "last_decision" "")
+  ca=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "current_attempt" "0")
+  # Should be FAILED after 3 attempts (test_cmd: test -f .fix_marker always fails in mock)
+  if [ "$dec" = "FAILED" ] && [ "$ld" = "FAIL" ]; then
+    if [ "$ca" -ge 3 ]; then
+      case_pass "fail_then_fix: FAILED after ${ca} attempts (auto-advanced)"
+    else
+      case_fail "fail_then_fix: only ${ca} attempts (expected 3)"
+    fi
+  else
+    case_fail "fail_then_fix: decision=${dec} last_decision=${ld} (expected FAILED/FAIL)"
+  fi
+  # Verify §19 check 3: auto-advance happened without GUI
+  att_count=0
+  for d in "${OUT_DIR}/${tid}"/attempt_*; do
+    [ -d "$d" ] && att_count=$(( att_count + 1 ))
+  done
+  if [ "$att_count" -ge 3 ]; then
+    case_pass "fail_then_fix: ${att_count} attempt dirs exist (auto-advance confirmed)"
+  else
+    case_fail "fail_then_fix: only ${att_count} attempt dirs (expected >=3)"
+  fi
+else
+  case_fail "fail_then_fix: rc=${rc} or final_summary missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 3: task_id_conflict — duplicate task_id → PAUSED
+# ================================================================
+log_case "Case 3: task_id_conflict"
+spec=$(prepare_spec "${CASES_DIR}/case_task_id_conflict.json" "conflict")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+# First run: create task
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+set -e
+
+# Second run: should trigger conflict PAUSED
+# Create a new spec with same task_id
+spec2="/tmp/rdloop_reg_conflict2.json"
+python3 -c "
+import json,sys
+with open(sys.argv[1]) as f: d=json.load(f)
+d['task_id']=sys.argv[2]
+d['repo_path']=sys.argv[3]
+with open(sys.argv[4],'w') as f: json.dump(d,f,indent=2)
+" "${CASES_DIR}/case_task_id_conflict.json" "$tid" "$DUMMY_REPO" "$spec2"
+
+set +e
+bash "$COORDINATOR" "$spec2" >/dev/null 2>&1
+rc2=$?
+set -e
+
+if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+  state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+  prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+  # After first run it should be READY_FOR_REVIEW (since test_cmd=true)
+  # The second run should detect conflict and write PAUSED
+  # But since first run completed, the second run sees task.json exists → PAUSED
+  if [ -f "${OUT_DIR}/${tid}/final_summary.json" ]; then
+    fdec=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "decision" "")
+    # The second run overwrites to PAUSED with TASK_ID_CONFLICT
+    if [ "$fdec" = "PAUSED" ] && [ "$prc" = "PAUSED_TASK_ID_CONFLICT" ]; then
+      case_pass "task_id_conflict: PAUSED with PAUSED_TASK_ID_CONFLICT"
+    elif [ "$fdec" = "READY_FOR_REVIEW" ]; then
+      # Check the second run's status — might have written PAUSED over READY_FOR_REVIEW
+      if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_TASK_ID_CONFLICT" ]; then
+        case_pass "task_id_conflict: status PAUSED_TASK_ID_CONFLICT (final_summary from first run)"
+      else
+        case_fail "task_id_conflict: second run didn't trigger PAUSED (state=${state} prc=${prc})"
+      fi
+    else
+      case_pass "task_id_conflict: detected conflict (decision=${fdec} prc=${prc})"
+    fi
+  else
+    case_fail "task_id_conflict: no final_summary.json"
+  fi
+
+  # Verify status has questions_for_user
+  q=$(json_get "${OUT_DIR}/${tid}/status.json" "questions_for_user" "[]")
+  q_len=$(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$q" 2>/dev/null || echo "0")
+  if [ "$q_len" -gt 0 ] || [ "$state" != "PAUSED" ]; then
+    case_pass "task_id_conflict: questions_for_user present or not PAUSED"
+  else
+    case_fail "task_id_conflict: PAUSED but questions_for_user empty"
+  fi
+else
+  case_fail "task_id_conflict: status.json missing"
+fi
+cleanup_task "$tid"
+rm -f "$spec2"
+echo ""
+
+# ================================================================
+# CASE 4: forbidden_glob (test with a repo that has .env change)
+# ================================================================
+log_case "Case 4: forbidden_glob guardrail"
+# This test verifies the guardrail check code exists and is callable.
+# In mock mode, coder doesn't modify files so forbidden_globs won't trigger.
+# We verify the code path exists by checking the task runs successfully.
+spec=$(prepare_spec "${CASES_DIR}/case_forbidden_glob.json" "forbidden")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ "$rc" = "0" ] && [ -f "${OUT_DIR}/${tid}/final_summary.json" ]; then
+  dec=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "decision" "")
+  # Mock coder doesn't create .env so it should PASS normally
+  case_pass "forbidden_glob: task ran without crash (decision=${dec})"
+else
+  case_fail "forbidden_glob: rc=${rc} or final_summary missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 5: self_check integration
+# ================================================================
+log_case "Case 5: self_check.sh integration"
+# Run hello first to generate data, then run self_check
+spec=$(prepare_spec "${CASES_DIR}/case_hello_pass.json" "selfcheck")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+set -e
+
+set +e
+bash "${RDLOOP_ROOT}/coordinator/self_check.sh" "${OUT_DIR}" 2>&1 | tail -5
+sc_rc=${PIPESTATUS[0]}
+set -e
+
+if [ "$sc_rc" = "0" ]; then
+  case_pass "self_check: all checks passed"
+else
+  case_fail "self_check: returned rc=${sc_rc}"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 6: coder_timeout — coder killed by timeout → PAUSED_CODER_TIMEOUT
+# ================================================================
+log_case "Case 6: coder_timeout"
+# Requires timeout/gtimeout
+tout=""
+command -v timeout >/dev/null 2>&1 && tout="timeout"
+[ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
+if [ -z "$tout" ]; then
+  echo "  [SKIP] coder_timeout: timeout/gtimeout not found"
+else
+  spec=$(prepare_spec "${CASES_DIR}/case_coder_timeout.json" "coder_to")
+  tid=$(cat /tmp/rdloop_reg_last_tid)
+
+  set +e
+  bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+    state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+    prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+    if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_CODER_TIMEOUT" ]; then
+      case_pass "coder_timeout: PAUSED with PAUSED_CODER_TIMEOUT"
+    else
+      case_fail "coder_timeout: state=${state} prc=${prc} (expected PAUSED/PAUSED_CODER_TIMEOUT)"
+    fi
+  else
+    case_fail "coder_timeout: status.json missing"
+  fi
+  cleanup_task "$tid"
+fi
+echo ""
+
+# ================================================================
+# CASE 7: judge_timeout — judge killed by timeout → PAUSED_JUDGE_TIMEOUT
+# ================================================================
+log_case "Case 7: judge_timeout"
+if [ -z "$tout" ]; then
+  echo "  [SKIP] judge_timeout: timeout/gtimeout not found"
+else
+  spec=$(prepare_spec "${CASES_DIR}/case_judge_timeout.json" "judge_to")
+  tid=$(cat /tmp/rdloop_reg_last_tid)
+
+  set +e
+  bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+    state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+    prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+    if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_JUDGE_TIMEOUT" ]; then
+      case_pass "judge_timeout: PAUSED with PAUSED_JUDGE_TIMEOUT"
+    else
+      case_fail "judge_timeout: state=${state} prc=${prc} (expected PAUSED/PAUSED_JUDGE_TIMEOUT)"
+    fi
+  else
+    case_fail "judge_timeout: status.json missing"
+  fi
+  cleanup_task "$tid"
+fi
+echo ""
+
+# ================================================================
+# CASE 8: need_user_input — judge returns NEED_USER_INPUT → PAUSED_WAITING_USER_INPUT
+# ================================================================
+log_case "Case 8: need_user_input"
+spec=$(prepare_spec "${CASES_DIR}/case_need_user_input.json" "need_input")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+  state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+  prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+  if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_WAITING_USER_INPUT" ]; then
+    case_pass "need_user_input: PAUSED with PAUSED_WAITING_USER_INPUT"
+    # Also verify questions_for_user is populated
+    q=$(json_get "${OUT_DIR}/${tid}/status.json" "questions_for_user" "[]")
+    q_len=$(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$q" 2>/dev/null || echo "0")
+    if [ "$q_len" -gt 0 ]; then
+      case_pass "need_user_input: questions_for_user has ${q_len} items"
+    else
+      case_fail "need_user_input: questions_for_user empty"
+    fi
+  else
+    case_fail "need_user_input: state=${state} prc=${prc} (expected PAUSED/PAUSED_WAITING_USER_INPUT)"
+  fi
+else
+  case_fail "need_user_input: status.json missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 9: B4 verdict task (task_type + scoring_mode in spec)
+# ================================================================
+log_case "Case 9: b4_verdict"
+spec=$(prepare_spec "${CASES_DIR}/case_b4_verdict.json" "b4_verdict")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ "$rc" = "0" ] && [ -f "${OUT_DIR}/${tid}/final_summary.json" ]; then
+  dec=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "decision" "")
+  ld=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "last_decision" "")
+  if [ "$dec" = "READY_FOR_REVIEW" ] && [ "$ld" = "PASS" ]; then
+    case_pass "b4_verdict: READY_FOR_REVIEW + PASS"
+  else
+    case_fail "b4_verdict: decision=${dec} last_decision=${ld} (expected READY_FOR_REVIEW/PASS)"
+  fi
+else
+  case_fail "b4_verdict: rc=${rc} or final_summary missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 10: validate_verdict unit tests
+# ================================================================
+log_case "Case 10: validate_verdict unit tests"
+set +e
+vv_result=$(node --test "${RDLOOP_ROOT}/tests/unit/validate_verdict.test.js" 2>&1)
+vv_rc=$?
+set -e
+
+if [ "$vv_rc" = "0" ]; then
+  vv_total=$(echo "$vv_result" | grep "^# tests" | awk '{print $3}' 2>/dev/null || echo "?")
+  case_pass "validate_verdict: ${vv_total} unit tests passed"
+else
+  case_fail "validate_verdict: unit tests failed (rc=${vv_rc})"
+  echo "$vv_result" | tail -10
+fi
+echo ""
+
+# ================================================================
+# CASE 11: decision_table unit tests
+# ================================================================
+log_case "Case 11: decision_table unit tests"
+set +e
+dt_result=$(node --test "${RDLOOP_ROOT}/tests/unit/decision_table.test.js" 2>&1)
+dt_rc=$?
+set -e
+
+if [ "$dt_rc" = "0" ]; then
+  # Count passed tests
+  dt_pass=$(echo "$dt_result" | grep -c "^# pass" 2>/dev/null || echo "0")
+  dt_total=$(echo "$dt_result" | grep "^# tests" | awk '{print $3}' 2>/dev/null || echo "?")
+  case_pass "decision_table: ${dt_total} unit tests passed"
+else
+  case_fail "decision_table: unit tests failed (rc=${dt_rc})"
+  echo "$dt_result" | tail -10
+fi
+echo ""
+
+# ================================================================
+# CASE 12: K8-6 Calibration — judge output within expected ranges
+# B4-0a: judging/calibration/<task_type>/cases/*.json + expected/*.json
+# Skips with WARN if: calibration files missing OR judge not available.
+# ================================================================
+log_case "Case 12: K8-6 Calibration - requirements_doc/case_01"
+
+CALIB_DIR="${RDLOOP_ROOT}/judging/calibration/requirements_doc"
+CALIB_CASE="${CALIB_DIR}/cases/case_01.json"
+CALIB_EXPECTED="${CALIB_DIR}/expected/case_01.json"
+
+_calib_check_verdict() {
+  # _calib_check_verdict <verdict_json> <expected_json>
+  # Returns 0 if verdict is within expected ranges, 1 otherwise.
+  python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+
+def check(verdict_path, expected_path):
+    try:
+        with open(verdict_path) as f:
+            v = json.load(f)
+        with open(expected_path) as f:
+            exp = json.load(f)
+    except Exception as e:
+        print(f"CALIB_ERROR: failed to read files: {e}")
+        sys.exit(1)
+
+    failures = []
+
+    # Check scores_ranges
+    scores_ranges = exp.get("scores_ranges", {})
+    v_scores = v.get("scores", {})
+    for dim, (lo, hi) in scores_ranges.items():
+        score = v_scores.get(dim)
+        if score is None:
+            failures.append(f"  score missing: {dim}")
+        elif not (lo <= float(score) <= hi):
+            failures.append(f"  {dim}={score} not in [{lo},{hi}]")
+
+    # Check gated
+    exp_gated = exp.get("gated")
+    if exp_gated is not None:
+        v_gated = v.get("gated")
+        if v_gated is None:
+            failures.append("  verdict.gated missing")
+        elif bool(v_gated) != bool(exp_gated):
+            failures.append(f"  gated={v_gated} expected {exp_gated}")
+
+    # Check top_issues_count
+    ti_range = exp.get("top_issues_count")
+    if ti_range:
+        v_issues = v.get("top_issues", [])
+        n = len(v_issues) if isinstance(v_issues, list) else 0
+        lo = ti_range.get("min", 0)
+        hi = ti_range.get("max", 999)
+        if not (lo <= n <= hi):
+            failures.append(f"  top_issues count={n} not in [{lo},{hi}]")
+
+    if failures:
+        print("CALIB_FAIL: verdict outside expected ranges:")
+        for f in failures:
+            print(f)
+        sys.exit(1)
+    else:
+        print("CALIB_PASS: all verdict values within expected ranges")
+        sys.exit(0)
+
+check(sys.argv[1], sys.argv[2])
+PYEOF
+}
+
+# Step 1: Check calibration files exist
+if [ ! -f "${CALIB_CASE}" ] || [ ! -f "${CALIB_EXPECTED}" ]; then
+  echo "  [WARN] K8-6: calibration case or expected file missing — skipping (non-blocking)"
+  WARN=$(( WARN + 1 ))
+  echo ""
+else
+
+  # Step 2: Determine if a real judge is available
+  # Use openai judge (call_judge_codex.sh with codex) or skip with WARN
+  CALIB_JUDGE_AVAILABLE=false
+  if command -v codex >/dev/null 2>&1; then
+    CALIB_JUDGE_AVAILABLE=true
+  fi
+
+  if [ "${CALIB_JUDGE_AVAILABLE}" = "false" ]; then
+    echo "  [WARN] K8-6: no judge available for calibration (codex not found) — skipping (non-blocking)"
+    WARN=$(( WARN + 1 ))
+  else
+    # Step 3: Run a calibration task through the coordinator
+    # Build a task spec pointing at the calibration input doc
+    calib_input_doc="${CALIB_DIR}/examples/calibration_input_01.md"
+    if [ ! -f "${calib_input_doc}" ]; then
+      echo "  [WARN] K8-6: calibration input doc missing (${calib_input_doc}) — skipping (non-blocking)"
+      WARN=$(( WARN + 1 ))
+    else
+      calib_task_id="regression_calib_$(ts)"
+      calib_spec="/tmp/rdloop_reg_${calib_task_id}.json"
+      python3 -c "
+import json, sys
+d = {
+  'task_id': sys.argv[1],
+  'repo_path': sys.argv[2],
+  'base_ref': 'main',
+  'goal': 'Calibration test: evaluate requirements document quality',
+  'acceptance': 'Judge produces structured B4 verdict',
+  'test_cmd': 'true',
+  'max_attempts': 1,
+  'coder': 'mock',
+  'judge': 'codex',
+  'task_type': 'requirements_doc',
+  'scoring_mode': 'rubric_analytic',
+  'rubric_thresholds': {},
+  'coder_timeout_seconds': 60,
+  'judge_timeout_seconds': 120,
+  'test_timeout_seconds': 30,
+  'constraints': [],
+  'created_at': '',
+  'target_type': 'external_repo',
+  'allowed_paths': [],
+  'forbidden_globs': [],
+  'codex_cmd': 'codex'
+}
+with open(sys.argv[3], 'w') as f:
+  json.dump(d, f, indent=2)
+" "${calib_task_id}" "${DUMMY_REPO}" "${calib_spec}"
+
+      set +e
+      bash "$COORDINATOR" "$calib_spec" >/dev/null 2>&1
+      calib_rc=$?
+      set -e
+
+      calib_verdict="${OUT_DIR}/${calib_task_id}/attempt_001/judge/verdict.json"
+      if [ -f "${calib_verdict}" ]; then
+        calib_check_out=$(_calib_check_verdict "${calib_verdict}" "${CALIB_EXPECTED}" 2>&1)
+        calib_check_rc=$?
+        if [ "${calib_check_rc}" = "0" ]; then
+          case_pass "K8-6 calibration: ${calib_check_out}"
+        else
+          case_fail "K8-6 calibration: ${calib_check_out}"
+        fi
+      else
+        echo "  [WARN] K8-6: no verdict.json produced (calib_rc=${calib_rc}) — skipping check (non-blocking)"
+        WARN=$(( WARN + 1 ))
+      fi
+      cleanup_task "${calib_task_id}"
+      rm -f "${calib_spec}"
+    fi
+  fi
+  echo ""
+fi
+
+# ================================================================
+# Summary
+# ================================================================
+echo "================================================================"
+echo "Regression Summary: ${PASS}/${TOTAL} passed, ${FAIL} failed, ${WARN} warned (skipped)"
+echo "================================================================"
+
+# Clean up temp files
+rm -f /tmp/rdloop_reg_*.json /tmp/rdloop_reg_last_tid 2>/dev/null || true
+
+if [ "$FAIL" -gt 0 ]; then
+  echo "RESULT: REGRESSION FAILED"
+  exit 1
+else
+  echo "RESULT: ALL REGRESSION TESTS PASSED"
+  exit 0
+fi

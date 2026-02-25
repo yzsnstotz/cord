@@ -1,0 +1,92 @@
+{
+  "_comment": "B4-3a: dimensions as array of { dim_key, weight, is_hard_gate }; penalty_rules with trigger/description/penalty_points/force_gated",
+  "rubric_version": "1.0.0",
+  "rubric_hash": "d8a638982910f50143d3ff15f761a82bea43ac0c102764672c7ec0c1270ab236",
+  "alias_map": {
+    "engineering_implementation": "engineering_impl"
+  },
+  "task_types": {
+    "requirements_doc": {
+      "dimensions": [
+        { "dim_key": "clarity", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "completeness", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "acceptance_testability", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "risk_and_exception", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "constraints_and_compliance", "weight": 0.14, "is_hard_gate": true },
+        { "dim_key": "feasibility", "weight": 0.10, "is_hard_gate": false },
+        { "dim_key": "structure_and_readability", "weight": 0.10, "is_hard_gate": false }
+      ],
+      "gate_threshold": 2,
+      "hard_gate_threshold": 2.0,
+      "penalty_rules": [
+        { "trigger": "secrets_forbidden_globs", "description": "Secrets or forbidden globs exposed", "penalty_points": 2, "force_gated": true },
+        { "trigger": "missing_acceptance_criteria", "description": "Missing acceptance criteria", "penalty_points": 1.5, "force_gated": true }
+      ]
+    },
+    "engineering_impl": {
+      "dimensions": [
+        { "dim_key": "correctness", "weight": 0.2, "is_hard_gate": true },
+        { "dim_key": "runnability", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "test_and_validation", "weight": 0.16, "is_hard_gate": true },
+        { "dim_key": "security", "weight": 0.14, "is_hard_gate": true },
+        { "dim_key": "architecture_and_modularity", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "readability_and_maintainability", "weight": 0.1, "is_hard_gate": false },
+        { "dim_key": "performance", "weight": 0.1, "is_hard_gate": false }
+      ],
+      "gate_threshold": 2,
+      "hard_gate_threshold": 2.0,
+      "penalty_rules": [
+        { "trigger": "secrets_forbidden_globs", "description": "Secrets or forbidden globs exposed", "penalty_points": 2, "force_gated": true },
+        { "trigger": "test_cmd_fails", "description": "Test command fails", "penalty_points": 1.5, "force_gated": false }
+      ]
+    },
+    "douyin_script": {
+      "dimensions": [
+        { "dim_key": "hook_and_opening", "weight": 0.18, "is_hard_gate": false },
+        { "dim_key": "content_accuracy", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "narrative_flow", "weight": 0.16, "is_hard_gate": false },
+        { "dim_key": "audience_engagement", "weight": 0.14, "is_hard_gate": false },
+        { "dim_key": "platform_compliance", "weight": 0.12, "is_hard_gate": true },
+        { "dim_key": "visual_cue_alignment", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "call_to_action", "weight": 0.1, "is_hard_gate": false }
+      ],
+      "gate_threshold": 2,
+      "hard_gate_threshold": 2.0,
+      "penalty_rules": [
+        { "trigger": "banned_content", "description": "Banned content", "penalty_points": 2, "force_gated": true }
+      ]
+    },
+    "storyboard": {
+      "dimensions": [
+        { "dim_key": "visual_clarity", "weight": 0.18, "is_hard_gate": false },
+        { "dim_key": "narrative_coherence", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "scene_completeness", "weight": 0.16, "is_hard_gate": true },
+        { "dim_key": "dialogue_quality", "weight": 0.14, "is_hard_gate": false },
+        { "dim_key": "pacing_and_rhythm", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "production_feasibility", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "emotional_arc", "weight": 0.1, "is_hard_gate": false }
+      ],
+      "gate_threshold": 2,
+      "hard_gate_threshold": 2.0,
+      "penalty_rules": [
+        { "trigger": "missing_scene_descriptions", "description": "Missing scene descriptions", "penalty_points": 1, "force_gated": false }
+      ]
+    },
+    "paid_mini_drama": {
+      "dimensions": [
+        { "dim_key": "monetization_hook", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "plot_tension", "weight": 0.18, "is_hard_gate": true },
+        { "dim_key": "character_depth", "weight": 0.16, "is_hard_gate": false },
+        { "dim_key": "episode_structure", "weight": 0.14, "is_hard_gate": false },
+        { "dim_key": "dialogue_naturalness", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "cliffhanger_quality", "weight": 0.12, "is_hard_gate": false },
+        { "dim_key": "production_notes", "weight": 0.1, "is_hard_gate": false }
+      ],
+      "gate_threshold": 2,
+      "hard_gate_threshold": 2.0,
+      "penalty_rules": [
+        { "trigger": "no_paywall_trigger", "description": "No paywall trigger", "penalty_points": 1.5, "force_gated": true }
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "rdloop-gui",
+  "version": "1.0.0",
+  "description": "rdloop MVP GUI — task dashboard and control panel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "typescript": "^5.9.3"
+  }
+}

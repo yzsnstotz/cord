@@ -1,0 +1,215 @@
+{
+  "project": "闭环AI自主研发体系 — v3.2 缺口修复：CCB集成与角色配置可见性",
+  "version": "3.2",
+  "created_at": "2026-02-25T00:00:00Z",
+  "description": "Manual 撰写过程中暴露的三类工程缺口：①角色配置（collab_context.md）无法通过 GUI 读写，用户只能手动编辑文件；②CCB 注入清理（ccb_guard.sh）没有任何用户触达路径，流程完全不透明；③GUI 对 CCB 运行状态完全盲目，semi-auto 模式依赖 CCB 已启动但无任何检测或引导。",
+  "execution_mode_default": "semi-auto",
+
+  "tasks": [
+
+    {
+      "task_id": "P07",
+      "title": "GUI — CCB 健康检测端点 + 状态指示",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "在 gui/server.js 新增 GET /api/ccb/status 端点，探测 CCB daemon 是否在线（调用 cask --timeout 3 ping 和 gask --timeout 3 ping）；返回各 provider 的在线状态和建议启动命令。在 GUI 前端显示 CCB 健康状态角标：当 execution_mode=semi-auto 的任务存在时，若 CCB 未在线则在任务行显示警告图标并给出启动提示文案。",
+      "acceptance_criteria": [
+        "GET /api/ccb/status 返回 { cask: { status: 'ok'|'unavailable', ping_ms: N }, gask: { status: 'ok'|'unavailable'|'not_installed' } }",
+        "cask/gask 不在 PATH 时 status 为 not_installed 而非 unavailable",
+        "超时（>3s）时 status 为 unavailable，不阻塞 server",
+        "前端：加载任务列表时并发调用 /api/ccb/status",
+        "若 CCB unavailable 且当前视图存在 execution_mode=semi-auto 任务，在页面顶部 banner 显示警告（可关闭）",
+        "banner 文案包含 'CCB 未运行' + 建议命令 'cd <project> && ccb codex gemini'（从 rdloop.config 读 project_path）",
+        "全自动（auto）任务不受影响，无误报"
+      ],
+      "output_files": [
+        "gui/server.js",
+        "gui/public/app.js"
+      ],
+      "test_cmd": "node -e \"const s=require('./gui/server.js'); process.exit(0)\" || true",
+      "coder_timeout_seconds": 400,
+      "notes": "cask/gask 路径已由 getCoordinatorEnv() 扩展 PATH，直接 spawn 即可。ping 调用要 detach 且设 timeout，不能阻塞主线程。前端 banner 只在 semi-auto 任务存在时显示。"
+    },
+
+    {
+      "task_id": "P08",
+      "title": "GUI — Agent 角色配置读写端点（collab_context.md）",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P1",
+      "depends_on": ["P07"],
+      "description": "在 gui/server.js 新增两个端点：GET /api/agent/roles 读取 Agent 项目的 collab_context.md 中的 Role Assignment 表格，返回结构化角色列表；PUT /api/agent/roles 接受修改后的角色列表，原子写回 collab_context.md（只更新 provider 列，不改动 PM 行和其他内容）。在 GUI 前端增加「角色配置」面板（Settings 抽屉内），列出当前五个角色及其 provider 下拉选择器，保存时调用 PUT 端点。",
+      "acceptance_criteria": [
+        "GET /api/agent/roles 返回 [ { role: 'executor', provider: 'claude', assignable: true }, ... ]",
+        "PM 角色在返回中 assignable=false，前端下拉置灰不可编辑",
+        "允许的 provider 值：claude, codex, gemini, opencode, droid",
+        "PUT /api/agent/roles body: [ { role: 'reviewer', provider: 'gemini' } ]（只传要修改的行）",
+        "PUT 写入时使用原子写（写临时文件再 rename），失败时原文件不损坏",
+        "PUT 写入只修改 Role Assignment 表格的 provider 列，其他内容字节级保持不变",
+        "AGENT_ROOT 路径从 rdloop.config.json 读 agent_root 字段（新增可选字段），未配置时返回 404 并提示",
+        "前端 Settings 面板展示角色列表和保存按钮，保存成功提示「角色已更新」"
+      ],
+      "output_files": [
+        "gui/server.js",
+        "gui/public/app.js",
+        "rdloop.config.json"
+      ],
+      "test_cmd": "node -e \"const s=require('./gui/server.js'); process.exit(0)\" || true",
+      "coder_timeout_seconds": 500,
+      "notes": "解析 collab_context.md 中的 Markdown 表格：| role | provider | scope | 格式，用正则提取，修改 provider 列后按原格式写回。不要引入 YAML/JSON 序列化，保持 Markdown 原格式。AGENT_ROOT 与 Rdloop 是并列目录（../Agent），默认值可从相对路径推断。"
+    },
+
+    {
+      "task_id": "P09",
+      "title": "GUI — CCB Guard 状态检测与一键清理",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P1",
+      "depends_on": ["P07"],
+      "description": "在 gui/server.js 新增 GET /api/ccb/guard-status 检查 CCB 是否已向 CLAUDE.md / AGENTS.md / .clinerules 注入块（调用 ccb_guard.sh --check）；POST /api/ccb/guard-clean 执行清理（调用 ccb_guard.sh 无参数）。在 GUI Settings 面板增加「CCB 注入检测」区域，显示检测结果并提供「一键清理」按钮。",
+      "acceptance_criteria": [
+        "GET /api/ccb/guard-status 返回 { injected: bool, files_affected: ['~/.claude/CLAUDE.md', ...], detail: string }",
+        "ccb_guard.sh 不存在时（AGENT_ROOT 未配置）返回 { injected: false, detail: 'agent_root not configured' }",
+        "POST /api/ccb/guard-clean 执行清理，返回 { cleaned: bool, files_modified: [...], output: string }",
+        "清理操作只对 AGENT_ROOT 已配置时可用，未配置返回 400",
+        "前端 Settings 面板：显示「CCB 注入状态：干净 / 发现注入块（N 个文件）」",
+        "发现注入时显示「一键清理」按钮，清理成功后状态自动刷新",
+        "注入检测每次打开 Settings 面板时自动触发，不需手动刷新"
+      ],
+      "output_files": [
+        "gui/server.js",
+        "gui/public/app.js"
+      ],
+      "test_cmd": "node -e \"const s=require('./gui/server.js'); process.exit(0)\" || true",
+      "coder_timeout_seconds": 300,
+      "notes": "ccb_guard.sh --check 的 exit code：0=干净，1=发现注入。spawn 子进程捕获 stdout/stderr，解析输出中的文件路径列表（FOUND: CCB ... in <path> 格式）。GUI 的 AGENT_ROOT 来自 rdloop.config.json agent_root 字段（P08 新增）。"
+    },
+
+    {
+      "task_id": "P10",
+      "title": "rdloop.config.json — 新增 agent_root 字段 + GUI Settings 配置面板",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "在 rdloop.config.json 新增 agent_root 可选字段，值为 Agent 目录的绝对路径。在 gui/server.js 的 GET/PUT /api/config 端点中支持读写 agent_root。在 GUI 前端 Settings 面板增加 agent_root 输入框（带「Browse」提示）。同时将 execution_mode（auto/semi-auto）也暴露到 Settings 面板作为全局默认值。",
+      "acceptance_criteria": [
+        "rdloop.config.json 新增 agent_root 字段（默认为空字符串）",
+        "GET /api/config 返回中包含 agent_root 字段",
+        "PUT /api/config 支持写入 agent_root（非空时验证路径存在且含 .context/rules/collab_context.md）",
+        "agent_root 路径验证失败时返回 400 + 具体错误信息",
+        "前端 Settings 面板：新增「Agent 目录」输入框，失焦时自动验证，成功显示绿色勾",
+        "Settings 面板新增「默认执行模式」单选（auto / semi-auto），写入 rdloop.config.json default_execution_mode",
+        "Settings 面板保存按钮一次性写入所有字段（agent_root + execution_mode + coder/judge defaults）",
+        "现有 /api/config 的 default_coder/judge 行为不变（向后兼容）"
+      ],
+      "output_files": [
+        "rdloop.config.json",
+        "gui/server.js",
+        "gui/public/app.js"
+      ],
+      "test_cmd": "node -e \"const s=require('./gui/server.js'); process.exit(0)\" || true",
+      "coder_timeout_seconds": 350,
+      "notes": "这是 P08/P09 的基础依赖。agent_root 默认可以尝试自动推断：rdloop 目录的 ../Agent（如果存在则预填充）。Settings 面板建议作为右侧抽屉或顶部 Modal，不要影响主任务列表布局。"
+    },
+
+    {
+      "task_id": "P11",
+      "title": "文档 — CCB 启动与协作模式使用指南（面向用户）",
+      "owner_subsystem": "Agent/docs",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "在 Agent 目录新增 docs/ccb_collab_guide.md，面向非技术用户，完整描述：①如何在 tmux 中启动 CCB 并验证各 AI provider 在线；②collab_context.md 中角色配置的含义与修改方法；③CCB 安装后注入冲突的识别与 ccb_guard.sh 清理步骤；④semi-auto 工作流的完整操作序列（ccb启动 → PM分配 → /ask发送 → /pend获取 → 任务完成）。同时在 Rdloop 的 README.md 中增加「协作模式」章节，指向该文档。",
+      "acceptance_criteria": [
+        "docs/ccb_collab_guide.md 存在，包含 4 个章节：CCB启动、角色配置、注入冲突处理、semi-auto工作流",
+        "启动章节包含：tmux 新建 session 命令、ccb codex gemini 启动命令、cping codex 验证命令，及对应输出示例",
+        "角色配置章节：展示 collab_context.md Role Assignment 表格原文，说明每个角色的职责，给出修改示例（把 reviewer 从 codex 改为 gemini）",
+        "注入冲突章节：说明 CCB 注入的文件路径，给出 bash ccb_guard.sh --check 检查命令和 bash ccb_guard.sh 清理命令",
+        "semi-auto 工作流章节：包含完整命令序列，包括 run_rdloop_task.sh 调用方式和 execution_mode=semi-auto 的 TaskSpec 示例",
+        "README.md 中新增「协作模式（semi-auto）」章节，一段描述 + 链接到 docs/ccb_collab_guide.md",
+        "所有命令均可在 mac-mini 环境实际执行"
+      ],
+      "output_files": [
+        "Agent/docs/ccb_collab_guide.md",
+        "Rdloop/README.md"
+      ],
+      "test_cmd": "[ -f Agent/docs/ccb_collab_guide.md ] && grep -q 'semi-auto' Agent/docs/ccb_collab_guide.md && grep -q 'ccb_guard' Agent/docs/ccb_collab_guide.md",
+      "coder_timeout_seconds": 300,
+      "notes": "文档受众是非技术用户，避免专业术语，多用类比。tmux 命令要带注释说明每一行的作用。角色配置修改只展示编辑 collab_context.md 的方式（v3.2 之前无 GUI 支持）。"
+    }
+
+  ],
+
+  "shared_contracts": {
+    "rdloop.config.json agent_root": {
+      "owner_task": "P10",
+      "dependents": ["P08", "P09"],
+      "interface_hash": null,
+      "interface_summary": "新增 agent_root 字段：string（绝对路径）。P08/P09 读取此字段定位 AGENT_ROOT。"
+    },
+    "GET /api/ccb/status": {
+      "owner_task": "P07",
+      "dependents": ["P08", "P09"],
+      "interface_summary": "{ cask: { status: 'ok'|'unavailable'|'not_installed', ping_ms?: N }, gask: { ... } }"
+    },
+    "GET /api/agent/roles": {
+      "owner_task": "P08",
+      "dependents": [],
+      "interface_summary": "[ { role, provider, assignable, scope } ]；PM 行 assignable=false"
+    },
+    "GET /api/ccb/guard-status": {
+      "owner_task": "P09",
+      "dependents": [],
+      "interface_summary": "{ injected: bool, files_affected: string[], detail: string }"
+    }
+  },
+
+  "delivery_order": [
+    ["P10", "P11"],
+    ["P07"],
+    ["P08", "P09"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd 执行 rc=0",
+      "output_files 全部存在",
+      "与 shared_contracts 接口定义一致",
+      "无硬编码路径（全部从 rdloop.config.json 或环境读取）"
+    ],
+    "P07_special": [
+      "CCB ping 探测必须有超时保护（≤3s），不阻塞 Express 主线程",
+      "cask/gask 不在 PATH 时不 throw，返回 not_installed",
+      "全自动模式任务无误报"
+    ],
+    "P08_special": [
+      "PM 行（provider=claude, assignable=false）必须在 PUT 时被忽略/拒绝修改",
+      "写回 collab_context.md 时非表格内容字节级不变",
+      "原子写：先写 .tmp 再 rename"
+    ],
+    "P09_special": [
+      "ccb_guard.sh --check 失败（exit 1）与执行出错（spawn error）要区分",
+      "清理操作要有确认机制（POST 加 confirm=true 参数 或 前端二次确认弹窗）"
+    ],
+    "P10_special": [
+      "agent_root 路径验证：必须包含 .context/rules/collab_context.md",
+      "Settings 面板保存失败时回滚 UI 状态（不留脏数据）"
+    ]
+  },
+
+  "gap_analysis": {
+    "question_1_role_config": {
+      "current_state": "只能手动编辑 Agent/.context/rules/collab_context.md 的 Role Assignment 表格。PM 行不可更换。rdloop GUI 对 Agent 体系完全不可见。",
+      "after_v3_2": "P10 提供 agent_root 配置入口；P08 提供 GUI 角色配置面板，支持修改 executor/reviewer/designer/inspiration 的 provider，PM 角色置灰不可编辑。",
+      "manual_interim": "在 GUI Settings 面板可通过 P08/P10 操作；P08 未实现前，用户需手动编辑 collab_context.md 中的 provider 列。"
+    },
+    "question_2_ccb_injection": {
+      "current_state": "CCB 安装后自动注入 CLAUDE.md/AGENTS.md/.clinerules。Agent 体系通过 cli_collab.md 声明忽略注入内容，并通过每次 /ask 的消息体内嵌 [WORKER CONTEXT] 绕过。工具 ccb_guard.sh 存在但用户无触达路径。",
+      "after_v3_2": "P09 在 GUI Settings 面板增加「CCB 注入检测」区域，自动检测并提供一键清理按钮。P11 文档化完整操作流程。",
+      "manual_interim": "安装 CCB 后立即运行：bash Agent/.context/tools/ccb_guard.sh —— 如有注入会自动清理。之后 Agent 体系正常工作，无需重复执行（除非重装 CCB）。"
+    },
+    "question_3_ccb_startup": {
+      "current_state": "CCB 完全独立于 GUI。semi-auto 模式依赖 CCB 已在 tmux 启动并 cask/gask daemon 在线。GUI 对 CCB 状态完全盲目。call_coder_ccb.sh 中若 ping 不通则 rc=127，任务变 PAUSED_CODER_CCB_UNAVAILABLE。",
+      "after_v3_2": "P07 在 GUI 增加 CCB 状态检测，semi-auto 任务存在时自动警告。P11 文档化 tmux 启动流程。CCB 启动本身仍需用户在终端手动执行（不纳入 GUI 自动化，保持「可见可控」设计原则）。",
+      "manual_interim": "见 P11 产出的 ccb_collab_guide.md，以及 Manual 的待补充章节。"
+    }
+  }
+}

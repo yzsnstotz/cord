@@ -1,0 +1,338 @@
+{
+  "project": "闭环AI自主研发体系 — 整合架构 v3.0",
+  "version": "3.0",
+  "created_at": "2026-02-24T00:00:00Z",
+  "description": "根据integrated_architecture_v3.md，将Agent体系升级至v1.9.0并对rdloop新增7个文件/端点，CCB无需修改。共12个task。",
+  "execution_mode_default": "semi-auto",
+  "tasks": [
+
+    {
+      "task_id": "T01",
+      "title": "write_knowledge_cache.py — 原子写入工具",
+      "owner_subsystem": "Agent体系",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "新增通用原子写入脚本，供PM（规划阶段）和executor（完成阶段）写入knowledge_cache.json。支持两种writer模式：PM模式写task摘要，executor模式写文件摘要。",
+      "acceptance_criteria": [
+        "支持 --writer pm|executor 参数",
+        "使用 temp→fsync→rename 原子写入，并发安全",
+        "executor模式从final_summary.json读knowledge_entries字段并合并到cache",
+        "PM模式接受inline JSON或文件路径写入task:T{id}条目",
+        "cache文件不存在时自动创建，包含version/project/last_updated/entries字段",
+        "有完整的单元测试覆盖原子写入和两种writer模式"
+      ],
+      "output_files": [
+        "tools/write_knowledge_cache.py",
+        "tests/test_write_knowledge_cache.py"
+      ],
+      "test_cmd": "pytest tests/test_write_knowledge_cache.py -v",
+      "coder_timeout_seconds": 600,
+      "notes": "这是最多被其他task依赖的基础工具，优先完成。接口设计参见架构文档3.3节。"
+    },
+
+    {
+      "task_id": "T02",
+      "title": "init_knowledge_agent.sh — ka-session初始化脚本",
+      "owner_subsystem": "Agent体系",
+      "priority": "P0",
+      "depends_on": ["T01"],
+      "description": "新增项目启动脚本，将knowledge_cache.json内容加载到CCB持久session（默认codex）。session中断后可重新调用，不会丢数据（cache是外部文件）。",
+      "acceptance_criteria": [
+        "读取project_config.json中knowledge_agent配置（provider/session_file/cache_file）",
+        "provider未配置时默认使用codex（cask）",
+        "knowledge_cache.json不存在时创建空cache后继续初始化",
+        "发送系统prompt加载cache内容并建立索引",
+        "输出明确的成功/失败状态码和日志",
+        "幂等：重复调用不出错，重新init覆盖旧session"
+      ],
+      "output_files": [
+        "tools/init_knowledge_agent.sh"
+      ],
+      "test_cmd": "bash tests/test_init_knowledge_agent.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "参见架构文档3.4节。CCB session-file路径从project_config.json读取。"
+    },
+
+    {
+      "task_id": "T03",
+      "title": "rules/init.md — 新增shared_contracts字段",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "更新Agent体系初始化规则文档，在session_state.json中新增shared_contracts字段，记录跨task文件依赖图和interface_hash。",
+      "acceptance_criteria": [
+        "session_state.json schema文档包含shared_contracts字段定义",
+        "shared_contracts结构：文件路径 → {owner_task, interface_hash, dependents[]}",
+        "说明interface_hash变更时的冲突检测逻辑",
+        "新增示例JSON展示至少2个文件依赖关系",
+        "与knowledge_cache.json中interface_hash字段保持一致的说明"
+      ],
+      "output_files": [
+        "rules/init.md"
+      ],
+      "test_cmd": "bash tests/validate_schema.sh rules/init.md",
+      "coder_timeout_seconds": 300,
+      "notes": "只修改文档/schema定义，不涉及运行时代码。"
+    },
+
+    {
+      "task_id": "T04",
+      "title": "skills/autoflow-run/SKILL.md — v1.9.0更新",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": ["T01", "T02", "T03"],
+      "description": "更新autoflow-run技能文档，将FileOpsREQ替换为knowledge agent查询，Step5-9改为rdloop调用，新增Step4c写入knowledge_cache，新增execution_mode决策逻辑。",
+      "acceptance_criteria": [
+        "FileOpsREQ相关步骤替换为查询knowledge agent的调用示例",
+        "Step4c：PM写入task摘要到knowledge_cache（调用write_knowledge_cache.py）",
+        "Step5-9：调用run_rdloop_task.sh替代原有执行流程",
+        "新增execution_mode决策表：何时选auto，何时选semi-auto",
+        "新增knowledge agent查询示例（至少3个典型查询）",
+        "版本号标注为v1.9.0，变更日志简明"
+      ],
+      "output_files": [
+        "skills/autoflow-run/SKILL.md"
+      ],
+      "test_cmd": "bash tests/validate_markdown.sh skills/autoflow-run/SKILL.md",
+      "coder_timeout_seconds": 400,
+      "notes": "这是Agent体系的核心操作手册，修改需保持可读性。参见架构文档6.1节。"
+    },
+
+    {
+      "task_id": "T05",
+      "title": "tools/run_rdloop_task.sh — PM↔rdloop胶水脚本",
+      "owner_subsystem": "Agent体系",
+      "priority": "P0",
+      "depends_on": ["T01"],
+      "description": "新增PM调用rdloop coordinator的胶水脚本。接收TaskSpec JSON路径，触发rdloop执行，轮询结果，在READY_FOR_REVIEW时调用write_knowledge_cache.py写入executor摘要。",
+      "acceptance_criteria": [
+        "接受TaskSpec JSON文件路径作为参数",
+        "调用 bash run_task.sh <task_spec.json> 启动rdloop",
+        "轮询 out/<task_id>/status.json，间隔可配置（默认10s）",
+        "状态READY_FOR_REVIEW时自动调用write_knowledge_cache.py --writer executor",
+        "状态FAILED时输出top_issues，退出码非0",
+        "状态PAUSED时输出questions_for_user，等待人工介入",
+        "有超时保护（默认3600s），超时后输出当前状态并退出"
+      ],
+      "output_files": [
+        "tools/run_rdloop_task.sh"
+      ],
+      "test_cmd": "bash tests/test_run_rdloop_task.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "参见架构文档5节步骤5-8。这是PM与rdloop的唯一接口，需要健壮的错误处理。"
+    },
+
+    {
+      "task_id": "T06",
+      "title": "coordinator/lib/call_coder_bridge.sh — auto模式coder",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "新增auto模式coder适配器。coordinator程序化spawn子进程，使用claude_bridge IPC，全自动执行，无需人工介入。",
+      "acceptance_criteria": [
+        "接受4个参数：task_json / attempt_dir / worktree_dir / instruction_path",
+        "从task_json读取coder_timeout_seconds（默认600）和repo_path",
+        "full_instruction中包含WORKING DIRECTORY和KNOWLEDGE CACHE路径",
+        "使用timeout命令包裹node claude_bridge/index.js调用",
+        "传入--dangerously-skip-permissions参数",
+        "timeout时在run.log写入TIMEOUT标记",
+        "rc写入 attempt_dir/coder/rc.txt",
+        "BRIDGE_DIR为每次attempt独立目录"
+      ],
+      "output_files": [
+        "coordinator/lib/call_coder_bridge.sh"
+      ],
+      "test_cmd": "bash tests/test_call_coder_bridge.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "参见架构文档2.2节完整实现。BRIDGE_INDEX路径通过RDLOOP_ROOT动态解析。"
+    },
+
+    {
+      "task_id": "T07",
+      "title": "coordinator/lib/call_coder_ccb.sh — semi-auto模式coder",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "新增semi-auto模式coder适配器。通过/ask信道附加到人类正在使用的tmux session，人可直接在pane里观察和介入。",
+      "acceptance_criteria": [
+        "接受4个参数：task_json / attempt_dir / worktree_dir / instruction_path",
+        "从task_json读取coder_model字段，gemini*开头时使用gask，否则cask",
+        "full_prompt中包含semi-auto mode human may observe and intervene提示",
+        "启动前ping检测CCB daemon可用性（timeout 5s），不可用时rc=127",
+        "使用CCB_SESSION_FILE环境变量传入session持久化路径",
+        "--output写入attempt_dir/coder/stdout.log",
+        "rc写入attempt_dir/coder/rc.txt"
+      ],
+      "output_files": [
+        "coordinator/lib/call_coder_ccb.sh"
+      ],
+      "test_cmd": "bash tests/test_call_coder_ccb.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "参见架构文档2.3节完整实现。CCB不可用时需要明确的错误状态，不能静默失败。"
+    },
+
+    {
+      "task_id": "T08",
+      "title": "coordinator/lib/call_judge_bridge.sh + call_judge_ccb.sh",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T06", "T07"],
+      "description": "新增auto和semi-auto两个judge适配器。auto模式coordinator spawn，judge主动读worktree文件验证，输出JudgeVerdict v2。semi-auto模式附加到人类session，人可直接看到判断过程。",
+      "acceptance_criteria": [
+        "call_judge_bridge.sh：coordinator spawn，全自动，judge主动读worktree验证",
+        "call_judge_ccb.sh：附加到人类tmux session，人可观察judge推理过程",
+        "两个脚本的参数接口与call_coder_*保持一致",
+        "judge输出目录为 attempt_dir/judge/",
+        "verdict写入 attempt_dir/judge/verdict.json，格式为JudgeVerdict v2",
+        "rc写入 attempt_dir/judge/rc.txt",
+        "bridge版本包含--dangerously-skip-permissions",
+        "ccb版本包含CCB daemon ping检测"
+      ],
+      "output_files": [
+        "coordinator/lib/call_judge_bridge.sh",
+        "coordinator/lib/call_judge_ccb.sh"
+      ],
+      "test_cmd": "bash tests/test_call_judge_adapters.sh",
+      "coder_timeout_seconds": 500,
+      "notes": "两个文件可在一个task中完成，结构与T06/T07高度对称。"
+    },
+
+    {
+      "task_id": "T09",
+      "title": "coordinator/run_task.sh — execution_mode路由",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T06", "T07", "T08"],
+      "description": "修改run_task.sh，根据TaskSpec中execution_mode字段路由到对应adapter（bridge或ccb）。新增PAUSED_CODER_CCB_UNAVAILABLE状态。",
+      "acceptance_criteria": [
+        "从TaskSpec读取execution_mode字段，默认值为auto",
+        "auto模式路由：call_coder_bridge.sh / call_judge_bridge.sh",
+        "semi-auto模式路由：call_coder_ccb.sh / call_judge_ccb.sh",
+        "call_coder_ccb.sh返回rc=127时，状态机转为PAUSED_CODER_CCB_UNAVAILABLE",
+        "PAUSED_CODER_CCB_UNAVAILABLE写入events.jsonl，包含原因和建议操作",
+        "原有adapter（cursor/codex/mock）全部保留，不删除任何现有逻辑",
+        "decision_table更新以包含新状态转移"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh"
+      ],
+      "test_cmd": "bash tests/test_run_task_routing.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "这是核心路由逻辑，修改需特别小心不破坏现有流程。建议先写测试再修改。"
+    },
+
+    {
+      "task_id": "T10",
+      "title": "coordinator/gui/server.js — 三个只读聚合端点",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T01"],
+      "description": "在GUI server新增三个只读API端点，聚合来自Agent体系和CCB的状态文件，实现跨体系统一视图。严格只读，不写任何状态文件。",
+      "acceptance_criteria": [
+        "GET /api/project/tasks：读session_state.json，返回task列表+shared_contracts",
+        "GET /api/project/steps/:task_id：读.ccb/state.json，返回step列表+current step",
+        "GET /api/knowledge：读knowledge_cache.json，按last_modified_at倒序返回entries",
+        "project路径从coordinator配置或当前运行task中获取",
+        "文件不存在时返回404而不是500",
+        "所有端点均为GET，无POST/PUT/DELETE",
+        "原有attempt/events/live-log端点不受影响"
+      ],
+      "output_files": [
+        "coordinator/gui/server.js"
+      ],
+      "test_cmd": "npm test --prefix coordinator/gui",
+      "coder_timeout_seconds": 500,
+      "notes": "参见架构文档4.3节。GUI只读原则是硬约束，任何写操作都是bug。"
+    },
+
+    {
+      "task_id": "T11",
+      "title": "rdloop.config.json — 默认配置更新",
+      "owner_subsystem": "rdloop",
+      "priority": "P2",
+      "depends_on": ["T09"],
+      "description": "更新rdloop默认配置文件，新增execution_mode和adapter相关默认值。",
+      "acceptance_criteria": [
+        "新增 default_execution_mode: \"auto\"",
+        "新增 default_coder: \"bridge\"",
+        "新增 default_judge: \"bridge\"",
+        "保留所有现有配置字段不变",
+        "添加注释说明auto/semi-auto的适用场景",
+        "JSON格式合法，通过 python -m json.tool 验证"
+      ],
+      "output_files": [
+        "rdloop.config.json"
+      ],
+      "test_cmd": "python3 -m json.tool rdloop.config.json > /dev/null",
+      "coder_timeout_seconds": 120,
+      "notes": "最简单的task，但需要与T09保持字段命名一致。"
+    },
+
+    {
+      "task_id": "T12",
+      "title": "集成测试 — v3.0端到端验证",
+      "owner_subsystem": "集成",
+      "priority": "P1",
+      "depends_on": ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10", "T11"],
+      "description": "验证v3.0整体工作流：PM通过autoflow-run规划任务→写knowledge_cache→run_rdloop_task触发coordinator→auto模式执行→READY_FOR_REVIEW触发executor摘要写入→GUI聚合视图正确展示。",
+      "acceptance_criteria": [
+        "使用mock project跑通完整工作流（步骤1-8参见架构文档第五节）",
+        "knowledge_cache.json在workflow结束后包含PM写入的task摘要和executor写入的文件摘要",
+        "auto模式下coder/judge全程无需人工介入",
+        "GUI三个新端点返回正确的聚合数据",
+        "session中断后重新init_knowledge_agent.sh，知识不丢失",
+        "shared_contracts中interface_hash与knowledge_cache同步"
+      ],
+      "output_files": [
+        "tests/integration/test_v3_e2e.sh",
+        "tests/integration/fixtures/mock_project/"
+      ],
+      "test_cmd": "bash tests/integration/test_v3_e2e.sh",
+      "coder_timeout_seconds": 900,
+      "notes": "集成测试需要CCB daemon在本地运行。可用mock stub替代真实LLM调用以加速CI。"
+    }
+
+  ],
+
+  "shared_contracts": {
+    "tools/write_knowledge_cache.py": {
+      "owner_task": "T01",
+      "dependents": ["T02", "T05", "T10"],
+      "interface_summary": "CLI: --project-path --task-id --final-summary --writer pm|executor"
+    },
+    "knowledge_cache.json schema": {
+      "owner_task": "T01",
+      "dependents": ["T02", "T04", "T09", "T10", "T12"],
+      "interface_summary": "version/project/last_updated/entries，entries key为filepath或task:Txx"
+    },
+    "coordinator/run_task.sh execution_mode参数": {
+      "owner_task": "T09",
+      "dependents": ["T11", "T12"],
+      "interface_summary": "TaskSpec新增execution_mode字段，值为auto|semi-auto，默认auto"
+    }
+  },
+
+  "delivery_order": [
+    ["T01", "T03", "T06", "T07"],
+    ["T02", "T05", "T08"],
+    ["T04", "T09", "T10", "T11"],
+    ["T12"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd执行rc=0",
+      "output_files全部存在",
+      "与shared_contracts接口定义一致",
+      "无硬编码路径（全部从配置或参数读取）"
+    ],
+    "T09_special": [
+      "原有adapter（cursor/codex/mock）回归测试通过",
+      "PAUSED_CODER_CCB_UNAVAILABLE写入events.jsonl格式正确"
+    ],
+    "T10_special": [
+      "确认无任何写操作",
+      "文件不存在时返回404而非500"
+    ]
+  }
+}

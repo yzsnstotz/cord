@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rdloop — Research & Dev Loop Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="sidebar">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px 4px">
+      <h1 style="margin:0">rdloop</h1>
+      <button type="button" class="btn" id="btn-settings" style="padding:4px 8px;font-size:12px" title="Settings">⚙ Settings</button>
+    </div>
+    <div id="task-list"></div>
+  </div>
+  <div id="main">
+    <div id="top-nav" style="display:flex;border-bottom:1px solid #30363d;padding:0 12px;gap:4px;align-items:center">
+      <button type="button" id="nav-tasks" class="nav-tab active">Tasks</button>
+      <button type="button" id="nav-ccb" class="nav-tab">Agents</button>
+    </div>
+    <div id="content-wrap">
+      <div id="content" class="empty-state">
+        <h2>Select a task from the sidebar</h2>
+        <p>Tasks are auto-refreshed every 2 seconds</p>
+      </div>
+      <div id="ccb-panel" style="display:none;padding:16px;overflow-y:auto"></div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

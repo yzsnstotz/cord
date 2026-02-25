@@ -1,0 +1,274 @@
+{
+  "project": "v3.4 Semi-Auto启动修复：CCB实例锁冲突、open-terminal感知已有实例、测试任务执行链路验证",
+  "version": "3.4",
+  "created_at": "2026-02-25T13:00:00Z",
+  "description": "v3.3 P12修复（session/start改为调用原生CCB入口）后暴露的新问题：GUI以后台进程方式spawn python3 ccb时继承了GUI Server的TMUX环境变量，导致后台ccb进程误判为在tmux中运行，成功占用CCB实例锁（fcntl文件锁）。此后用户点击"在终端中运行"时，新Terminal.app中的ccb进程无法获取锁，始终报错"Another ccb instance is already running (pid X)"。同时open-terminal端点不检测已有实例，每次失败均遗留一个ccb_{pid}废弃tmux session。semi-auto执行测试任务链路（coordinator→call_coder_ccb.sh→cask/gask→ccb tmux pane）也需要端到端验证。",
+  "execution_mode_default": "semi-auto",
+
+  "environment_evidence": {
+    "ccb_lock_file": "~/.ccb/run/ccb-585f4ce6.lock (cwd_hash of /Users/yzliu/work/projects/cord_test)",
+    "lock_holder_pid": 73772,
+    "lock_holder_process": "python3 /Users/yzliu/work/Cord/CCB/ccb codex",
+    "lock_holder_tmux_session": "ccb_73763 (created via auto-tmux mechanism at 12:16PM)",
+    "abandoned_sessions": ["ccb_10727 (bash shell, failed open-terminal attempt)", "ccb_26377 (bash shell, failed open-terminal attempt)"],
+    "active_session": "ccb_73763: Python process (active ccb codex)",
+    "ccb_work_dir_in_config": "/Users/yzliu/work/projects/cord_test",
+    "session_file_exists": "/Users/yzliu/work/projects/cord_test/.ccb/.codex-session (✅ exists)",
+    "askd_running": "PID 74089 (askd started at 12:16PM alongside ccb_73763)"
+  },
+
+  "issue_analysis": {
+
+    "issue_B1_lock_conflict": {
+      "severity": "CRITICAL",
+      "symptom": "GUI点击「在终端中运行 Codex」（或其他CCB启动按钮）始终报错：❌ Another ccb instance is already running for this directory (pid 73772). [CCB exited with code 2]. Press Enter to close.",
+      "call_chain": [
+        "1. ccbOpenTerminalAndRun(['codex']) → POST /api/ccb/session/open-terminal",
+        "2. server.js 生成命令: cd \"/path\" && python3 \"/ccb\" codex",
+        "3. osascript 打开 Terminal.app 执行该命令",
+        "4. Terminal.app中 python3 ccb codex 运行，detect_terminal()=None（无TMUX env），stdin=tty",
+        "5. auto-tmux机制：os.execv(tmux, ['new-session', '-s', 'ccb_{pid}', '--', 'bash', '-c', 'python3 ccb codex 2>&1; ...'])",
+        "6. 新tmux session ccb_{new_pid}中，inner python3 ccb codex运行，detect_terminal()=tmux",
+        "7. ccb_lock.try_acquire() → 失败！fcntl锁已被PID 73772占用",
+        "8. 打印错误并退出code 2 → tmux显示 [CCB exited with code 2]. Press Enter to close."
+      ],
+      "root_cause_primary": "PID 73772（active ccb codex进程）持有 ~/.ccb/run/ccb-585f4ce6.lock 的fcntl文件锁。该进程运行在auto-tmux创建的session ccb_73763中，持续占用锁。",
+      "root_cause_secondary": "POST /api/ccb/session/start 使用 { ...process.env } 作为spawn环境（P12修复），继承了GUI Server进程的TMUX和TMUX_PANE环境变量。当GUI Server在tmux中运行时，spawn的后台 python3 ccb 进程 detect_terminal()=tmux，成功获取锁，在GUI Server的tmux session中运行run_up()，也会持续持有锁，阻止后续open-terminal尝试。",
+      "root_cause_mechanism": "ProviderLock('ccb', cwd=work_dir).try_acquire()使用fcntl.flock(LOCK_EX|LOCK_NB)。锁持有者进程只在atexit时释放锁，运行期间持续占用。stale lock检测仅在持有者进程死亡时生效，但PID 73772是活跃进程。",
+      "evidence": {
+        "active_lock": "~/.ccb/run/ccb-585f4ce6.lock → PID 73772",
+        "active_process": "ps aux shows: PID 73772  s016  Ss+ 12:16PM  python3 CCB/ccb codex",
+        "active_session": "tmux: ccb_73763 (pane %0, tty /dev/ttys016, command=Python)",
+        "failed_sessions": "tmux: ccb_10727, ccb_26377 (pane command=bash, 失败遗留)"
+      },
+      "fix_direction": "open-terminal端点在启动新ccb前检测已有实例（读取lock file PID + is_alive检查）；若实例存活则直接attach而非重启。session/start端点strip TMUX相关env变量防止后台进程占锁。"
+    },
+
+    "issue_B2_open_terminal_no_detection": {
+      "severity": "HIGH",
+      "symptom": "用户已有运行中的CCB session，GUI「在终端中运行」始终尝试启动新实例，不提示也不复用已有session",
+      "root_cause": "POST /api/ccb/session/open-terminal (server.js line 1594-1637) 无任何已有实例检测逻辑，直接构造命令 cd workDir && python3 ccb providers 并打开Terminal.app",
+      "fix_direction": "在open-terminal前：(1)读取ccb lock file检查是否有活跃PID；(2)若有活跃实例→查找对应tmux session名→调用tmux attach逻辑（类似/session/attach端点）；(3)若无活跃实例→正常启动新ccb"
+    },
+
+    "issue_B3_abandoned_tmux_sessions": {
+      "severity": "LOW",
+      "symptom": "每次open-terminal失败均遗留一个 ccb_{outer_pid} tmux session（内容为bash shell等待Enter）",
+      "root_cause": "auto-tmux机制（ccb line 3192-3197）在每次ccb因code 2退出时遗留tmux session。inner命令包含 'read' 等待用户按Enter，但Terminal.app窗口已关闭，session持续存在。",
+      "evidence": ["ccb_10727 → bash", "ccb_26377 → bash", "ccb_73763 → Python（唯一活跃）"],
+      "fix_direction": "GUI在启动新open-terminal前先清理已知废弃 ccb_{pid} 会话（可调用 tmux kill-session -t ccb_* 对非活跃session）；或在open-terminal的Terminal.app命令中包含自动清理废弃session的前置步骤"
+    },
+
+    "issue_B4_session_start_tmux_env_leak": {
+      "severity": "MEDIUM",
+      "symptom": "POST /api/ccb/session/start 在GUI Server运行于tmux时，后台spawn的python3 ccb进程误在GUI Server的tmux session中创建Codex/Gemini pane，用户不知情，且该进程持续占锁",
+      "root_cause": "getCoordinatorEnv() 返回 { ...process.env, PATH:... }，包含 TMUX、TMUX_PANE 等变量。后台ccb进程 detect_terminal()=tmux → 绕过terminal check → acquire lock → run_up() → 在调用进程的当前tmux session（即GUI Server所在session）中分裂pane",
+      "evidence": "当前GUI Server运行在tmux session ccb_26377 pane %5（通过tmux display-message确认）",
+      "fix_direction": "session/start的spawn env中删除 TMUX、TMUX_PANE、WEZTERM_PANE，防止后台进程误用GUI的tmux上下文"
+    },
+
+    "issue_B5_semi_auto_execution_chain": {
+      "severity": "MEDIUM",
+      "symptom": "semi-auto任务提交后coordinator调用call_coder_ccb.sh，cask ping检测CCB可用性；需验证端到端链路是否可工作",
+      "chain": [
+        "coordinator/run_task.sh → execution_mode=semi-auto → coder_type=ccb",
+        "call_coder_ccb.sh → cask --timeout 5 ping → 检测caskd/askd daemon可用性",
+        "cask main: try_daemon_request → 失败 → maybe_start_daemon（autostart默认启用）→ askd启动",
+        "wait_for_daemon_ready(timeout=2s) → 若askd在2s内就绪 → retry try_daemon_request",
+        "发送full_prompt到Codex CLI（通过cask→askd→pane注入）",
+        "等待Codex响应 → 写output_file"
+      ],
+      "current_state": "当前ask daemon运行情况：PID 74089(askd, 12:16PM), PID 72309(askd, 12:47PM)。ccb_73763/PID73772 session活跃（Codex CLI在pane %0）。session file在cord_test/.ccb/.codex-session中存在。",
+      "risk": "wait_for_daemon_ready仅等待2秒（min(2.0, timeout)），askd冷启动可能超时；CCB_SESSION_FILE路径需确认是从repo_path/.ccb/读取（P18已修复）",
+      "fix_direction": "验证cask ping在工作目录cord_test中可成功；若不可 → 检查askd daemon类型是否匹配（cask用askd，需要cask协议支持）；并确认P18的session file路径修复有效"
+    }
+  },
+
+  "tasks": [
+
+    {
+      "task_id": "P20",
+      "title": "open-terminal端点：感知已有CCB实例并复用/修复后台启动TMUX env泄漏",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "修复两个互相关联的问题：(1)POST /api/ccb/session/open-terminal 在打开新终端前，先检测是否已有活跃CCB实例（通过读取 ~/.ccb/run/ccb-{cwd_hash}.lock 文件并检查PID是否存活）。若实例活跃：查找对应tmux session（通过 ~/.ccb/run/ccb-session-*.json 或 tmux list-sessions），直接attach到该session（与/session/attach端点逻辑相同），不再另起新ccb。若实例不存在或已死亡：删除stale lock文件，然后正常打开Terminal.app启动新ccb。(2)POST /api/ccb/session/start 的spawn env中删除 TMUX、TMUX_PANE、WEZTERM_PANE 三个变量，防止后台ccb进程误判自己在tmux中运行、占用实例锁、并在GUI Server的tmux session中创建未预期pane。",
+      "acceptance_criteria": [
+        "POST /api/ccb/session/open-terminal：当ccb lock文件存在且PID存活时，不打开Terminal.app，改为直接attach到已有tmux session",
+        "attach逻辑：读取 ~/.ccb/run/ccb-{cwd_hash}.lock 取PID，再扫描 tmux list-sessions 找到含该PID的session（如ccb_{parent_pid}格式 或 ai-{ts}-{pid}格式），通过osascript打开Terminal并tmux attach-session",
+        "当lock文件存在但PID已死亡（stale lock）时，自动删除lock文件后启动新ccb",
+        "当lock文件不存在时，行为与修复前相同（打开Terminal.app运行新ccb）",
+        "open-terminal响应中增加字段：{ ok, action: 'attached'|'started'|'no_session', pid?, session_name? }",
+        "POST /api/ccb/session/start 的spawn env删除 TMUX、TMUX_PANE、WEZTERM_PANE 变量",
+        "删除TMUX env后，GUI server在tmux中运行时，session/start的后台ccb进程不再创建新pane（因detect_terminal()=None、stdin非tty → 快速退出code 1，不占锁）",
+        "现有 GET /api/ccb/session-status、/session/attach、/session/stop 端点行为不变"
+      ],
+      "output_files": [
+        "gui/server.js"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && node -e \"const s=require(\\\"./gui/server.js\\\"); process.exit(0)\" 2>&1 | head -1 || true'",
+      "coder_timeout_seconds": 500,
+      "notes": "CCB lock file路径：~/.ccb/run/ccb-{md5(cwd)[:8]}.lock（参见 CCB/lib/process_lock.py ProviderLock class）。cwd_hash计算：hashlib.md5(cwd.encode()).hexdigest()[:8]。CCB session file路径：~/.ccb/run/ccb-session-{session_id}.json，包含 work_dir、terminal、providers.{pane_id}、ccb_project_id 等字段（参见 ccb-session-ai-1771989389-73772.json 实例）。attach时需要调用 tmux attach-session -t {session_name} 或找到对应pane通过osascript打开Terminal并执行attach命令。strip TMUX env的JavaScript代码：const noTmuxEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !['TMUX','TMUX_PANE','WEZTERM_PANE'].includes(k)))；spawn使用noTmuxEnv。"
+    },
+
+    {
+      "task_id": "P21",
+      "title": "GUI CCB面板增强：实例状态感知、Attach/Restart操作、废弃session清理",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P1",
+      "depends_on": ["P20"],
+      "description": "升级CCB会话面板(renderCcbPanel)和相关API端点，提供实例级别的状态感知和操作。(1)在 GET /api/ccb/session-status 返回中增加 ccb_instance 字段：是否有活跃ccb进程（通过lock file PID检测）、PID、session名称、工作目录。(2)GUI面板在显示Provider状态行时，同时展示「CCB进程」状态（非Provider ping状态）：显示CCB进程PID和tmux session名，提供「Attach」和「重启」按钮。(3)「重启」操作：kill现有ccb进程（或ccb-cleanup --clean）+ 等待锁释放 + 调用open-terminal启动新实例。(4)增加 POST /api/ccb/session/cleanup 端点：调用 ccb-cleanup --clean（清理废弃ccb_*和ai-*会话及stale lock files）。(5)GUI面板底部增加「清理废弃会话」按钮，调用cleanup端点。",
+      "acceptance_criteria": [
+        "GET /api/ccb/session-status 返回增加 ccb_instance: { running: bool, pid?: number, session_name?: string, work_dir?: string } 字段",
+        "ccb_instance.running 通过读取 ~/.ccb/run/ccb-{hash}.lock 并 os.kill(pid, 0) 检测",
+        "GUI面板的Provider状态行下方增加「CCB进程状态」区域，显示 PID + session名",
+        "CCB进程运行时：显示绿色「运行中 PID xxx (session ccb_yyy)」+ 「Attach」按钮 + 「重启」按钮",
+        "CCB进程未运行时：显示「未运行」，原有启动按钮正常显示",
+        "「重启」按钮：调用 POST /api/ccb/session/stop（kill tmux sessions）→ 等待 500ms → 调用 open-terminal 启动新实例",
+        "POST /api/ccb/session/cleanup 端点存在，调用 ccb-cleanup --clean 清理废弃会话",
+        "GUI面板底部「清理废弃会话」按钮调用 cleanup 端点，成功后刷新面板"
+      ],
+      "output_files": [
+        "gui/server.js",
+        "gui/public/app.js"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && node -e \"const s=require(\\\"./gui/server.js\\\"); process.exit(0)\" 2>&1 | head -1 || true'",
+      "coder_timeout_seconds": 600,
+      "notes": "ccb-cleanup脚本路径：$(which ccb-cleanup) 或 $CCB_PATH/bin/ccb-cleanup。废弃session判断：tmux session名匹配 ccb_{pid} 或 ai-{ts}-{pid} 格式，且对应PID不存活。PID存活检测：os.kill(pid, 0) 在Node.js中等价于 process.kill(pid, 0) → 若抛出ESRCH则进程不存在。ccb_instance检测的cwd_hash需要使用和GUI Server相同的工作目录（ccb_work_dir或project_path）。"
+    },
+
+    {
+      "task_id": "P22",
+      "title": "semi-auto执行链路端到端验证与修复",
+      "owner_subsystem": "rdloop/coordinator",
+      "priority": "P1",
+      "depends_on": ["P20"],
+      "description": "验证并修复semi-auto模式下测试任务的完整执行链路：coordinator→call_coder_ccb.sh→cask ping→askd daemon→ccb tmux pane。具体检查点：(1)cask ping在 ccb_work_dir=/Users/yzliu/work/projects/cord_test 上下文中是否可用（CCB_SESSION_FILE是否正确设置）；(2)maybe_start_daemon的2秒等待是否足够（askd冷启动时间）；(3)CCB_SESSION_FILE路径是否从repo_path/.ccb/读取（P18验证）；(4)发现问题时提出针对性修复。补充：在call_coder_ccb.sh中增加ping失败时的详细诊断日志，便于未来排查。",
+      "acceptance_criteria": [
+        "手动测试：cd /Users/yzliu/work/projects/cord_test && python3 $CCB_PATH/bin/cask --timeout 5 'ping' 返回 rc=0 或有响应输出（非错误）",
+        "call_coder_ccb.sh的ping检测（line 78）在有活跃CCB session时成功，在无活跃session时明确报错并退出127",
+        "CCB_SESSION_FILE设置为 ${project_path}/.ccb/.codex-session（P18修复已在代码中，验证其有效性）",
+        "call_coder_ccb.sh失败时run.log包含足够诊断信息：provider名、timeout、ping结果、session_file路径",
+        "新增诊断日志：ping失败时打印 session_file 路径和是否存在、cask命令完整调用路径",
+        "如发现cask ping 2s超时问题：在call_coder_ccb.sh中增加ping重试（最多3次，间隔1s）或提高ping timeout",
+        "bash语法检查通过：bash -n coordinator/lib/call_coder_ccb.sh"
+      ],
+      "output_files": [
+        "coordinator/lib/call_coder_ccb.sh"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && bash -n coordinator/lib/call_coder_ccb.sh && echo OK'",
+      "coder_timeout_seconds": 400,
+      "notes": "cask ping测试方法：需要先确保CCB session(P20修复后)在运行，然后从worktree目录执行 CCB_SESSION_FILE=repo_path/.ccb/.codex-session cask --timeout 5 ping。如果ping通过但输出不是'pong'也算通过（cask会把'ping'发送给Codex，Codex回复任意内容即表明通道通畅）。askd autostart默认启用（autostart_enabled默认返回True），关键是wait_for_daemon_ready时间是否足够。"
+    },
+
+    {
+      "task_id": "P23",
+      "title": "semi-auto模式端到端冒烟测试",
+      "owner_subsystem": "rdloop",
+      "priority": "P2",
+      "depends_on": ["P20", "P21", "P22"],
+      "description": "在P20-P22完成后，执行完整的semi-auto冒烟测试，验证从GUI提交任务到结果输出的完整链路可通。测试场景：(1)CCB未运行时，GUI能通过「在终端中运行」成功启动；(2)CCB运行后，重复点击「在终端中运行」触发attach而非报错；(3)从GUI提交一个最小semi-auto测试任务（task_type=engineering_impl, execution_mode=semi-auto，简单instruction如'echo hello'）；(4)验证任务进入RUNNING状态，call_coder_ccb.sh被调用，Codex CLI收到指令；(5)任务完成后状态更新为DONE或PASS。",
+      "acceptance_criteria": [
+        "场景1：CCB未运行时，GUI点击「在终端中运行 Codex」成功打开Terminal.app并启动ccb，无code 2错误",
+        "场景2：CCB运行后，重复点击「在终端中运行 Codex」→ GUI显示'已Attach到已有session'或直接打开Terminal并attach，无'Another instance'错误",
+        "场景3：GUI提交semi-auto任务，任务JSON包含 execution_mode='semi-auto'",
+        "场景4：coordinator调用call_coder_ccb.sh，run.log显示 '[CODER][semi-auto/ccb] attached to human tmux session' 而非 'CCB daemon unavailable'",
+        "场景5：cask成功向Codex发送prompt（run.log或stdout.log有输出），Codex响应后任务进入DONE/PASS状态",
+        "记录每个场景的测试命令和实际输出，作为验收证据"
+      ],
+      "output_files": [],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && [ -f coordinator/run_task.sh ] && [ -f gui/server.js ] && [ -f gui/public/app.js ] && echo OK'",
+      "coder_timeout_seconds": 300,
+      "notes": "这是验收测试task，主要输出是测试报告/日志而非代码。执行时需要系统有：(a)运行中的CCB Session (ccb codex in cord_test)；(b)GUI server已启动 (node gui/server.js)；(c)rdloop.config.json已配置 ccb_work_dir, ccb_path, default_execution_mode=semi-auto。最小测试任务spec示例：{ task_id:'smoke-test-1', task_type:'hello_world', execution_mode:'semi-auto', goal:'echo the word DONE', repo_path:'/Users/yzliu/work/projects/cord_test' }。"
+    }
+
+  ],
+
+  "shared_contracts": {
+    "CCB实例锁检测接口": {
+      "owner_task": "P20",
+      "dependents": ["P21"],
+      "interface_summary": "读取 ~/.ccb/run/ccb-{md5(work_dir)[:8]}.lock → PID字符串；process.kill(pid,0) → 若无ESRCH则进程存活。ccb_session_file: ~/.ccb/run/ccb-session-*.json → work_dir/providers/pane_id字段"
+    },
+    "POST /api/ccb/session/open-terminal (增强)": {
+      "owner_task": "P20",
+      "dependents": ["P21"],
+      "interface_summary": "新增逻辑：若已有活跃实例 → attach并返回 { ok, action:'attached', pid, session_name }；无实例 → 原有启动逻辑 → { ok, action:'started' }；stale lock → 清理后启动 → { ok, action:'started', cleaned_stale:true }"
+    },
+    "GET /api/ccb/session-status (增强)": {
+      "owner_task": "P21",
+      "dependents": [],
+      "interface_summary": "新增 ccb_instance: { running, pid?, session_name?, work_dir? } 字段；现有 providers 数组保持不变"
+    },
+    "POST /api/ccb/session/cleanup": {
+      "owner_task": "P21",
+      "dependents": [],
+      "interface_summary": "调用 ccb-cleanup --clean；返回 { ok, cleaned_sessions: string[] }"
+    }
+  },
+
+  "delivery_order": [
+    ["P20"],
+    ["P21", "P22"],
+    ["P23"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd 执行 rc=0",
+      "output_files 全部存在",
+      "与 shared_contracts 接口定义一致",
+      "向后兼容：现有v3.0-v3.3 TaskSpec不受影响"
+    ],
+    "P20_special": [
+      "open-terminal已有实例时action='attached'而非'started'",
+      "session/start的spawn env中TMUX、TMUX_PANE、WEZTERM_PANE已删除",
+      "stale lock（PID不存活）时自动清理并重新启动",
+      "不引入新的lock文件写入逻辑（只读取CCB写的lock file）"
+    ],
+    "P21_special": [
+      "ccb_instance检测使用correct work_dir（ccb_work_dir或project_path）",
+      "「重启」流程：stop → 等待 → start，顺序不可错",
+      "cleanup端点安全：不删除活跃session（PID存活的session保留）"
+    ],
+    "P22_special": [
+      "新增诊断日志不影响原有输出格式（追加到run.log）",
+      "bash -n 语法检查必须通过",
+      "ping重试（若加）不超过3次"
+    ],
+    "P23_special": [
+      "所有5个场景均有执行记录",
+      "场景4的run.log中必须出现'attached to human tmux session'",
+      "场景5的stdout.log非空"
+    ]
+  },
+
+  "gap_analysis": {
+    "gap_B1_lock_conflict": {
+      "current_state": "open-terminal每次均尝试启动新ccb，不检测已有实例；session/start spawn环境继承TMUX vars导致后台进程占锁",
+      "after_v3_4": "P20修复后：open-terminal检测已有实例，复用已有session；session/start不再污染TMUX env",
+      "root_cause": "P12修复专注于'调用原生ccb入口'，未考虑(1)已有实例的单一性约束 (2)后台spawn环境隔离"
+    },
+    "gap_B2_ux_restart": {
+      "current_state": "GUI无法区分'CCB未启动'与'CCB已启动但用户看不到'，无Attach/Restart操作",
+      "after_v3_4": "P21增加实例状态感知和操作按钮",
+      "root_cause": "session-status端点只ping provider daemon（cask/gask），不检测ccb进程本身"
+    },
+    "gap_B3_execution_chain": {
+      "current_state": "semi-auto执行链路（coordinator→cask→ccb pane）未经端到端验证",
+      "after_v3_4": "P22验证cask ping可用，P23完成冒烟测试",
+      "root_cause": "v3.3专注于GUI链路，coordinator侧的ccb adapter链路未验证"
+    }
+  },
+
+  "quick_fix_for_current_state": {
+    "description": "在P20实现前，解除当前卡死状态的临时操作步骤",
+    "steps": [
+      "1. 确认当前活跃CCB session: tmux list-sessions → 找到 ccb_73763 (Python进程，Codex CLI运行中)",
+      "2. 在GUI的「打开终端」功能可用前，手动attach: 在任意终端执行 tmux attach-session -t ccb_73763",
+      "3. 若想启动新CCB（替换当前实例）: tmux kill-session -t ccb_73763 → 等待PID 73772退出 → 再点GUI「在终端中运行」",
+      "4. 清理废弃session: tmux kill-session -t ccb_10727 && tmux kill-session -t ccb_26377",
+      "5. 验证cask可用（在cord_test目录）: cd /Users/yzliu/work/projects/cord_test && python3 /Users/yzliu/work/Cord/CCB/bin/cask --timeout 10 'ping'"
+    ]
+  }
+}

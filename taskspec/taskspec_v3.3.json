@@ -1,0 +1,438 @@
+{
+  "project": "v3.3 GUI链路修复：CCB启动、Collab模式集成、Adapter选择修正、任务创建UX",
+  "version": "3.3",
+  "created_at": "2026-02-25T12:00:00Z",
+  "description": "v3.2实现后暴露的五类工程缺口：①CCB session从GUI启动时立即退出（PATH/env未正确传递给tmux子进程）；②新建任务缺少collab模式的type和配置，无法通过GUI建立collab任务；③Settings角色配置选择的是CLIProxyAPI封装的provider而非coding agent CLI选项，导致LLM无工具调用/多轮调度能力；④新建任务表单过度依赖JSON编辑，应改为下拉选择优先；⑤GUI→coordinator→adapter→execution→result的端到端链路存在多处断点。",
+  "execution_mode_default": "semi-auto",
+
+  "issue_analysis": {
+    "issue_1_ccb_session_exit": {
+      "symptom": "GUI点击启动CCB后提示：Started: ccb_codex, ccb_gemini. Session(s) ccb_codex, ccb_gemini exited immediately.",
+      "root_cause": [
+        "server.js POST /api/ccb/session/start 使用 tmux new-session -d -s ccb_codex 创建空session后 send-keys 注入命令",
+        "CCB自身（ccb Python脚本）使用 tmux respawn-pane 并注入 export PATH=CCB/bin:... 前缀和 remain-on-exit=on 保护",
+        "GUI方式绕过了CCB的内部启动流程：(a)PATH未正确包含CCB/bin目录导致gemini/codex命令找不到；(b)缺少remain-on-exit保护导致出错后pane立即关闭；(c)缺少CCB内部所需的env变量（CCB_GASKD等）",
+        "getCoordinatorEnv()只添加系统PATH，不包含CCB/bin；ccb_path虽配置了但ccbScript可能验证失败（ccb是Python非bash）",
+        "1.5秒超时后检测session不存在，返回hint但错误信息不可见"
+      ],
+      "fix_direction": "不应由GUI重新实现CCB的启动逻辑，而是直接调用CCB的入口脚本并让CCB自行管理tmux session"
+    },
+    "issue_2_collab_mode_missing": {
+      "symptom": "新建任务表单缺少execution_mode选择、collab角色配置、以及与collab_context.md的关联",
+      "root_cause": [
+        "app.js saveNewSpec()从表单收集字段时不包含execution_mode（默认值在coordinator里是auto）",
+        "collab_context.md中的角色分配（executor→claude, reviewer→codex等）在Settings面板可编辑，但完全不影响任务创建和执行",
+        "TaskSpec schema（schemas/task_spec.json）不包含execution_mode和role字段定义",
+        "coordinator/run_task.sh虽能读execution_mode但GUI不设置它，导致semi-auto任务只能手动编辑JSON",
+        "整个collab模式的 PM→角色分配→/ask分发 流程在rdloop GUI中完全缺失"
+      ],
+      "fix_direction": "在任务创建表单添加execution_mode下拉和collab配置区域；设计collab task type的完整字段集"
+    },
+    "issue_3_provider_vs_agent_cli": {
+      "symptom": "Settings面板和任务创建中coder/judge下拉显示的是CLIProxyAPI封装的adapter（如antigravity-cli→cursorcliapi:8000），选中后匹配的model来自cliapi gateway而非coding agent CLI本身",
+      "root_cause": [
+        "detectAdapters()扫描call_*.sh脚本并按nameMap映射名称，但所有名称（codex-cli, claude-cli, antigravity-cli）都映射到同一套CLIProxyAPI provider",
+        "refreshModelSelector()通过/api/cliapi-providers/{providerId}/models获取模型列表，这些模型是CLIProxyAPI网关的LLM模型（如gpt-4, claude-3），不是coding agent CLI的执行配置",
+        "用户选择codex-cli + gpt-4时，意图是「用Codex CLI（有工具调用、多轮调度能力）执行」，但系统实际调用的是CLIProxyAPI的OpenAI-compatible接口（纯文本补全，无工具调用）",
+        "call_coder_cursor.sh实际调用的是cursorcliapi HTTP接口（OpenAI格式），不是cursor CLI agent",
+        "call_coder_codex.sh调用的是codex CLI（有agent能力），但model下拉从cliapi获取的模型列表是LLM模型而非codex配置",
+        "核心问题：adapter选择器混淆了两种完全不同的东西——(A) Coding Agent CLI（codex/claude/cursor，有工具调用、文件操作、多轮迭代能力）和 (B) CLIProxyAPI（HTTP网关，纯LLM调用，无agent能力）"
+      ],
+      "fix_direction": "将adapter选择器拆分为两层：第一层选择执行信道（agent CLI vs API proxy），第二层根据信道类型显示对应的模型/配置选项"
+    },
+    "issue_4_task_creation_ux": {
+      "symptom": "新建任务时大部分字段需要用户直接编辑JSON文本框，缺少结构化的表单控件",
+      "root_cause": [
+        "当前表单只有少量下拉（task_type, attempt_context_mode, coder/judge adapter）",
+        "instruction/goal/acceptance/test_cmd/constraints等核心字段藏在JSON编辑器里",
+        "allowed_paths和forbidden_globs需要手写JSON数组",
+        "max_attempts没有独立控件（在JSON里配置）",
+        "repo_path虽有input但没有验证反馈",
+        "rubric_thresholds只在task_type选择后动态出现，UX不连贯"
+      ],
+      "fix_direction": "将所有常用字段提取为独立表单控件（文本输入、下拉选择、数字输入），JSON编辑器仅保留为高级选项/预览"
+    },
+    "issue_5_pipeline_breaks": {
+      "symptom": "GUI→coordinator→adapter→execution→result链路存在多处断点",
+      "breaks_found": [
+        {
+          "break_id": "B1",
+          "location": "GUI Task Form → TaskSpec.execution_mode",
+          "description": "GUI表单不设置execution_mode字段，coordinator默认用auto，用户无法通过GUI创建semi-auto任务",
+          "severity": "HIGH"
+        },
+        {
+          "break_id": "B2",
+          "location": "GUI Adapter Selector → Model Selector",
+          "description": "adapter选择codex-cli/claude-cli时，model下拉从cliapi gateway获取LLM模型列表（或为空隐藏），不匹配实际adapter需要的配置",
+          "severity": "HIGH"
+        },
+        {
+          "break_id": "B3",
+          "location": "Settings Role Config → Task Execution",
+          "description": "Settings面板的角色配置（executor→claude, reviewer→codex）保存到collab_context.md但不影响任何任务创建或执行逻辑",
+          "severity": "HIGH"
+        },
+        {
+          "break_id": "B4",
+          "location": "CCB Session Start → ccb Process",
+          "description": "GUI的tmux session创建方式绕过CCB内部启动逻辑，PATH/env不完整导致进程立即退出",
+          "severity": "CRITICAL"
+        },
+        {
+          "break_id": "B5",
+          "location": "TaskSpec Schema → GUI Validation",
+          "description": "schemas/task_spec.json定义的字段集与GUI表单字段不一致；execution_mode、collab相关字段在schema中缺失",
+          "severity": "MEDIUM"
+        },
+        {
+          "break_id": "B6",
+          "location": "Semi-Auto CCB Adapter → CCB Daemon",
+          "description": "call_coder_ccb.sh调用cask/gask时设置CCB_SESSION_FILE=${worktree_dir}/.codex-session，但worktree是新建的不包含session文件",
+          "severity": "MEDIUM"
+        },
+        {
+          "break_id": "B7",
+          "location": "GUI Settings Save → Coordinator Read",
+          "description": "GUI设置default_execution_mode到rdloop.config.json，但任务创建时不读取该默认值填入TaskSpec",
+          "severity": "MEDIUM"
+        }
+      ]
+    }
+  },
+
+  "tasks": [
+
+    {
+      "task_id": "P12",
+      "title": "CCB Session启动修复 — 使用CCB原生入口替代GUI自建tmux",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "重构 POST /api/ccb/session/start 端点，不再由GUI自行创建tmux session并send-keys注入命令，而是直接以子进程方式调用CCB的原生入口脚本（$ccb_path/ccb <providers>），让CCB自行管理tmux session创建、PATH注入、env变量设置和remain-on-exit保护。GUI只负责：(1)验证ccb_path配置有效；(2)调用ccb脚本；(3)等待并检测session是否成功启动；(4)返回session状态。同时修复debug-path端点，增加完整的环境诊断信息。",
+      "acceptance_criteria": [
+        "POST /api/ccb/session/start 不再使用 tmux new-session + send-keys，改为 spawn('python3', [ccbScript, ...providers]) 或 spawn(ccbScript, providers)",
+        "CCB脚本自行创建tmux session（使用CCB内部的session命名和remain-on-exit保护）",
+        "启动后GUI通过 tmux list-sessions 和 cask/gask ping 验证启动结果",
+        "返回值包含：{ ok, sessions: [{provider, session_name, status}], errors: [] }",
+        "ccb_path未配置时返回400 + 明确提示信息",
+        "ccb脚本不存在时返回404 + 提示检查ccb_path",
+        "GET /api/ccb/debug-path 返回完整诊断：ccb_path、ccb脚本是否存在、PATH内容、python3版本、tmux版本",
+        "启动失败时返回ccb进程的stderr内容，用户可看到实际错误",
+        "现有 GET /api/ccb/session-status、/session/attach、/session/stop 端点保持兼容"
+      ],
+      "output_files": [
+        "gui/server.js"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && node -e \"require(\\\"./gui/server.js\\\")\" 2>&1 | head -1 || true'",
+      "coder_timeout_seconds": 500,
+      "notes": "关键：CCB的ccb文件是Python脚本（#!/usr/bin/env python3），不是bash。GUI应用spawn('python3', [ccbScript, 'codex', 'gemini'])调用。CCB内部使用tmux respawn-pane + remain-on-exit=on + export PATH=CCB/bin:...的完整启动流程，GUI不应重复实现。session名在CCB内部由AILauncher生成（ai-{timestamp}-{pid}格式），GUI需要通过tmux list-sessions检索而非预设名称。"
+    },
+
+    {
+      "task_id": "P13",
+      "title": "任务创建表单 — 添加execution_mode选择与collab模式配置",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": ["P12"],
+      "description": "在新建任务模态框中新增：(1)execution_mode下拉选择器（auto/semi-auto），默认值从rdloop.config.json的default_execution_mode读取；(2)当选择semi-auto时，展示collab配置区域，显示当前角色分配表（从/api/agent/roles读取），允许用户为本次任务覆盖角色的provider；(3)将execution_mode字段写入TaskSpec JSON。同时在schema/task_spec.json中添加execution_mode字段定义，在server.js validateTaskSpecData中添加execution_mode枚举验证。",
+      "acceptance_criteria": [
+        "任务创建表单包含execution_mode下拉：auto、semi-auto",
+        "下拉默认值从rdloop.config.json default_execution_mode读取",
+        "选择semi-auto时，表单下方展示「协作配置」折叠区域",
+        "协作配置区域显示角色表（executor/reviewer/designer/inspiration），各角色带provider下拉",
+        "角色provider下拉选项：claude, codex, gemini, opencode, droid",
+        "PM行不可编辑（显示claude，置灰）",
+        "saveNewSpec()将execution_mode写入spec对象",
+        "saveNewSpec()将角色覆盖写入spec.collab_roles对象（可选，仅semi-auto模式）",
+        "validateTaskSpecData验证execution_mode ∈ ['auto', 'semi-auto']",
+        "schemas/task_spec.json新增execution_mode字段（enum）和collab_roles字段（object，可选）",
+        "auto模式不显示协作配置区域"
+      ],
+      "output_files": [
+        "gui/public/app.js",
+        "gui/server.js",
+        "schemas/task_spec.json"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && node -e \"const s=require(\\\"./gui/server.js\\\"); process.exit(0)\" 2>&1 | head -1 || true'",
+      "coder_timeout_seconds": 500,
+      "notes": "collab_roles字段是任务级覆盖，不修改collab_context.md全局配置。示例：{ executor: 'codex', reviewer: 'gemini' }。coordinator/run_task.sh后续需要读取此字段（P16处理）。当前阶段先确保GUI能写入此字段即可。"
+    },
+
+    {
+      "task_id": "P14",
+      "title": "Adapter选择器重构 — 区分Coding Agent CLI与CLIProxyAPI",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "重构coder/judge adapter选择器，将当前扁平的adapter列表拆分为两个层级：(1)执行信道选择（Coding Agent CLI / CLIProxyAPI / CCB），每种信道有不同的能力标签（agent CLI有工具调用/文件操作/多轮调度，API proxy只有文本补全）；(2)根据选择的信道显示对应的配置选项——Agent CLI信道显示CLI名称（claude, codex, cursor），API Proxy信道显示provider+model下拉（当前cliapi逻辑）。确保用户明确知道选择的是有agent能力的CLI还是纯API调用。",
+      "acceptance_criteria": [
+        "adapter选择器UI分为两层：信道类型→具体配置",
+        "信道类型下拉选项：coding-agent-cli（推荐，有工具调用能力）, cliapi-proxy（纯LLM文本补全）, ccb（通过CCB协作）",
+        "选择coding-agent-cli时，第二层显示CLI名称下拉：claude-cli, codex-cli, cursor-cli",
+        "选择coding-agent-cli时，不显示model下拉（CLI自行管理模型选择）",
+        "选择cliapi-proxy时，第二层显示provider下拉+model下拉（保持当前refreshModelSelector逻辑）",
+        "选择ccb时，第二层显示ccb provider选择（codex/gemini）并提示需启动CCB session",
+        "信道类型旁显示能力标签：agent-cli→'工具调用 | 文件操作 | 多轮调度'，api-proxy→'文本补全'",
+        "saveNewSpec()根据信道类型写入正确的coder/judge字段值",
+        "向后兼容：已有TaskSpec中的adapter名称（如antigravity-cli）继续可用",
+        "Settings面板的coder/judge默认值选择器同步更新"
+      ],
+      "output_files": [
+        "gui/public/app.js",
+        "gui/public/style.css"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && [ -f gui/public/app.js ] && echo OK || echo FAIL'",
+      "coder_timeout_seconds": 600,
+      "notes": "核心区分：(A)Coding Agent CLI（codex/claude/cursor CLI程序，有文件系统访问、工具调用、多轮agent循环能力，是真正的coding agent）；(B)CLIProxyAPI（HTTP网关，OpenAI-compatible接口，只做单轮文本补全，无agent能力）；(C)CCB（通过cask/gask发送到已有tmux session中运行的coding agent，是semi-auto模式的信道）。当前问题是所有三种都平铺在同一个下拉里，用户无法区分。映射关系：bridge adapter对应(A)auto模式，ccb adapter对应(C)semi-auto模式，cursor/antigravity adapter对应(B)api模式。"
+    },
+
+    {
+      "task_id": "P15",
+      "title": "任务创建表单UX改进 — 结构化表单控件替代JSON编辑",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P1",
+      "depends_on": ["P13", "P14"],
+      "description": "重构新建任务模态框，将所有常用TaskSpec字段提取为独立的结构化表单控件：(1)instruction/goal用多行文本框（必填，红星标记）；(2)acceptance_criteria用多行文本框（每行一条，或tag输入）；(3)test_cmd用单行文本框+「验证」按钮；(4)max_attempts用数字输入（默认3，范围1-10）；(5)repo_path用文本框+实时路径验证反馈；(6)allowed_paths和forbidden_globs用tag输入或每行一条的文本框（不再让用户写JSON数组）；(7)constraints用多行文本框；(8)coder_timeout_seconds/judge_timeout_seconds用数字输入（带默认值显示）。JSON编辑器移到「高级」折叠面板内，仅作为预览和高级编辑用途。表单字段优先级：下拉选择 > 填写输入，不让用户在GUI写JSON。",
+      "acceptance_criteria": [
+        "所有常用字段都有独立的表单控件（非JSON编辑器）",
+        "instruction/goal为textarea，标记必填",
+        "acceptance_criteria为textarea，每行一条，提交时转为JSON数组",
+        "test_cmd为单行input",
+        "max_attempts为number input，min=1, max=10, default=3",
+        "repo_path为text input，失焦时调用/api/validate-path验证（新增端点，或复用已有验证）",
+        "allowed_paths和forbidden_globs为多行textarea（每行一条），不要求用户写JSON语法",
+        "coder_timeout_seconds和judge_timeout_seconds为number input（默认600）",
+        "constraints为textarea",
+        "JSON编辑器移至「高级选项」折叠面板内，默认收起",
+        "JSON编辑器内容与表单控件双向同步：编辑表单→更新JSON预览，编辑JSON→更新表单",
+        "表单提交时，结构化字段优先级高于JSON编辑器（若冲突以表单为准）",
+        "模板选择（hello_world/engineering_impl等）仍可用，选中后自动填充所有表单控件"
+      ],
+      "output_files": [
+        "gui/public/app.js",
+        "gui/public/style.css"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && [ -f gui/public/app.js ] && echo OK || echo FAIL'",
+      "coder_timeout_seconds": 600,
+      "notes": "UI设计原则：下拉选择 > 文本填写 > JSON编辑。只有instruction/acceptance_criteria因为是自由文本必须用textarea。其他能用下拉/数字框的都用结构化控件。JSON编辑器保留是为了power user和调试用途，但普通用户不应该需要碰它。表单布局建议分区：基本信息（task_id, task_type, execution_mode）→需求描述（instruction, acceptance_criteria）→执行配置（coder/judge, timeout, max_attempts）→仓库配置（repo_path, base_ref, paths）→高级（JSON编辑器）。"
+    },
+
+    {
+      "task_id": "P16",
+      "title": "Coordinator适配 — 读取collab_roles并路由到正确的adapter",
+      "owner_subsystem": "rdloop/coordinator",
+      "priority": "P1",
+      "depends_on": ["P13"],
+      "description": "修改coordinator/run_task.sh，使其在semi-auto模式下读取TaskSpec中的collab_roles字段，并根据角色分配选择正确的CCB provider（cask/gask）。当前call_coder_ccb.sh通过coder_model字段的前缀（gemini*→gask）选择provider，这不够灵活。应改为：(1)读取collab_roles.executor的provider决定coder使用的ccb命令；(2)读取collab_roles.reviewer的provider决定judge使用的ccb命令；(3)若collab_roles不存在，回退到当前逻辑（coder_model前缀判断）。同时修改call_coder_ccb.sh和call_judge_ccb.sh以支持新的provider参数传递。",
+      "acceptance_criteria": [
+        "run_task.sh在semi-auto模式下读取TaskSpec的collab_roles字段",
+        "collab_roles.executor → 传递给call_coder_ccb.sh作为provider参数",
+        "collab_roles.reviewer → 传递给call_judge_ccb.sh作为provider参数",
+        "call_coder_ccb.sh接受第5个参数（provider），用于选择cask/gask/lask",
+        "provider映射：claude→lask, codex→cask, gemini→gask",
+        "collab_roles缺失时回退到当前逻辑（coder_model前缀判断）",
+        "call_judge_ccb.sh同理接受provider参数",
+        "添加对opencode和droid provider的前瞻支持（映射到oask/dask）",
+        "修改不影响auto模式（bridge adapter不变）",
+        "修改不影响非CCB adapter（cursor/antigravity等不变）"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh",
+        "coordinator/lib/call_coder_ccb.sh",
+        "coordinator/lib/call_judge_ccb.sh"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && bash -n coordinator/run_task.sh && bash -n coordinator/lib/call_coder_ccb.sh && bash -n coordinator/lib/call_judge_ccb.sh && echo OK || echo FAIL'",
+      "coder_timeout_seconds": 400,
+      "notes": "provider到CCB命令的映射：claude→lask（laskd daemon），codex→cask（caskd daemon），gemini→gask（gaskd daemon），opencode→oask，droid→dask。这些都是CCB/bin/下的可执行脚本。当前call_coder_ccb.sh的provider选择逻辑在line 37-38：[[ \"$coder_model\" == gemini* ]] && ccb_bin=\"gask\"，需要扩展为读取provider参数。"
+    },
+
+    {
+      "task_id": "P17",
+      "title": "TaskSpec Schema升级 — 新增execution_mode、collab_roles、channel_type字段",
+      "owner_subsystem": "rdloop/schemas",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "升级schemas/task_spec.json，反映v3.3的字段变更：(1)新增execution_mode字段（enum: auto, semi-auto，默认auto）；(2)新增collab_roles字段（object，可选，键为角色名，值为provider名）；(3)新增channel_type字段（enum: coding-agent-cli, cliapi-proxy, ccb，描述adapter的信道类型）；(4)更新coder/judge字段的description，明确各值对应的执行方式。同步更新gui/server.js的validateTaskSpecData函数以校验新字段。",
+      "acceptance_criteria": [
+        "schemas/task_spec.json新增execution_mode: { type: 'string', enum: ['auto', 'semi-auto'], default: 'auto' }",
+        "schemas/task_spec.json新增collab_roles: { type: 'object', properties: { executor, reviewer, designer, inspiration 各为enum provider } }",
+        "schemas/task_spec.json新增channel_type: { type: 'string', enum: ['coding-agent-cli', 'cliapi-proxy', 'ccb'] }",
+        "coder/judge字段description更新，列出各adapter名称和对应信道类型",
+        "validateTaskSpecData校验execution_mode枚举值",
+        "validateTaskSpecData校验collab_roles各值为合法provider",
+        "validateTaskSpecData校验channel_type枚举值（若提供）",
+        "现有TaskSpec（无新字段）验证仍通过（向后兼容）"
+      ],
+      "output_files": [
+        "schemas/task_spec.json",
+        "gui/server.js"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && python3 -c \"import json; json.load(open(\\\"schemas/task_spec.json\\\"))\" && echo OK || echo FAIL'",
+      "coder_timeout_seconds": 300,
+      "notes": "collab_roles是可选字段，只在semi-auto模式下有意义。channel_type是对现有coder/judge字段的补充说明，帮助用户和代码理解adapter的实际执行方式。向后兼容是硬性要求——所有现有v3.0-v3.2的TaskSpec必须不经修改即可通过验证。"
+    },
+
+    {
+      "task_id": "P18",
+      "title": "CCB Session文件链路修复 — worktree中CCB session文件创建与传递",
+      "owner_subsystem": "rdloop/coordinator",
+      "priority": "P1",
+      "depends_on": ["P12", "P16"],
+      "description": "修复semi-auto模式下call_coder_ccb.sh中CCB_SESSION_FILE指向worktree/.codex-session的问题。worktree是coordinator新建的git worktree目录，不包含CCB session文件。修改方案：(1)从项目根目录（repo_path）的.ccb/目录复制或链接session文件到worktree；(2)或修改CCB_SESSION_FILE指向项目根目录的.ccb/session文件；(3)确保cask/gask能在worktree上下文中正确执行（cwd设为worktree，但session文件在项目根）。",
+      "acceptance_criteria": [
+        "call_coder_ccb.sh中CCB_SESSION_FILE指向正确的session文件路径",
+        "session文件从repo_path/.ccb/目录读取（非worktree目录）",
+        "cask/gask执行时cwd设为worktree_dir（让coding agent在worktree中操作文件）",
+        "session文件路径基于provider动态选择：codex→.codex-session, gemini→.gemini-session, claude→.claude-session",
+        "repo_path/.ccb/目录不存在时，回退到不设置CCB_SESSION_FILE（让cask/gask自行查找）",
+        "call_judge_ccb.sh同步修改",
+        "修改不影响auto模式的bridge adapter"
+      ],
+      "output_files": [
+        "coordinator/lib/call_coder_ccb.sh",
+        "coordinator/lib/call_judge_ccb.sh"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && bash -n coordinator/lib/call_coder_ccb.sh && bash -n coordinator/lib/call_judge_ccb.sh && echo OK || echo FAIL'",
+      "coder_timeout_seconds": 300,
+      "notes": "CCB session文件的核心作用是告诉cask/gask在哪个tmux pane中执行。session文件绑定的是项目级的CCB session（由用户通过ccb命令启动），而非worktree级。因此应该从repo_path/.ccb/读取。provider到session文件的映射已在CCB/lib/providers.py中定义。"
+    },
+
+    {
+      "task_id": "P19",
+      "title": "Settings面板优化 — 默认执行模式联动与adapter信道说明",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P2",
+      "depends_on": ["P14"],
+      "description": "优化GUI Settings面板：(1)default_execution_mode选择器（auto/semi-auto）改为清晰的单选按钮，附带说明文案（auto=全自动无人介入，semi-auto=人在回路可观察介入）；(2)选择semi-auto时自动检测CCB状态并显示提示；(3)default_coder/judge选择器集成P14的信道分层选择器；(4)角色配置区域在execution_mode=auto时灰化并提示「角色配置仅在semi-auto模式下生效」。",
+      "acceptance_criteria": [
+        "execution_mode用radio button展示，附带一句说明",
+        "选择semi-auto时自动调用/api/ccb/session-status检测CCB在线状态",
+        "CCB不在线时在radio下方显示黄色提示文案（含启动命令）",
+        "default_coder/judge选择器使用P14的两层信道选择器",
+        "角色配置区域在auto模式下显示灰化样式+提示语",
+        "Settings保存时一次性写入所有字段到rdloop.config.json",
+        "保存失败时回滚UI（不留脏数据）"
+      ],
+      "output_files": [
+        "gui/public/app.js",
+        "gui/public/style.css"
+      ],
+      "test_cmd": "bash -c 'cd /Users/yzliu/work/Cord/Rdloop && [ -f gui/public/app.js ] && echo OK || echo FAIL'",
+      "coder_timeout_seconds": 400,
+      "notes": "Settings面板是全局默认配置入口，任务级别可以在创建时覆盖。UI要清晰表达这层关系：Settings设置的是默认值，每个任务可以单独覆盖。"
+    }
+  ],
+
+  "shared_contracts": {
+    "POST /api/ccb/session/start (重构)": {
+      "owner_task": "P12",
+      "dependents": ["P13", "P18"],
+      "interface_summary": "request: { providers: ['codex','gemini'] }; response: { ok, sessions: [{provider, session_name, status}], errors: [] }; 不再自建tmux session，调用CCB原生入口"
+    },
+    "TaskSpec.execution_mode": {
+      "owner_task": "P13",
+      "dependents": ["P16", "P17"],
+      "interface_summary": "enum: 'auto' | 'semi-auto'; 写入TaskSpec JSON; coordinator/run_task.sh读取"
+    },
+    "TaskSpec.collab_roles": {
+      "owner_task": "P13",
+      "dependents": ["P16", "P17"],
+      "interface_summary": "optional object: { executor?: provider, reviewer?: provider, designer?: provider, inspiration?: provider }; 仅semi-auto模式"
+    },
+    "adapter信道类型分层": {
+      "owner_task": "P14",
+      "dependents": ["P15", "P19"],
+      "interface_summary": "UI两层选择器: channel_type (coding-agent-cli|cliapi-proxy|ccb) → 具体adapter/provider/model; 写入TaskSpec.coder + TaskSpec.channel_type"
+    },
+    "schemas/task_spec.json v3.3": {
+      "owner_task": "P17",
+      "dependents": ["P13", "P16"],
+      "interface_summary": "新增字段: execution_mode(enum), collab_roles(object), channel_type(enum); 向后兼容v3.0-v3.2"
+    },
+    "CCB_SESSION_FILE路径策略": {
+      "owner_task": "P18",
+      "dependents": [],
+      "interface_summary": "session文件从repo_path/.ccb/读取而非worktree; 路径格式: {repo_path}/.ccb/.{provider}-session"
+    }
+  },
+
+  "delivery_order": [
+    ["P12", "P14", "P17"],
+    ["P13", "P18"],
+    ["P15", "P16"],
+    ["P19"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd 执行 rc=0",
+      "output_files 全部存在",
+      "与 shared_contracts 接口定义一致",
+      "无硬编码路径（全部从 rdloop.config.json 或环境读取）",
+      "向后兼容：现有v3.0-v3.2 TaskSpec不受影响"
+    ],
+    "P12_special": [
+      "不再有GUI自建tmux session的逻辑（tmux new-session + send-keys 模式删除）",
+      "CCB原生入口脚本正确调用（python3 ccb或直接./ccb）",
+      "ccb_path未配置时给出明确提示而非静默失败",
+      "已有CCB session端点（status/attach/stop）保持兼容"
+    ],
+    "P13_special": [
+      "execution_mode下拉默认值从config读取",
+      "semi-auto选中时协作配置区域可见，auto时隐藏",
+      "PM角色不可编辑",
+      "execution_mode写入TaskSpec JSON"
+    ],
+    "P14_special": [
+      "三种信道类型有清晰的能力说明",
+      "Agent CLI信道不显示model下拉",
+      "CLIProxyAPI信道保持当前model下拉逻辑",
+      "CCB信道与execution_mode=semi-auto联动"
+    ],
+    "P15_special": [
+      "所有常用字段都有独立控件",
+      "JSON编辑器在高级面板中且默认收起",
+      "表单与JSON双向同步",
+      "模板选择自动填充所有控件"
+    ],
+    "P16_special": [
+      "collab_roles缺失时回退到当前逻辑",
+      "provider到CCB命令映射正确（claude→lask, codex→cask, gemini→gask）",
+      "auto模式不受影响"
+    ],
+    "P18_special": [
+      "session文件从repo_path/.ccb/读取而非worktree",
+      "provider到session文件名映射正确",
+      ".ccb/目录不存在时优雅回退"
+    ]
+  },
+
+  "gap_analysis": {
+    "gap_1_ccb_launch": {
+      "current_state": "GUI通过tmux new-session + send-keys自建session，绕过CCB内部启动逻辑，PATH/env不完整导致进程立即退出",
+      "after_v3_3": "P12改为调用CCB原生入口脚本，CCB自行管理tmux session和环境变量",
+      "root_cause": "GUI重复实现了CCB的启动逻辑但不完整，应该委托给CCB"
+    },
+    "gap_2_collab_mode": {
+      "current_state": "Settings面板可配置角色但不影响任务创建和执行；任务表单无execution_mode字段；coordinator虽支持但GUI不传递",
+      "after_v3_3": "P13在任务表单添加execution_mode和collab_roles；P16让coordinator读取并路由；完成GUI→TaskSpec→coordinator→adapter的完整链路",
+      "root_cause": "GUI只实现了角色配置的展示/编辑，没有实现与任务执行的关联"
+    },
+    "gap_3_adapter_confusion": {
+      "current_state": "adapter选择器平铺所有选项，混淆coding agent CLI（有工具调用能力）和CLIProxyAPI（纯文本补全），model下拉从API网关获取与adapter不匹配",
+      "after_v3_3": "P14将adapter选择器拆分为信道类型→具体配置两层，明确区分三种执行方式的能力差异",
+      "root_cause": "所有adapter被当作等价选项展示，但它们的能力完全不同"
+    },
+    "gap_4_task_ux": {
+      "current_state": "常用字段藏在JSON编辑器中，用户需要手写JSON数组（如allowed_paths），缺少输入验证反馈",
+      "after_v3_3": "P15将所有常用字段提取为结构化控件，JSON编辑器降级为高级选项",
+      "root_cause": "初始实现优先确保功能可用，未优化表单UX"
+    },
+    "gap_5_session_file": {
+      "current_state": "call_coder_ccb.sh设置CCB_SESSION_FILE=${worktree_dir}/.codex-session，但worktree是新建目录不包含session文件，CCB无法找到对应的tmux pane",
+      "after_v3_3": "P18修改为从repo_path/.ccb/读取session文件，与CCB的session文件管理策略对齐",
+      "root_cause": "worktree是临时git分支目录，CCB session文件属于项目级而非分支级"
+    }
+  }
+}

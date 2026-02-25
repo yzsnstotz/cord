@@ -1,0 +1,34 @@
+{
+  "schema_version": "v1",
+  "task_id": "my_task",
+  "task_type": "engineering_impl",
+  "execution_mode": "semi-auto",
+  "channel_type": "ccb",
+  "repo_path": "/Users/yzliu/work/projects/cord_test/",
+  "base_ref": "main",
+  "goal": "写一个脚本，运行后在桌面新建一个文件夹 - cord test，在里面新建一个txt文件，然后写入\"hello\"",
+  "acceptance": [],
+  "test_cmd": "true",
+  "max_attempts": 3,
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 300,
+  "attempt_context_mode": "fresh_each",
+  "constraints": [],
+  "allowed_paths": [],
+  "forbidden_globs": [
+    "**/.env",
+    "**/secrets*",
+    "**/*.pem"
+  ],
+  "coder": "ccb",
+  "judge": "ccb",
+  "coder_model": "codex",
+  "judge_model": "codex",
+  "collab_roles": {
+    "executor": "codex",
+    "reviewer": "gemini",
+    "designer": "codex",
+    "inspiration": "codex"
+  },
+  "created_at": "2026-02-25T05:18:35.241Z"
+}

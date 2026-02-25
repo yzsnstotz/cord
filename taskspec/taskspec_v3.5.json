@@ -1,0 +1,242 @@
+{
+  "project": "v3.5 GUI修复与功能补全：CCB状态检测、按钮去重、Provider状态、Attach Pane、WezTerm全局选项、PM可配置、任务链路验证",
+  "version": "3.5",
+  "created_at": "2026-02-25T00:00:00Z",
+  "description": "本版本解决 7 类问题：(1) CCB 已运行但 GUI 检测不到（lock 扫描策略错误 + WezTerm 无 tmux）；(2) CCB 面板按钮大量重复且部分无效；(3) Provider 状态一直显示「未启动」（opencode ping 命令错配 + native 会话检测逻辑缺陷）；(4) 打开任何 coding agent 都只打开 Codex（attach 缺乏 pane 级别信息）；(5) Settings 缺少「从 WezTerm 打开全部」选项；(6) PM 角色硬锁死为 claude 不可更换；(7) PM→rdloop→executor 完整任务链路需端到端验证。",
+  "execution_mode_default": "semi-auto",
+
+  "environment_evidence": {
+    "rdloop_gui_server": "Rdloop/gui/server.js (2861 lines, Node.js/Express)",
+    "rdloop_frontend": "Rdloop/gui/public/app.js (3202 lines, vanilla JS)",
+    "ccb_root": "/Users/yzliu/work/Cord/CCB",
+    "ccb_session_prefix": "ccb_ (legacy) / ccb-{hash} or ai-{ts}-{pid} (native)",
+    "ccb_lock_path": "~/.ccb/run/ccb-{md5(workDir)[:8]}.lock",
+    "collab_context_path": "Agent/.context/rules/collab_context.md",
+    "rdloop_config_path": "Rdloop/rdloop.config.json"
+  },
+
+  "issue_analysis": {
+
+    "issue_P25_ccb_detection": {
+      "severity": "HIGH",
+      "symptom": "CCB 进程已运行（有 PID、有 lock 文件），但 GUI 侧边栏「CCB 进程」行显示「未运行」；Settings 里也无法感知 CCB 已启动。",
+      "root_cause": [
+        "1. /api/ccb/session-status 中 lock 检测仅计算 cfg.ccb_work_dir 对应的 hash，若 CCB 从其他目录启动（路径不完全一致），hash 不匹配，永远 running=false。",
+        "2. WezTerm 模式下 CCB 不创建 tmux 会话，整个 tmux-based provider 检测失效，5 个 provider 全部显示 off。",
+        "3. workDirForLock 从 config 读取，但 CCB 启动时写入 lock 文件的路径是实际 cwd（可能经过 realpath 展开）。"
+      ],
+      "fix_direction": "扫描 ~/.ccb/run/ 下所有 ccb-*.lock 文件，找到任何活跃 PID 即认为 CCB 正在运行；WezTerm 模式通过 ping 命令独立判断每个 provider 状态，不依赖 tmux 会话列表。"
+    },
+
+    "issue_P26_button_dedup": {
+      "severity": "MEDIUM",
+      "symptom": "CCB 面板中「快速启动」区域的单 Provider 按钮（启动 Codex/启动 Gemini）与下方 Provider 行的「启动」按钮完全重复；WezTerm 按钮埋在 <details> 折叠区，入口混乱；停止按钮也有多处重复。",
+      "root_cause": "renderCcbPanel() 同时生成了「快速启动」区域（含单 provider 按钮）和「Provider 状态」区域（也含每行启动/停止），两套按钮功能完全重叠。",
+      "fix_direction": "移除「快速启动」区域中的单 provider 启动/停止按钮，只保留「启动 Codex+Gemini」和「启动全套」等组合快捷键；每行保留 启动/打开终端/停止 三个标准按钮；将 WezTerm 入口提升到主操作区而非折叠区。"
+    },
+
+    "issue_P27_provider_status": {
+      "severity": "HIGH",
+      "symptom": "所有 provider 状态始终显示「⚪ 未启动」，即使 CCB 已运行且 codex CLI 在 tmux pane 中活跃。",
+      "root_cause": [
+        "1. CCB_PING_CMD.opencode = 'cask'（与 codex 相同），应为 'oask'。",
+        "2. native 会话检测（isCcbNativeSessionName）中：发现 native 会话后对每个 provider 都 ping，若 codex 可达就把 codex 的状态打入其余 provider，逻辑错误。",
+        "3. CCB native layout 中 provider 之间共享同一 tmux session，当前代码在 native 会话下只 ping 第一个可达的 provider 并复用给所有行。"
+      ],
+      "fix_direction": "修正 CCB_PING_CMD.opencode = 'oask'；native 会话检测中每个 provider 独立 ping，结果互不影响；增加 ping 失败时的 fallback 提示（不是 tmux 问题而是 daemon 未启动）。"
+    },
+
+    "issue_P28_attach_pane": {
+      "severity": "MEDIUM",
+      "symptom": "GUI 中点击任何 provider 的「打开终端」都只打开 Codex pane（tmux session 的第一个 pane），无法直接切换到 gemini/opencode 等 pane。",
+      "root_cause": "/api/ccb/session/attach 只能 attach 到 tmux session 级别（tmux attach -t sessionName），没有 pane 级别信息。CCB native 多 provider 会话中 codex 是 pane 0，其余 provider 是后续 pane，全部落到 pane 0。",
+      "fix_direction": [
+        "tmux 模式：session-status 端点额外返回每个 provider 的 tmux pane_id（通过 tmux list-panes -s -F '#{pane_id} #{pane_title}' 匹配 provider 名称）；attach 端点改为先 select-pane 再 attach：tmux select-pane -t {pane_id} && tmux attach -t {session}:{pane_id}。",
+        "WezTerm 模式：不做 pane 级区分，GUI 仅负责把 WezTerm 主窗口带到前台（通过 wezterm cli focus-pane 或 osascript activate WezTerm.app）；用户在 WezTerm 内自行切换 tab。"
+      ]
+    },
+
+    "issue_P29_wezterm_all": {
+      "severity": "LOW",
+      "symptom": "Settings 中没有「使用 WezTerm 打开所有 coding agent CI 窗口」选项，用户每次只能手动触发 WezTerm 入口。",
+      "root_cause": "现有 open-wezterm 端点存在但只有一个按钮入口，未与 Settings 全局选项联动；rdloop.config.json 中无 use_wezterm_for_all 字段。",
+      "fix_direction": "Settings 面板增加 checkbox「使用 WezTerm 打开所有 CI 窗口（use_wezterm_for_all）」，存入 rdloop.config.json；勾选后，所有「打开终端」动作自动路由到 open-wezterm 端点，并传入当前配置的全部 providers。"
+    },
+
+    "issue_P30_pm_role": {
+      "severity": "MEDIUM",
+      "symptom": "Settings 里 PM 角色的 provider 下拉框是 disabled 状态，无法修改；API PUT /api/agent/roles 拒绝 PM 更新；collab_context.md 中写死「PM role is NOT reassignable」。",
+      "root_cause": [
+        "server.js: assignable = role !== 'PM'；PUT /api/agent/roles 含 if (updates.some(u => u.role === 'PM')) return 400。",
+        "app.js: rolesHtml 中 const disabled = r.assignable ? '' : 'disabled'，PM 行 select 被禁用。",
+        "collab_context.md: 'PM role is NOT reassignable.' 硬编码说明；Worker Context 模板中 'PM identity: claude (current session)' 写死为 claude。"
+      ],
+      "fix_direction": [
+        "server.js: 移除 PM 不可分配的 guard，parseRoleTable 中 all roles assignable=true；PUT /api/agent/roles 允许 PM 更新。",
+        "app.js: PM 行 select 不再 disabled。",
+        "collab_context.md: 将 'PM role is NOT reassignable.' 改为 'PM role is reassignable via Settings → Roles。'；Worker Context 模板 PM identity 行改为 'PM identity: {pm_provider} (current session)'，由 PM 分配任务时动态填入当前 PM provider。"
+      ]
+    },
+
+    "issue_P31_task_chain": {
+      "severity": "MEDIUM",
+      "symptom": "PM→rdloop→executor 完整任务链路未经端到端验证；不清楚 PM 提交任务后 coordinator 是否正确接收、executor 是否正确执行并回传结果。",
+      "root_cause": "P23 smoke test 已验证了 semi-auto 执行链（coordinator→cask→CCB pane），但 PM 角色端（通过 /ask 发送任务包给 rdloop）到 executor 完成再回报 PM 的完整闭环尚未系统性验证。",
+      "fix_direction": "设计并执行 PM→rdloop→executor 端到端 smoke test：(1) PM 用 collab_context Worker Context 模板发送标准任务包给 rdloop coordinator；(2) coordinator 选取 executor provider 执行；(3) executor 写 output_file + final_summary；(4) judge 打分通过；(5) 结果回到 PM 可读取。"
+    }
+  },
+
+  "tasks": [
+
+    {
+      "task_id": "P25",
+      "title": "CCB 状态检测修复：多路径 lock 扫描 + WezTerm 模式感知",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "修复 /api/ccb/session-status 中 ccb_instance 检测逻辑。当前只计算 cfg.ccb_work_dir 的 hash 并查找对应 lock 文件，若 CCB 从其他路径启动则永远检测不到。修复方案：改为扫描 ~/.ccb/run/ 下所有 ccb-*.lock 文件，读取每个文件中的 PID，对活跃 PID（process.kill(pid, 0) 不抛 ESRCH）返回 running=true。同时，WezTerm 模式下 CCB 不创建 tmux session，provider 状态需通过 ping 命令独立判断（已有 pingCcbProvider 函数可复用），不应依赖 tmux list-sessions。在 session-status 响应中增加 terminal_mode 字段（'tmux' | 'wezterm' | 'unknown'）供前端决策。前端：ccb_instance.running=true 时，侧边栏「CCB 进程」行显示运行中状态（PID + session 名）；若 terminal_mode='wezterm' 则「打开终端」按钮文本改为「打开 WezTerm」。",
+      "acceptance_criteria": [
+        "CCB 从任意路径启动后，GUI 侧边栏「CCB 进程」行显示「运行中 PID xxx」",
+        "扫描 ~/.ccb/run/ 中所有 ccb-*.lock 文件，找到活跃 PID 即 running=true，不限定 workDir",
+        "stale lock（PID 已死）自动跳过，不误报 running=true",
+        "WezTerm 模式下（无 tmux session），provider 状态通过 ping 判断，不全部显示「未启动」",
+        "session-status 响应新增 terminal_mode 字段：有 tmux ccb 会话→'tmux'，无→检查 WezTerm 进程或 CCB_TERMINAL 环境变量→'wezterm'，否则'unknown'",
+        "前端：terminal_mode='wezterm' 时「打开终端」按钮显示「打开 WezTerm」"
+      ]
+    },
+
+    {
+      "task_id": "P26",
+      "title": "CCB Panel UI 去重重构：消除重复按钮、整合操作入口",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P1",
+      "depends_on": ["P25"],
+      "description": "重构 renderCcbPanel() 生成的 HTML，消除重复按钮。具体改动：(1) 移除「快速启动」区域中的单 provider 按钮（「启动 Codex」「启动 Gemini」），保留「启动 Codex+Gemini」和「启动全套（codex+gemini+opencode+claude）」两个组合按钮；(2) 「在终端中运行 Codex」快捷按钮也移除，其功能由 provider 行的「打开终端」覆盖；(3) 原「终端选项：tmux 与 WezTerm」<details> 折叠区整合进操作区主体，WezTerm 入口提升为顶层可见按钮（条件显示：只有检测到 WezTerm 安装时才显示）；(4) 每个 provider 行保留三个按钮：启动 / 打开终端 / 停止；(5) 「停止全部」只保留一个（在组合启动区右侧）。去重后按钮总数应从当前约 18 个减少到约 10 个以内。",
+      "acceptance_criteria": [
+        "「快速启动」区域不再有单 provider 启动按钮（启动Codex/启动Gemini分开的按钮已移除）",
+        "保留组合启动：「启动 Codex+Gemini」「启动全套」「停止全部」",
+        "每个 provider 行有且仅有 3 个按钮：启动 / 打开终端 / 停止",
+        "WezTerm 入口按钮在主区域可见，不在 <details> 折叠区中（未安装 WezTerm 时该按钮隐藏）",
+        "UI 中相同功能的按钮不重复出现（功能可达性不降低）",
+        "移除冗余按钮后无 JS 报错，所有保留按钮功能正常"
+      ]
+    },
+
+    {
+      "task_id": "P27",
+      "title": "Provider 状态检测准确性修复：ping 命令纠错 + native 会话独立检测",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "修复两个导致 provider 状态长期显示「未启动」的 bug：(1) server.js 中 CCB_PING_CMD.opencode 当前值为 'cask'（与 codex 相同），应改为 'oask'（opencode 专用 ping 命令）；(2) native 会话检测逻辑中，当检测到 isCcbNativeSessionName 会话时，对所有 provider 只做了一次 ping 然后共享结果，导致 codex 可达时其余 provider 也被标记为 ok，codex 不可达时全部标记为 off。改为每个 provider 独立调用 pingCcbProvider，结果互不影响；(3) 在 session-status 响应中为每个 provider 增加 pane_id 字段（通过 tmux list-panes -s -F '#{pane_id} #{@ccb_agent}' 查询，@ccb_agent 是 CCB 写入的 user option，值为 provider capitalize 名），用于 P28 的 pane 级 attach；(4) 若 ping 失败但 tmux session 存在，状态为 'running_no_daemon'（provider CLI 在运行但 askd daemon 未响应），前端显示为「🟡 运行中（无daemon）」。",
+      "acceptance_criteria": [
+        "CCB_PING_CMD.opencode 值改为 'oask'",
+        "native 会话下每个 provider 独立 ping，codex ok 不影响 gemini/opencode 的 status",
+        "session-status 响应每个 provider 对象新增 pane_id 字段（string | null）",
+        "pane_id 通过 tmux list-panes -s -F '#{pane_id} #{@ccb_agent}' 匹配 provider 名获取",
+        "provider 状态新增 'running_no_daemon' 值：tmux pane 存在但 ping 失败时使用",
+        "前端：'running_no_daemon' 显示为「🟡 运行中（无daemon）」",
+        "修复后，CCB 运行且 codex/gemini/opencode 各自 daemon 正常时，各 provider 状态独立反映真实情况"
+      ]
+    },
+
+    {
+      "task_id": "P28",
+      "title": "Attach pane 级别支持：tmux 精准切换 provider pane，WezTerm 唤起窗口",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P1",
+      "depends_on": ["P27"],
+      "description": "修复「打开终端」动作：不同 provider 应打开对应的 CLI pane 而非统一进入 session 第一个 pane（Codex）。实现方案分两种终端模式：(A) tmux 模式：/api/ccb/session/attach 接收 P27 中返回的 pane_id，构造 attach 命令为 tmux select-pane -t {pane_id} \\; attach-session -t {session}。前端 ccbAttachProvider 调用时传入从 session-status 缓存的 pane_id。若 pane_id 为 null（旧版 CCB 未设置 @ccb_agent），fallback 到原有逻辑（attach session root）。(B) WezTerm 模式（terminal_mode='wezterm'）：不做 pane 级区分，attach 动作改为通过 osascript 激活 WezTerm.app（'tell application \"WezTerm\" to activate'）将其带到前台；若 WezTerm 未运行则提示用户在 WezTerm 内手动执行 ccb 命令。前端：WezTerm 模式下「打开终端」→「打开 WezTerm」，tooltip 提示「WezTerm 模式下请手动切换 tab」。",
+      "acceptance_criteria": [
+        "tmux 模式下：点击 gemini 行「打开终端」，新 Terminal 窗口 attach 并停留在 gemini pane，不在 codex pane",
+        "attach 命令为 tmux select-pane -t {pane_id} 后接 tmux attach-session -t {session}",
+        "当 pane_id=null（旧版 CCB）时，fallback 到原有 session 级 attach，不报错",
+        "WezTerm 模式下：「打开 WezTerm」调用 osascript 激活 WezTerm.app；若 WezTerm 未运行返回友好提示",
+        "前端按钮文本：tmux 模式→「打开终端」，wezterm 模式→「打开 WezTerm」",
+        "WezTerm 模式下 tooltip 提示「WezTerm 管理多 pane，请在 WezTerm 内切换 tab 到对应 provider」"
+      ]
+    },
+
+    {
+      "task_id": "P29",
+      "title": "Settings 增加「使用 WezTerm 打开全部 CI 窗口」选项",
+      "owner_subsystem": "rdloop/gui",
+      "priority": "P2",
+      "depends_on": ["P26"],
+      "description": "在 Settings 面板（openSettingsPanel / submitSettings）中增加复选框「使用 WezTerm 打开所有 coding agent CI 窗口」，对应配置字段 use_wezterm_for_all（boolean，默认 false）。改动点：(1) server.js GET /api/config 响应中增加 use_wezterm_for_all 字段；(2) server.js PUT /api/config 处理 use_wezterm_for_all 字段的读写；(3) app.js openSettingsPanel 中增加该 checkbox，submitSettings 中保存；(4) ccbAttachProvider 和 ccbOpenTerminalAndRun 函数中检查当前配置：若 use_wezterm_for_all=true，路由到 /api/ccb/session/open-wezterm 并传入当前配置的所有 providers；(5) open-wezterm 端点（server.js line 1748）已存在，但需支持接收 providers 数组并传给 ccb 命令；若用户未安装 WezTerm，Settings 中该 checkbox 置灰并显示「需先安装 WezTerm」提示。",
+      "acceptance_criteria": [
+        "Settings 面板有「使用 WezTerm 打开所有 CI 窗口」checkbox",
+        "勾选并 Save 后 rdloop.config.json 中 use_wezterm_for_all=true",
+        "勾选后点击任何 provider 的「打开终端」，实际调用 open-wezterm 端点",
+        "open-wezterm 端点传入 providers 数组（配置中所有 enabled providers），而非仅 ['codex']",
+        "WezTerm 未安装时：该 checkbox disable 且显示「需安装 WezTerm：brew install wezterm」",
+        "Settings GET /api/config 响应包含 use_wezterm_for_all 字段",
+        "取消勾选后行为恢复到默认终端（open-terminal）"
+      ]
+    },
+
+    {
+      "task_id": "P30",
+      "title": "PM 角色可配置：移除硬锁限制，允许切换 PM provider",
+      "owner_subsystem": "rdloop/gui + Agent/.context",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "解除 PM 角色不可修改的硬限制，使其可像其他角色一样从 ALLOWED_PROVIDERS 中选择 provider。改动点：(1) server.js parseRoleTable：移除 assignable = role !== 'PM' 逻辑，改为所有角色 assignable=true；(2) server.js PUT /api/agent/roles：移除 if (updates.some(u => u.role === 'PM')) return 400 guard；(3) app.js openSettingsPanel：PM 行 select 不再 disabled（const disabled = '' 即可）；(4) Agent/.context/rules/collab_context.md：将 'PM role is NOT reassignable.' 改为 'PM role is reassignable via Settings → Roles panel.'；Worker Context 基础块中 'PM identity: claude (current session)' 改为 'PM identity: {pm_provider} (current session)'，并在文件头注释中说明 PM 分配任务时应将占位符替换为当前 collab_context.md 中 PM 行的 provider；(5) 若 rdloop coordinator 或 call_coder 脚本中有硬编码 PM=claude 的假设，一并排查并参数化（需检查 coordinator/run_task.sh 和 coordinator/adapters/ 中相关逻辑）。",
+      "acceptance_criteria": [
+        "Settings → Roles 面板中 PM 行的 provider select 可操作（不 disabled）",
+        "将 PM provider 改为 codex 并 Save，collab_context.md PM 行 provider 更新为 codex",
+        "PUT /api/agent/roles 传入 [{role:'PM', provider:'codex'}] 返回 200，不再返回 400",
+        "collab_context.md 中 'PM role is NOT reassignable.' 文字已更新",
+        "Worker Context 模板中 PM identity 行使用占位符或说明动态填入",
+        "coordinator/run_task.sh 中无硬编码 PM=claude 假设（或已参数化）",
+        "API GET /api/agent/roles 返回的 PM 行 assignable=true"
+      ]
+    },
+
+    {
+      "task_id": "P31",
+      "title": "任务链路端到端验证：PM → rdloop coordinator → executor 完整闭环 smoke test",
+      "owner_subsystem": "rdloop + Agent",
+      "priority": "P1",
+      "depends_on": ["P25", "P27", "P30"],
+      "description": "设计并执行 PM→rdloop→executor 完整闭环 smoke test，验证以下链路可正常工作：(1) PM 角色（当前配置的 PM provider）通过 /ask 命令发送包含 [WORKER CONTEXT] 基础块的标准任务包给 rdloop coordinator；(2) coordinator（run_task.sh）接收任务 JSON，选取配置的 executor provider，调用对应 call_coder 脚本；(3) executor 通过 CCB（cask/lask 等）在 tmux pane 中执行任务，写 output_file + final_summary；(4) judge 对 executor 输出打分（verdict=pass）；(5) coordinator 将结果状态写入 out/<task_id>/status.json；(6) PM 可通过 /pend 或直接读取 status.json 确认任务完成。smoke test 任务应极简（如 goal: 'echo the text CHAIN_OK to stdout and write it to out.txt'），避免复杂实现干扰链路验证。若发现链路断点（如 PM→coordinator 的 /ask 注入格式不匹配、executor 输出格式 coordinator 无法识别、pend 超时等），记录在 test report 中并作为后续 bug。",
+      "acceptance_criteria": [
+        "smoke test 任务从 PM 发出到 executor 完成全程无需人工介入（semi-auto 模式下 judge 自动打分）",
+        "coordinator 日志显示完整执行链：task_created → coder_started → coder_completed → judge_started → judge_passed → DONE",
+        "out/<task_id>/status.json 最终 status=DONE，verdict=pass",
+        "PM 通过 /pend 或读取 status.json 可获得 executor 的 final_summary",
+        "若任何步骤失败，test report 记录断点位置、错误信息、建议修复方向",
+        "test report 写入 Rdloop/taskspec_v3.5_P31_smoke_test_report.md"
+      ],
+      "notes": "前置条件：(a) CCB session 已运行（至少 codex 在 cord_test/.ccb/.codex-session 中有有效 session）；(b) rdloop.config.json 已配置 ccb_work_dir, ccb_path, default_execution_mode=semi-auto, default_coder=codex-cli；(c) GUI server 已运行（node gui/server.js）；(d) P25/P27 修复已部署（CCB 状态可正确检测）。smoke task spec 最小示例：{ task_id: 'chain-smoke-1', task_type: 'script', execution_mode: 'semi-auto', goal: 'Write the text CHAIN_OK to a file named chain_smoke_out.txt in the repo root', repo_path: '/Users/yzliu/work/projects/cord_test', acceptance_criteria: ['chain_smoke_out.txt exists', 'content is CHAIN_OK'] }"
+    }
+
+  ],
+
+  "execution_order": [
+    "P25 和 P27 可并行（互不依赖，都是 server.js 独立区域）",
+    "P30 可与 P25/P27 并行（改动 server.js 不同区域 + collab_context.md）",
+    "P26 在 P25 完成后执行（需要 terminal_mode 字段才能正确渲染 WezTerm 按钮）",
+    "P28 在 P27 完成后执行（需要 pane_id 字段）",
+    "P29 在 P26 完成后执行（在已重构的 panel 上增加 Settings 选项）",
+    "P31 在 P25 + P27 + P30 完成后执行（需要 CCB 检测正常 + PM 可配置）"
+  ],
+
+  "parallel_groups": [
+    {
+      "group": "G1_infra",
+      "tasks": ["P25", "P27", "P30"],
+      "note": "三个任务均修改 server.js 的不同区域或不同文件，可并行开发，合并时需注意行号偏移"
+    },
+    {
+      "group": "G2_ui",
+      "tasks": ["P26", "P28", "P29"],
+      "note": "依赖 G1 完成后启动，P26/P28/P29 内部 P26 先于 P28/P29（P28/P29 在重构后 panel 上操作）"
+    },
+    {
+      "group": "G3_validation",
+      "tasks": ["P31"],
+      "note": "验收测试，在 G1+G2 全部完成后执行"
+    }
+  ]
+}
