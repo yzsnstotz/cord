@@ -113,3 +113,20 @@ textarea { width: 100%; min-height: 120px; background: #0d1117; border: 1px soli
 .ccb-config-body { padding: 0 14px 14px; }
 .ccb-config-row { margin-bottom: 12px; }
 .ccb-config-row:last-child { margin-bottom: 0; }
+
+/* Task 4: Knowledge Viewer modal */
+#knowledge-modal .modal-box { max-width: 900px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+#knowledge-shard-list { width: 180px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid #30363d; padding-right: 12px; }
+#knowledge-entry-panel { flex: 1; overflow-y: auto; min-height: 0; }
+.knowledge-shard-item { padding: 6px 8px; cursor: pointer; border-radius: 4px; margin-bottom: 4px; font-size: 13px; transition: background .15s; }
+.knowledge-shard-item:hover { background: #21262d; }
+.knowledge-shard-item.selected { background: #30363d; }
+#knowledge-entry-panel table { width: 100%; font-size: 12px; border-collapse: collapse; }
+#knowledge-entry-panel th { text-align: left; padding: 4px; border-bottom: 1px solid #30363d; }
+#knowledge-entry-panel td { padding: 4px; border-bottom: 1px solid #21262d; }
+
+/* Task 10: Solo progress panel in attempt detail */
+#solo-progress-container { margin-bottom: 16px; }
+#solo-progress-container .solo-step { margin-bottom: 12px; padding: 8px; padding-left: 12px; border-radius: 4px; font-size: 12px; }
+#solo-progress-container .solo-step-summary { margin-top: 4px; color: #c9d1d9; }
+#solo-progress-container .solo-step-meta { margin-top: 4px; font-size: 11px; color: #8b949e; }

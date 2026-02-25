@@ -1408,8 +1408,14 @@ function renderTask(data) {
 }
 
 // B3-2: Load attempt detail — uses fixed field set from API. Live panel always shows latest attempt logs (not tied to selected attempt).
+let _soloProgressRefreshIntervalId = null;
+
 async function loadAttempt(taskId, n) {
   currentAttempt = n;
+  if (_soloProgressRefreshIntervalId != null) {
+    clearInterval(_soloProgressRefreshIntervalId);
+    _soloProgressRefreshIntervalId = null;
+  }
   const data = await api(`/task/${taskId}/attempt/${n}`);
   const detail = document.getElementById('attempt-detail');
 
@@ -1419,6 +1425,7 @@ async function loadAttempt(taskId, n) {
 
   detail.innerHTML = `
     <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:16px 0">
+      <div id="solo-progress-container"></div>
       <h3>Attempt ${escapeHtml(String(n))} Detail
         <small style="color:#8b949e;font-size:13px;margin-left:8px">role: ${escapeHtml(data.role || 'coder')}</small>
       </h3>
@@ -1480,6 +1487,27 @@ async function loadAttempt(taskId, n) {
       <pre class="attempt-block">${escapeHtml(data.metrics ? JSON.stringify(data.metrics, null, 2) : '(no metrics)')}</pre>
     </div>
   `;
+  // Task 10 Step 4: Solo progress panel + 5s refresh when workflow_mode === 'solo'
+  const soloContainer = document.getElementById('solo-progress-container');
+  if (soloContainer) {
+    const runData = await api(`/task/${encodeURIComponent(taskId)}`).catch(() => ({}));
+    const isSolo = runData.task && runData.task.workflow_mode === 'solo';
+    if (isSolo) {
+      await renderSoloProgress(taskId, n, soloContainer);
+      _soloProgressRefreshIntervalId = setInterval(async () => {
+        const status = await api(`/tasks/${encodeURIComponent(taskId)}/status`).catch(() => ({}));
+        if (status.state === 'running') {
+          await renderSoloProgress(taskId, n, soloContainer);
+        } else {
+          if (_soloProgressRefreshIntervalId != null) {
+            clearInterval(_soloProgressRefreshIntervalId);
+            _soloProgressRefreshIntervalId = null;
+          }
+          await renderSoloProgress(taskId, n, soloContainer);
+        }
+      }, 5000);
+    }
+  }
   updateReadOnlyBanner();
 }
 

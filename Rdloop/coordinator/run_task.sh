@@ -1071,7 +1071,19 @@ run_attempt() {
   write_event "$att_num" "ATTEMPT_STARTED" "attempt ${att_num} started" "$att_dir"
 
   # Worktree
-  local wt; wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+  local wt
+  # Single flow: skip worktree if no repo_path (plan Task 8 Step 3)
+  if [ "$workflow_mode" = "single" ]; then
+    local repo_path_check; repo_path_check=$(json_read "$TASK_JSON" "repo_path" "")
+    if [ -z "$repo_path_check" ] || [ "$repo_path_check" = "dummy_repo" ]; then
+      wt="${TASK_DIR}"
+      mkdir -p "$wt"
+    else
+      wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+    fi
+  else
+    wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+  fi
   write_env_json "$att_dir" "$task_code" "$att_num"
 
   # ---- BEFORE_CODER ----
