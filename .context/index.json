@@ -1,0 +1,95 @@
+{
+  "files": [
+    {
+      "path": "CCB/bin/cask",
+      "type": "code",
+      "summary": "CLI ask script: send message to provider; no ping special-case (reverted).",
+      "exports": [],
+      "dependencies": [],
+      "hash": "d0dde29801a434e3c510cc59cf8d507a82dbe39441e10a5834f19b14a05f1e1f",
+      "last_modified": "2026-02-26T01:15:11Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "CCB/bin/gask",
+      "type": "code",
+      "summary": "CLI ask script: send message to provider; no ping special-case (reverted).",
+      "exports": [],
+      "dependencies": [],
+      "hash": "622bd4e828dfb4997685b9c3402f63d4e6c05df816164d098776e15656ff5989",
+      "last_modified": "2026-02-26T01:15:11Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "CCB/bin/lask",
+      "type": "code",
+      "summary": "CLI ask script: send message to provider; no ping special-case (reverted).",
+      "exports": [],
+      "dependencies": [],
+      "hash": "44aad182b32cae958de835628e36f98d8509cbffa0ba3202dcefceafb1f76104",
+      "last_modified": "2026-02-26T01:15:11Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "CCB/bin/oask",
+      "type": "code",
+      "summary": "CLI ask script: send message to provider; no ping special-case (reverted).",
+      "exports": [],
+      "dependencies": [],
+      "hash": "d510be5e2371c19e6de9488b08fb6ff5c1d4b65196cdf3a69bd53a48ebfe0db4",
+      "last_modified": "2026-02-26T01:15:11Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "CCB/bin/dask",
+      "type": "code",
+      "summary": "CLI ask script: send message to provider; no ping special-case (reverted).",
+      "exports": [],
+      "dependencies": [],
+      "hash": "638d775a0cb3012bd3ebcc67d0ef2ec8c0bda69d72aeaaf1940c8f389034b77f",
+      "last_modified": "2026-02-26T01:15:11Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "Rdloop/gui/server.js",
+      "type": "code",
+      "summary": "CCB health check uses ccb-ping provider only; pingCcbProvider accepts exit 0 for ccb-ping.",
+      "exports": [],
+      "dependencies": [],
+      "hash": "d805b0c291f2c6751ee063a64d3ad2538211aef48f426f57d5c66b31cc575a48",
+      "last_modified": "2026-02-26T01:15:12Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "Rdloop/coordinator/lib/call_coder_ccb.sh",
+      "type": "code",
+      "summary": "Availability check uses ccb-ping provider; ccb_provider derived with ccb_bin.",
+      "exports": [],
+      "dependencies": [],
+      "hash": "03e416bfea851e884e643a4fff675677379bfe779ce274b43273ffd48bff52d3",
+      "last_modified": "2026-02-26T01:15:12Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": "Rdloop/coordinator/lib/call_judge_ccb.sh",
+      "type": "code",
+      "summary": "Availability check uses ccb-ping provider; ccb_provider derived with ccb_bin.",
+      "exports": [],
+      "dependencies": [],
+      "hash": "c6f838b4604d2e1d2c5c30f266f7ac3fb2e9e377ecc6db720ff8b8752e98a7b9",
+      "last_modified": "2026-02-26T01:15:12Z",
+      "last_modified_by": "executor"
+    },
+    {
+      "path": ".context/execution_ccb_channel_separation.md",
+      "type": "doc",
+      "summary": "Execution summary: CCB health-check vs ask channel separation; revert ping in ask scripts; Rdloop uses ccb-ping for health.",
+      "exports": [],
+      "dependencies": [],
+      "hash": "00fd3862a56137bcc5a362c26232629046c0bd1998f81732fe05c4a2672a7eed",
+      "last_modified": "2026-02-26T01:15:41Z",
+      "last_modified_by": "executor"
+    }
+  ],
+  "last_updated": "2026-02-26T01:15:41Z"
+}

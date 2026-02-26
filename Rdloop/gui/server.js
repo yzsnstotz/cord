@@ -21,7 +21,58 @@ const CLIAPI_PROVIDERS_PATH = path.resolve(__dirname, '..', 'config', 'cliapi_pr
 const WORKTREES_DIR = path.resolve(__dirname, '..', 'worktrees');
 const RDLOOP_ROOT = path.resolve(__dirname, '..');
 
-// Ensure repo_path directory exists when saving task spec (create if missing, no error)
+// CCB GUI operations log: every start/stop/kill and key events for debugging
+const CCB_GUI_LOG_PATH = path.join(RDLOOP_ROOT, 'ccb-gui.log');
+const CCB_GUI_LOG_MAX_LINES = 2000;
+let CCB_GUI_LOG_ACTUAL_PATH = CCB_GUI_LOG_PATH;
+
+function appendToCcbGuiLog(operation, detail) {
+  const writeTo = (logPath) => {
+    const dir = path.dirname(logPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const ts = new Date().toISOString();
+    const line = typeof detail === 'string' ? detail : JSON.stringify(detail);
+    const entry = `[${ts}] ${operation} ${line}`;
+    fs.appendFileSync(logPath, entry + '\n', 'utf8');
+    return logPath;
+  };
+  try {
+    writeTo(CCB_GUI_LOG_ACTUAL_PATH);
+    const stat = fs.statSync(CCB_GUI_LOG_ACTUAL_PATH);
+    if (stat.size > 1024 * 512) {
+      const buf = fs.readFileSync(CCB_GUI_LOG_ACTUAL_PATH, 'utf8');
+      const lines = buf.split('\n').filter(Boolean);
+      if (lines.length > CCB_GUI_LOG_MAX_LINES) {
+        fs.writeFileSync(CCB_GUI_LOG_ACTUAL_PATH, lines.slice(-CCB_GUI_LOG_MAX_LINES).join('\n') + '\n', 'utf8');
+      }
+    }
+  } catch (err) {
+    if (CCB_GUI_LOG_ACTUAL_PATH === CCB_GUI_LOG_PATH) {
+      try {
+        const fallback = path.join(os.tmpdir(), 'rdloop-ccb-gui.log');
+        writeTo(fallback);
+        CCB_GUI_LOG_ACTUAL_PATH = fallback;
+        console.error('[CCB GUI log] Primary path failed, using fallback:', fallback, err.message);
+      } catch (e2) {
+        console.error('[CCB GUI log] Write failed:', CCB_GUI_LOG_PATH, err.message);
+      }
+    } else {
+      console.error('[CCB GUI log] Write failed:', CCB_GUI_LOG_ACTUAL_PATH, err.message);
+    }
+  }
+}
+
+function readCcbGuiLogTail(maxLines) {
+  try {
+    const logPath = CCB_GUI_LOG_ACTUAL_PATH;
+    if (!fs.existsSync(logPath)) return '';
+    const buf = fs.readFileSync(logPath, 'utf8');
+    const lines = buf.split('\n').filter(Boolean);
+    return lines.slice(-(maxLines || 50)).join('\n');
+  } catch {
+    return '';
+  }
+}
 function ensureRepoPathExists(repoPath) {
   if (!repoPath || typeof repoPath !== 'string') return;
   const trimmed = repoPath.trim();
@@ -1163,12 +1214,18 @@ function requireWritable(req, res, next) {
   next();
 }
 
-// P07: CCB health — ping cask/gask with 3s timeout; do not block server
-function pingCcbProvider(cmd, args, timeoutMs) {
+// P07: CCB health — use ccb-ping <provider> (connectivity-only channel); do not use ask commands (cask/gask "ping") which send messages to the pane.
+// cwd: run in this directory so ccb-ping finds .ccb/ session files (status lights depend on correct project).
+// When cmd is 'ccb-ping', args[0] is provider name; success = exit code 0 (no "pong" in output).
+function pingCcbProvider(cmd, args, timeoutMs, cwd) {
   return new Promise((resolve) => {
     const start = Date.now();
     const env = getCoordinatorEnv();
-    const child = spawn(cmd, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const opts = { env, stdio: ['ignore', 'pipe', 'pipe'] };
+    if (cwd && typeof cwd === 'string' && fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
+      opts.cwd = cwd;
+    }
+    const child = spawn(cmd, args, opts);
     let out = '';
     let done = false;
     const finish = (status, pingMs) => {
@@ -1193,7 +1250,9 @@ function pingCcbProvider(cmd, args, timeoutMs) {
       clearTimeout(t);
       if (done) return;
       const pingMs = Date.now() - start;
-      if (code === 0 && /pong/i.test(out)) {
+      // ccb-ping: connectivity-only; success = exit 0. Ask commands (legacy) used "pong" in stdout.
+      const ok = (cmd === 'ccb-ping') ? (code === 0) : (code === 0 && /pong/i.test(out));
+      if (ok) {
         finish('ok', pingMs);
       } else {
         finish('unavailable');
@@ -1204,9 +1263,15 @@ function pingCcbProvider(cmd, args, timeoutMs) {
 
 app.get('/api/ccb/status', (req, res) => {
   const timeoutMs = 3100;
+  let workDir = '';
+  try {
+    const cfg = readRdloopConfig();
+    workDir = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
+  } catch {}
+  if (!workDir) workDir = getProjectPath() || process.cwd();
   Promise.all([
-    pingCcbProvider('cask', ['--timeout', '3', 'ping'], timeoutMs),
-    pingCcbProvider('gask', ['--timeout', '3', 'ping'], timeoutMs)
+    pingCcbProvider('ccb-ping', ['codex'], timeoutMs, workDir),
+    pingCcbProvider('ccb-ping', ['gemini'], timeoutMs, workDir)
   ]).then(([caskResult, gaskResult]) => {
     res.json({ cask: caskResult, gask: gaskResult });
   }).catch((err) => {
@@ -1467,21 +1532,18 @@ app.get('/api/ccb/session-status', async (req, res) => {
       if (lockScan.running) {
         ccb_instance = { running: true, pid: lockScan.pid, work_dir: lockScan.work_dir || workDirForLock };
         terminal_mode = 'wezterm';
-        for (const provider of CCB_PROVIDERS) {
-          const pingCmd = CCB_PING_CMD[provider];
-          let status = 'off';
-          let ping_ms = null;
-          if (pingCmd) {
-            const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
-            status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : 'unavailable');
-            ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
-          } else status = 'ok';
-          providers.push({ provider, session_name: null, pid: null, status, ping_ms, pane_id: null });
-        }
-      } else {
-        for (const p of CCB_PROVIDERS) {
-          providers.push({ provider: p, session_name: null, pid: null, status: 'off', ping_ms: null, pane_id: null });
-        }
+      }
+      // Always ping every provider so status lights are correct (even without tmux)
+      const env = getCoordinatorEnv();
+      for (const provider of CCB_PROVIDERS) {
+        let status = 'off';
+        let ping_ms = null;
+        if (CCB_PING_CMD[provider]) {
+          const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDirForLock);
+          status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : 'unavailable');
+          ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
+        } else status = 'ok';
+        providers.push({ provider, session_name: null, pid: null, status, ping_ms, pane_id: null });
       }
       return res.json({ providers, tmux_available: false, message: 'tmux not installed', ccb_instance, terminal_mode, wezterm_available: weztermAvailable() });
     } catch (e) {
@@ -1514,17 +1576,6 @@ app.get('/api/ccb/session-status', async (req, res) => {
       ? (sessionNameForInstance ? 'tmux' : 'wezterm')
       : 'unknown';
 
-    const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
-    const allNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
-    const legacySessions = allNames.filter(s => {
-      if (!s.startsWith(CCB_SESSION_PREFIX)) return false;
-      const suffix = s.slice(CCB_SESSION_PREFIX.length);
-      return CCB_PROVIDERS.includes(suffix); // only ccb_codex, ccb_gemini etc — not ccb_56113
-    });
-    const ccbNativeSessions = allNames.filter(s => isCcbNativeSessionName(s));
-    const aiSessions = allNames.filter(s => s.startsWith('ai-'));
-    const providers = [];
-
     // P27: helper to get pane_id for a provider in a session (tmux user option @ccb_agent = Codex/Gemini/...)
     async function getPaneIdForProvider(sessionName, provider) {
       const cap = provider.charAt(0).toUpperCase() + provider.slice(1);
@@ -1537,96 +1588,61 @@ app.get('/api/ccb/session-status', async (req, res) => {
       return null;
     }
 
-    if (terminal_mode === 'wezterm') {
-      // P25: WezTerm mode — no tmux session; provider status by ping only
-      for (const provider of CCB_PROVIDERS) {
-        const pingCmd = CCB_PING_CMD[provider];
-        let status = 'off';
-        let ping_ms = null;
-        if (pingCmd) {
-          const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
-          status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : 'unavailable');
-          ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
-        } else {
-          status = 'ok';
-        }
-        providers.push({ provider, session_name: null, pid: null, status, ping_ms, pane_id: null });
+    const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
+    const allNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const legacySessions = allNames.filter(s => {
+      if (!s.startsWith(CCB_SESSION_PREFIX)) return false;
+      const suffix = s.slice(CCB_SESSION_PREFIX.length);
+      return CCB_PROVIDERS.includes(suffix); // only ccb_codex, ccb_gemini etc — not ccb_56113
+    });
+    const ccbNativeSessions = allNames.filter(s => isCcbNativeSessionName(s));
+    const aiSessions = allNames.filter(s => s.startsWith('ai-'));
+
+    // Always ping every provider first (source of truth for status lights; works regardless of tmux/wezterm/manual start)
+    const providers = [];
+    for (const provider of CCB_PROVIDERS) {
+      let status = 'off';
+      let ping_ms = null;
+      if (CCB_PING_CMD[provider]) {
+        const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDirForLock);
+        status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : 'unavailable');
+        ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
+      } else {
+        status = 'ok';
       }
-    } else {
-      // tmux mode: legacy, native, or ai sessions
-      for (const sessionName of legacySessions) {
-        const provider = sessionName.slice(CCB_SESSION_PREFIX.length);
-        if (!CCB_PROVIDERS.includes(provider)) continue;
-        let pid = null;
-        const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_pid}'], env, 1000);
-        const firstLine = (panesResult.stdout || '').split('\n')[0];
-        if (firstLine && /^\d+$/.test(firstLine.trim())) pid = parseInt(firstLine.trim(), 10);
-        const pane_id = await getPaneIdForProvider(sessionName, provider);
-        const pingCmd = CCB_PING_CMD[provider];
-        let status = 'off';
-        let ping_ms = null;
-        if (pingCmd) {
-          const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
-          status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : (pane_id ? 'running_no_daemon' : 'unavailable'));
-          ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
-        } else {
-          status = 'ok';
-        }
-        providers.push({ provider, session_name: sessionName, pid, status, ping_ms, pane_id });
-      }
-      for (const sessionName of ccbNativeSessions) {
-        if (legacySessions.length > 0) continue;
-        for (const provider of CCB_PROVIDERS) {
-          const pingCmd = CCB_PING_CMD[provider];
-          if (!pingCmd) continue;
-          const pane_id = await getPaneIdForProvider(sessionName, provider);
-          let pid = null;
-          const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_pid}'], env, 1000);
-          const firstLine = (panesResult.stdout || '').split('\n')[0];
-          if (firstLine && /^\d+$/.test(firstLine.trim())) pid = parseInt(firstLine.trim(), 10);
-          const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
-          const status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : (pane_id ? 'running_no_daemon' : 'unavailable'));
-          const ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
-          providers.push({
-            provider,
-            session_name: sessionName,
-            pid,
-            status,
-            ping_ms,
-            pane_id
-          });
-        }
-      }
-      if (legacySessions.length === 0 && ccbNativeSessions.length === 0 && aiSessions.length > 0) {
-        const firstAiSession = aiSessions[0];
-        for (const provider of CCB_PROVIDERS) {
-          if (providers.some(x => x.provider === provider)) continue;
-          const pingCmd = CCB_PING_CMD[provider];
-          if (!pingCmd) continue;
-          const pane_id = await getPaneIdForProvider(firstAiSession, provider);
-          const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
-          const status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : (pane_id ? 'running_no_daemon' : 'unavailable'));
-          let pid = null;
-          const panesResult = await runTmux(['list-panes', '-t', firstAiSession, '-F', '#{pane_pid}'], env, 1000);
-          const firstLine = (panesResult.stdout || '').split('\n')[0];
-          if (firstLine && /^\d+$/.test(firstLine.trim())) pid = parseInt(firstLine.trim(), 10);
-          providers.push({
-            provider,
-            session_name: firstAiSession,
-            pid,
-            status,
-            ping_ms: pingResult.ping_ms != null ? pingResult.ping_ms : null,
-            pane_id
-          });
-        }
-      }
+      providers.push({ provider, session_name: null, pid: null, status, ping_ms, pane_id: null });
     }
 
-    for (const p of CCB_PROVIDERS) {
-      if (!providers.some(x => x.provider === p)) {
-        providers.push({ provider: p, session_name: null, pid: null, status: 'off', ping_ms: null, pane_id: null });
+    // Enrich with tmux session info when available (session_name, pid, pane_id; keep status from ping)
+    const sessionToProvider = new Map();
+    for (const sessionName of legacySessions) {
+      const provider = sessionName.slice(CCB_SESSION_PREFIX.length);
+      if (CCB_PROVIDERS.includes(provider)) sessionToProvider.set(provider, sessionName);
+    }
+    if (sessionToProvider.size === 0 && ccbNativeSessions.length > 0) {
+      for (const sessionName of ccbNativeSessions) {
+        for (const provider of CCB_PROVIDERS) {
+          if (!sessionToProvider.has(provider)) sessionToProvider.set(provider, sessionName);
+        }
+        break;
       }
     }
+    if (sessionToProvider.size === 0 && aiSessions.length > 0) {
+      const firstAi = aiSessions[0];
+      for (const provider of CCB_PROVIDERS) {
+        if (!sessionToProvider.has(provider)) sessionToProvider.set(provider, firstAi);
+      }
+    }
+    for (const prov of providers) {
+      const sessionName = sessionToProvider.get(prov.provider);
+      if (!sessionName) continue;
+      prov.session_name = sessionName;
+      prov.pane_id = await getPaneIdForProvider(sessionName, prov.provider);
+      const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_pid}'], env, 1000);
+      const firstLine = (panesResult.stdout || '').split('\n')[0];
+      if (firstLine && /^\d+$/.test(firstLine.trim())) prov.pid = parseInt(firstLine.trim(), 10);
+    }
+
     providers.sort((a, b) => CCB_PROVIDERS.indexOf(a.provider) - CCB_PROVIDERS.indexOf(b.provider));
 
     res.json({ providers, tmux_available: true, ccb_instance, terminal_mode, wezterm_available: weztermAvailable() });
@@ -1646,10 +1662,13 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   const body = req.body || {};
   const providers = Array.isArray(body.providers) ? body.providers : ['codex', 'gemini'];
   const workDir = (body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : getProjectPath() || process.cwd();
+  appendToCcbGuiLog('start', { providers, work_dir: workDir });
+
   const ccbRoot = getCcbPath();
   const ccbScript = ccbRoot && fs.existsSync(path.join(ccbRoot, 'ccb')) ? path.join(ccbRoot, 'ccb') : null;
 
   if (!ccbRoot) {
+    appendToCcbGuiLog('start_error', { error: 'ccb_path not configured' });
     return res.status(400).json({
       ok: false,
       error: 'ccb_path not configured',
@@ -1657,6 +1676,7 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
     });
   }
   if (!ccbScript) {
+    appendToCcbGuiLog('start_error', { error: 'CCB script not found', ccb_root: ccbRoot });
     return res.status(404).json({
       ok: false,
       error: 'CCB script not found',
@@ -1670,21 +1690,18 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
     return res.json({ ok: true, sessions: [], errors: [] });
   }
 
-  // P20: Strip TMUX/WEZTERM vars so spawned ccb does not think it runs inside tmux (avoids taking instance lock in GUI's session)
-  const noTmuxEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !['TMUX', 'TMUX_PANE', 'WEZTERM_PANE'].includes(k)));
-
   // Check for existing CCB session before spawning a new one
   const preList = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
   const preNames = (preList.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
   const existingCcb = preNames.find(n => isCcbNativeSessionName(n) || n.startsWith('ai-'));
   if (existingCcb) {
+    appendToCcbGuiLog('start_reuse', { session: existingCcb });
     // Session exists — skip spawn, just ping providers and return status
     const sessions = [];
     for (const provider of validProviders) {
-      const pingCmd = CCB_PING_CMD[provider];
       let status = 'off';
-      if (pingCmd) {
-        const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
+      if (CCB_PING_CMD[provider]) {
+        const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDir);
         status = pingResult.status === 'ok' ? 'ok' : 'unavailable';
       } else {
         status = 'ok';
@@ -1698,15 +1715,20 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
     });
   }
 
+  // Run CCB inside a real terminal so tmux can attach to a TTY (headless spawn fails with "open terminal failed: not a terminal")
+  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" ' + validProviders.map(p => p.replace(/"/g, '\\"')).join(' ');
+  if (os.platform() === 'darwin') {
+    const script = 'tell application "Terminal" to do script "' + cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    spawn('osascript', ['-e', script], { stdio: 'ignore', detached: true }).unref();
+  } else {
+    const term = process.env.GNOME_TERMINAL ? 'gnome-terminal' : (process.env.KONSOLE_VERSION ? 'konsole' : 'xterm');
+    const args = term === 'gnome-terminal' ? ['--', 'bash', '-c', cmd] : (term === 'konsole' ? ['-e', 'bash -c "' + cmd.replace(/"/g, '\\"') + '"'] : ['-e', cmd]);
+    spawn(term, args, { stdio: 'ignore', detached: true }).unref();
+  }
+  appendToCcbGuiLog('start_spawn', { via: 'terminal', cmd: 'cd ' + workDir + ' && python3 ccb ' + validProviders.join(' ') });
+
   let stderrChunks = [];
-  const child = spawn('python3', [ccbScript, ...validProviders], {
-    env: { ...noTmuxEnv, CCB_GUI_LAUNCH: '1' },
-    cwd: fs.existsSync(workDir) ? workDir : process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true
-  });
-  child.stderr.on('data', (chunk) => { stderrChunks.push(chunk); });
-  child.unref();
+  // No child stderr to capture; CCB runs in the opened terminal
 
   // Retry polling: CCB needs time to create tmux session and start providers
   let foundSession = null;
@@ -1731,10 +1753,9 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   const sessions = [];
   const errors = [];
   for (const provider of validProviders) {
-    const pingCmd = CCB_PING_CMD[provider];
     let status = 'off';
-    if (pingCmd) {
-      const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
+    if (CCB_PING_CMD[provider]) {
+      const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDir);
       status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : 'unavailable');
     } else {
       status = firstCcbSession ? 'ok' : 'off';
@@ -1752,10 +1773,15 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   const stderrSnippet = stderrChunks.length
     ? Buffer.concat(stderrChunks).toString('utf8').trim().split('\n').slice(-12).join('\n').slice(0, 500)
     : null;
-  // Always include stderr snippet (not just on total failure)
   if (stderrSnippet) {
     errors.push('CCB stderr: ' + stderrSnippet);
+    appendToCcbGuiLog('start_stderr', { snippet: stderrSnippet.slice(0, 300) });
   }
+  appendToCcbGuiLog('start_done', {
+    found_session: firstCcbSession || null,
+    sessions: sessions.map(s => ({ provider: s.provider, status: s.status })),
+    errors: errors.length ? errors : undefined
+  });
 
   res.json({
     ok: true,
@@ -1816,9 +1842,14 @@ app.get('/api/ccb/session/attach', async (req, res) => {
     sessionName = legacyName;
   } else {
     const ccbNative = allNames.filter(n => isCcbNativeSessionName(n));
-    const pingCmd = CCB_PING_CMD[provider];
-    if (pingCmd) {
-      const pingResult = await pingCcbProvider(pingCmd, ['--timeout', '2', 'ping'], 2500);
+    if (CCB_PING_CMD[provider]) {
+      let workDirForPing = '';
+      try {
+        const cfg = readRdloopConfig();
+        workDirForPing = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
+      } catch {}
+      if (!workDirForPing) workDirForPing = getProjectPath() || process.cwd();
+      const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDirForPing);
       if (pingResult.status === 'ok') {
         if (ccbNative.length > 0) {
           sessionName = ccbNative[0];
@@ -2011,6 +2042,7 @@ app.post('/api/ccb/session/stop', requireWritable, async (req, res) => {
   for (const name of sessionNames) {
     await runTmux(['kill-session', '-t', name], env, 2000);
   }
+  appendToCcbGuiLog('stop', { providers_requested: toStop || 'all', sessions_killed: sessionNames });
   res.json({ ok: true, stopped: sessionNames });
 });
 
@@ -2025,19 +2057,24 @@ app.post('/api/ccb/session/kill-instance', requireWritable, async (req, res) => 
   if (!workDirForLock) workDirForLock = getProjectPath() || process.cwd();
   const lockScan = findCcbInstanceFromLockScan(workDirForLock);
   if (!lockScan.running || lockScan.pid == null) {
+    appendToCcbGuiLog('kill_instance', { result: 'not_found', work_dir: workDirForLock });
     return res.status(404).json({ error: 'No active CCB instance found.', hint: 'CCB may already be stopped.' });
   }
   const pid = lockScan.pid;
   try {
     if (!isPidAlive(pid)) {
+      appendToCcbGuiLog('kill_instance', { pid, result: 'already_exited' });
       return res.status(404).json({ error: 'CCB process no longer running.', pid });
     }
     process.kill(pid, 'SIGTERM');
+    appendToCcbGuiLog('kill_instance', { pid, result: 'SIGTERM_sent' });
     res.json({ ok: true, pid, message: 'CCB process sent SIGTERM.' });
   } catch (err) {
     if (err && err.code === 'ESRCH') {
+      appendToCcbGuiLog('kill_instance', { pid, result: 'ESRCH_already_exited' });
       return res.status(404).json({ error: 'CCB process already exited.', pid });
     }
+    appendToCcbGuiLog('kill_instance', { pid, result: 'error', error: err.message });
     res.status(500).json({ ok: false, error: err.message, pid });
   }
 });
@@ -2052,6 +2089,7 @@ app.post('/api/ccb/session/cleanup', requireWritable, async (req, res) => {
   const cleaned_sessions = [];
   const cmd = (ccbBin && fs.existsSync(ccbBin)) ? 'python3' : 'ccb-cleanup';
   const cmdArgs = cmd === 'python3' ? [ccbBin, '--clean'] : ['--clean'];
+  appendToCcbGuiLog('cleanup', {});
   return new Promise((resolve) => {
     const child = spawn(cmd, cmdArgs, { env: { ...env, PATH: env.PATH || process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -2062,6 +2100,7 @@ app.post('/api/ccb/session/cleanup', requireWritable, async (req, res) => {
         const m = line.match(/Removed (?:stale lock: |stale state file: )?(.+)/);
         if (m) cleaned_sessions.push(m[1].trim());
       }
+      appendToCcbGuiLog('cleanup_done', { cleaned_sessions });
       res.json({ ok: true, cleaned_sessions });
       resolve();
     });
@@ -2080,40 +2119,94 @@ app.post('/api/ccb/session/restart', requireWritable, async (req, res) => {
   const providers = Array.isArray(body.providers) && body.providers.length > 0 ? body.providers : ['codex', 'gemini'];
   const workDir = (body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : getProjectPath() || process.cwd();
   const env = getCoordinatorEnv();
+  appendToCcbGuiLog('restart', { providers, work_dir: workDir });
   const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
   const allNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
   const toKill = allNames.filter(s => s.startsWith(CCB_SESSION_PREFIX) || isCcbNativeSessionName(s) || s.startsWith('ai-'));
   for (const name of toKill) {
     await runTmux(['kill-session', '-t', name], env, 2000);
   }
+  appendToCcbGuiLog('restart_stopped', { sessions: toKill });
   const ccbRoot = getCcbPath();
   const ccbScript = ccbRoot && fs.existsSync(path.join(ccbRoot, 'ccb')) ? path.join(ccbRoot, 'ccb') : null;
   const validProviders = providers.filter(p => CCB_PROVIDERS.includes(p));
   if (ccbScript && validProviders.length > 0) {
     const noTmuxEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !['TMUX', 'TMUX_PANE', 'WEZTERM_PANE'].includes(k)));
-    spawn('python3', [ccbScript, ...validProviders], {
+    const child = spawn('python3', [ccbScript, ...validProviders], {
       env: { ...noTmuxEnv, CCB_GUI_LAUNCH: '1' },
       cwd: fs.existsSync(workDir) ? workDir : process.cwd(),
       stdio: 'ignore',
       detached: true
-    }).unref();
+    });
+    child.unref();
+    appendToCcbGuiLog('restart_spawn', { pid: child.pid });
   }
   res.json({ ok: true, restarted: validProviders });
 });
 
-// GET /api/ccb/session/log — capture pane content from first ccb_* session
+// GET /api/ccb/session/log — GUI operations log (primary) + optional tmux pane capture
 app.get('/api/ccb/session/log', async (req, res) => {
   if (os.platform() === 'win32') return res.status(400).json({ error: 'Not supported on Windows.' });
-  if (!tmuxAvailable()) return res.json({ lines: [], log: '' });
-  const lines = Math.min(parseInt(req.query.lines, 10) || 50, 200);
+  const linesParam = Math.min(parseInt(req.query.lines, 10) || 50, 200);
+  const guiLog = readCcbGuiLogTail(linesParam);
+  let paneLog = '';
+  if (tmuxAvailable()) {
+    const env = getCoordinatorEnv();
+    const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
+    const sessionNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(s => s.startsWith(CCB_SESSION_PREFIX) || isCcbNativeSessionName(s) || s.startsWith('ai-'));
+    const firstSession = sessionNames[0];
+    if (firstSession) {
+      const capResult = await runTmux(['capture-pane', '-t', firstSession, '-p', '-S', String(-Math.min(50, linesParam))], env, 2000);
+      paneLog = (capResult.stdout || '').trim();
+    }
+  }
+  res.json({
+    log: guiLog || '(no CCB GUI log yet)',
+    log_path: CCB_GUI_LOG_ACTUAL_PATH,
+    lines: guiLog ? guiLog.split('\n').filter(Boolean).length : 0,
+    pane_log: paneLog || undefined
+  });
+});
+
+// GET /api/ccb/agent-status — run script/ccb-agent-status.sh (text or --json), env includes CCB bin in PATH
+app.get('/api/ccb/agent-status', (req, res) => {
+  if (os.platform() === 'win32') return res.status(400).json({ error: 'Not supported on Windows.' });
+  const jsonMode = (req.query.format || '').toLowerCase() === 'json';
+  const scriptPath = path.join(RDLOOP_ROOT, '..', 'script', 'ccb-agent-status.sh');
+  if (!fs.existsSync(scriptPath)) {
+    return res.status(404).json({ error: 'ccb-agent-status.sh not found', path: scriptPath });
+  }
   const env = getCoordinatorEnv();
-  const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
-  const sessionNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(s => s.startsWith(CCB_SESSION_PREFIX) || isCcbNativeSessionName(s) || s.startsWith('ai-'));
-  const firstSession = sessionNames[0];
-  if (!firstSession) return res.json({ lines: [], log: '' });
-  const capResult = await runTmux(['capture-pane', '-t', firstSession, '-p', '-S', String(-lines)], env, 2000);
-  const log = (capResult.stdout || '').trim();
-  res.json({ lines: log.split('\n').length, log });
+  const args = jsonMode ? ['--json'] : [];
+  return new Promise((resolve) => {
+    const child = spawn('bash', [scriptPath, ...args], {
+      env: { ...env, PATH: env.PATH || process.env.PATH },
+      cwd: getProjectPath() || process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (c) => { out += (c && c.toString()) || ''; });
+    child.stderr.on('data', (c) => { err += (c && c.toString()) || ''; });
+    child.on('close', (code) => {
+      if (jsonMode) {
+        try {
+          const data = JSON.parse(out.trim());
+          res.json({ ok: true, ...data, stderr: err || undefined });
+        } catch (e) {
+          res.status(500).json({ ok: false, error: 'Invalid JSON from script', stdout: out.slice(0, 500), stderr: err });
+        }
+        resolve();
+        return;
+      }
+      res.json({ ok: true, text: out.trim() || '(no output)', stderr: err || undefined });
+      resolve();
+    });
+    child.on('error', (e) => {
+      res.status(500).json({ ok: false, error: e.message });
+      resolve();
+    });
+  });
 });
 
 // P13: ccb.config under project_path .ccb/ccb.config

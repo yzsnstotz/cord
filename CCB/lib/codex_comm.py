@@ -24,6 +24,12 @@ from session_utils import find_project_session_file
 from session_file_watcher import SessionFileWatcher, HAS_WATCHDOG
 from project_id import compute_ccb_project_id
 
+try:
+    from bridgelog_ccb import ccb_log_send, ccb_log_reply
+except ImportError:
+    def ccb_log_send(*args, **kwargs): pass
+    def ccb_log_reply(*args, **kwargs): pass
+
 apply_backend_env()
 
 SESSION_ROOT = Path(os.environ.get("CODEX_SESSION_ROOT") or (Path.home() / ".codex" / "sessions")).expanduser()
@@ -946,6 +952,13 @@ class CodexCommunicator:
                 fifo.write(json.dumps(message, ensure_ascii=False) + "\n")
                 fifo.flush()
 
+        ccb_log_send(
+            from_role="caller",
+            to_role="codex",
+            marker=marker,
+            content=content[:2000] if content else None,
+            extra={"runtime_dir": str(self.runtime_dir), "session_id": self.session_id},
+        )
         return marker, state
 
     def _generate_marker(self) -> str:
@@ -990,6 +1003,12 @@ class CodexCommunicator:
                     if message:
                         print(f"🤖 {t('reply_from', provider='Codex')}")
                         print(message)
+                        ccb_log_reply(
+                            from_role="codex",
+                            to_role="caller",
+                            marker=marker,
+                            reply=message[:2000] if message else None,
+                        )
                         return message
                     elapsed = int(time.time() - start_time)
                     if elapsed >= last_hint + 30:
@@ -1005,6 +1024,12 @@ class CodexCommunicator:
             if message:
                 print(f"🤖 {t('reply_from', provider='Codex')}")
                 print(message)
+                ccb_log_reply(
+                    from_role="codex",
+                    to_role="caller",
+                    marker=marker,
+                    reply=message[:2000] if message else None,
+                )
                 return message
 
             print(f"⏰ {t('timeout_no_reply', provider='Codex')}")
@@ -1035,6 +1060,13 @@ class CodexCommunicator:
         message = self.log_reader.latest_message()
         if message:
             self._remember_codex_session(self.log_reader.current_log_path())
+            ccb_log_reply(
+                from_role="codex",
+                to_role="caller",
+                marker=None,
+                reply=message[:2000] if message else None,
+                extra={"session_id": self.session_id},
+            )
         if not message:
             if display:
                 print(t('no_reply_available', provider='Codex'))

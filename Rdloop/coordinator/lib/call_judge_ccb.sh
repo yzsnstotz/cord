@@ -49,17 +49,18 @@ fi
 
 # P16: provider from collab_roles.reviewer (5th arg) or fallback to judge_model prefix
 ccb_bin="cask"
+ccb_provider="codex"
 if [ -n "$provider_arg" ]; then
   case "$provider_arg" in
-    claude)  ccb_bin="lask" ;;
-    codex)   ccb_bin="cask" ;;
-    gemini)  ccb_bin="gask" ;;
-    opencode) ccb_bin="oask" ;;
-    droid)   ccb_bin="dask" ;;
-    *)       ccb_bin="cask" ;;
+    claude)  ccb_bin="lask"; ccb_provider="claude" ;;
+    codex)   ccb_bin="cask"; ccb_provider="codex" ;;
+    gemini)  ccb_bin="gask"; ccb_provider="gemini" ;;
+    opencode) ccb_bin="oask"; ccb_provider="opencode" ;;
+    droid)   ccb_bin="dask"; ccb_provider="droid" ;;
+    *)       ccb_bin="cask"; ccb_provider="codex" ;;
   esac
 else
-  [[ "$judge_model" == gemini* ]] && ccb_bin="gask"
+  if [[ "$judge_model" == gemini* ]]; then ccb_bin="gask"; ccb_provider="gemini"; fi
 fi
 
 # P18: Session file from repo_path/.ccb/ (project-level), not worktree.
@@ -91,13 +92,24 @@ full_prompt="${full_prompt}
   echo "[JUDGE][semi-auto/ccb] $(date -u +%Y-%m-%dT%H:%M:%SZ) attached to human session"
   echo "[JUDGE][semi-auto/ccb] provider=${ccb_bin} timeout=${judge_timeout}s"
 
-  if ! "$ccb_bin" --timeout 5 "ping" > /dev/null 2>&1; then
-    echo "[JUDGE][semi-auto/ccb] CCB daemon unavailable"
-    cat > "${attempt_dir}/judge/verdict.json" <<'ENDJSON'
+  if [ -n "$ccb_session_file" ]; then
+    if ! CCB_SESSION_FILE="$ccb_session_file" ccb-ping "$ccb_provider" > /dev/null 2>&1; then
+      echo "[JUDGE][semi-auto/ccb] CCB daemon unavailable"
+      cat > "${attempt_dir}/judge/verdict.json" <<'ENDJSON'
 {"schema_version":"v1","decision":"NEED_USER_INPUT","reasons":["CCB daemon unavailable"],"next_instructions":"","questions_for_user":["Start CCB (cask/gask) and retry"]}
 ENDJSON
-    echo "127" > "${attempt_dir}/judge/rc.txt"
-    exit 127
+      echo "127" > "${attempt_dir}/judge/rc.txt"
+      exit 127
+    fi
+  else
+    if ! (cd "$worktree_dir" && ccb-ping "$ccb_provider") > /dev/null 2>&1; then
+      echo "[JUDGE][semi-auto/ccb] CCB daemon unavailable"
+      cat > "${attempt_dir}/judge/verdict.json" <<'ENDJSON'
+{"schema_version":"v1","decision":"NEED_USER_INPUT","reasons":["CCB daemon unavailable"],"next_instructions":"","questions_for_user":["Start CCB (cask/gask) and retry"]}
+ENDJSON
+      echo "127" > "${attempt_dir}/judge/rc.txt"
+      exit 127
+    fi
   fi
 
   if [ -n "$ccb_session_file" ]; then

@@ -2,6 +2,13 @@ const path = require('path');
 const config = require('./config');
 const { canNotify } = require('./rate_limiter');
 
+let bridgeLog;
+try {
+  bridgeLog = require('../claude_bridge/bridgelog');
+} catch {
+  bridgeLog = { logEvent: () => {} };
+}
+
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.resolve(__dirname, '..', 'out', 'claude_bridge');
 
 let BridgeIPC;
@@ -122,6 +129,14 @@ async function pollBridge(bot) {
     }
 
     sentMessageHtml.set(req.id, text);
+
+    bridgeLog.logEvent('forward_to_telegram', {
+      from: 'openclaw',
+      to: 'telegram',
+      id: req.id,
+      type: req.type,
+      created_at: req.created_at
+    });
 
     for (const chatId of config.TELEGRAM_CHAT_ALLOWLIST) {
       try {

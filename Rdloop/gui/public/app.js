@@ -660,6 +660,7 @@ async function renderCcbPanel() {
       <button type="button" class="btn btn-danger write-action" onclick="ccbStopAll()">Stop All</button>
       ${ccbInstance.running ? `<button type="button" class="btn btn-danger write-action" onclick="ccbKillInstance()" title="Kill the currently active CCB process (PID ${escapeHtml(String(ccbInstance.pid))})">Kill CCB</button>` : ''}
       ${weztermAvailable ? `<button type="button" class="btn write-action" onclick="ccbOpenWezTermWithConfig()" title="Open all agents in WezTerm">WezTerm</button>` : ''}
+      <button type="button" class="btn write-action" onclick="ccbAgentStatus()" title="Run ccb-agent-status.sh (askd, legacy daemons, provider ping)">Agent status</button>
       <span class="ccb-process-info">CCB: ${ccbProcessHtml}</span>
     </div>
 
@@ -1000,6 +1001,37 @@ async function ccbKillInstance() {
   } catch (e) {
     if (notice) notice.textContent = '';
     alert(e?.message || 'Kill failed');
+  }
+}
+
+/** Run ccb-agent-status.sh and show result in Logs section. */
+async function ccbAgentStatus() {
+  const notice = document.getElementById('ccb-panel-notice');
+  const logContent = document.getElementById('ccb-log-content');
+  if (notice) { notice.textContent = 'Running agent status...'; notice.style.color = '#8b949e'; }
+  try {
+    const res = await fetch('/api/ccb/agent-status');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (notice) notice.textContent = '';
+      alert(data.error || 'Agent status failed');
+      return;
+    }
+    const text = data.text || (data.provider_ping ? 'Provider ping: ' + JSON.stringify(data.provider_ping) : '') || '(no output)';
+    if (logContent) {
+      logContent.textContent = text + (data.stderr ? '\n\nstderr:\n' + data.stderr : '');
+    }
+    if (notice) {
+      notice.textContent = 'Agent status done. See Logs below.';
+      notice.style.color = '#3fb950';
+      setTimeout(() => { if (notice) notice.textContent = ''; }, 4000);
+    }
+    const details = logContent?.closest('details');
+    if (details) details.open = true;
+    refreshCcbPanelContent();
+  } catch (e) {
+    if (notice) notice.textContent = '';
+    alert(e?.message || 'Agent status failed');
   }
 }
 

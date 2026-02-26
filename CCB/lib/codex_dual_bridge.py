@@ -16,6 +16,12 @@ from typing import Any, Dict, Optional
 
 from terminal import TmuxBackend, WeztermBackend
 
+try:
+    from bridgelog_ccb import ccb_log_fifo_in, ccb_log_fifo_out
+except ImportError:
+    def ccb_log_fifo_in(*args, **kwargs): pass
+    def ccb_log_fifo_out(*args, **kwargs): pass
+
 
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
@@ -104,13 +110,23 @@ class DualBridge:
                 line = fifo.readline()
                 if not line:
                     return None
-                return json.loads(line)
+                payload = json.loads(line)
+                content = payload.get("content", "")
+                marker = payload.get("marker")
+                ccb_log_fifo_in(
+                    marker=marker,
+                    content=content[:2000] if content else None,
+                    payload_preview=line[:500].strip() if line else None,
+                )
+                return payload
         except (OSError, json.JSONDecodeError):
             return None
 
     def _process_request(self, payload: Dict[str, Any]) -> None:
         content = payload.get("content", "")
         marker = payload.get("marker") or self._generate_marker()
+
+        ccb_log_fifo_out(marker=marker, content=content[:2000] if content else None)
 
         timestamp = self._timestamp()
         self._log_bridge(json.dumps({"marker": marker, "question": content, "time": timestamp}, ensure_ascii=False))

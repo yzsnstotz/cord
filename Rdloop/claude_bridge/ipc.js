@@ -2,6 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+let bridgeLog;
+try {
+  bridgeLog = require('./bridgelog');
+} catch {
+  bridgeLog = { logEvent: () => {} };
+}
+
 const DEFAULT_BRIDGE_DIR = path.resolve(__dirname, '..', 'out', 'claude_bridge');
 
 class BridgeIPC {
@@ -55,6 +62,14 @@ class BridgeIPC {
     };
     this._atomicWrite(path.join(this.pendingDir, `${id}.json`), req);
     this.appendEvent('permission_request', { id, prompt: req.prompt });
+    bridgeLog.logEvent('request_created', {
+      from: 'bridge',
+      to: 'pending',
+      id,
+      type: 'permission',
+      prompt: (req.prompt || '').slice(0, 300),
+      created_at: req.created_at
+    });
     return id;
   }
 
@@ -70,6 +85,14 @@ class BridgeIPC {
     };
     this._atomicWrite(path.join(this.pendingDir, `${id}.json`), evt);
     this.appendEvent('usage_limit', { id, message: evt.message, next_available: evt.next_available });
+    bridgeLog.logEvent('request_created', {
+      from: 'bridge',
+      to: 'pending',
+      id,
+      type: 'usage_limit',
+      message: (evt.message || '').slice(0, 300),
+      created_at: evt.created_at
+    });
     return id;
   }
 
@@ -77,6 +100,14 @@ class BridgeIPC {
     const filepath = path.join(this.responsesDir, `${requestId}.json`);
     try {
       const data = JSON.parse(fs.readFileSync(filepath, 'utf8'));
+      bridgeLog.logEvent('response_read', {
+        from: 'responses',
+        to: 'bridge',
+        id: requestId,
+        choice: data.choice,
+        source: data.source,
+        responded_at: data.responded_at
+      });
       return data;
     } catch {
       return null;
@@ -93,6 +124,14 @@ class BridgeIPC {
     };
     this._atomicWrite(path.join(this.responsesDir, `${requestId}.json`), resp);
     this.appendEvent('response', { id: requestId, choice });
+    bridgeLog.logEvent('response_written', {
+      from: source || 'caller',
+      to: 'bridge',
+      id: requestId,
+      choice,
+      chat_id: chatId || null,
+      responded_at: resp.responded_at
+    });
     this.removePending(requestId);
     return resp;
   }

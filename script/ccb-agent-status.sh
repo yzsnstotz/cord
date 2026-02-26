@@ -115,8 +115,14 @@ if [[ -f "$ASKd_STATE" ]]; then
   fi
 fi
 # Also consider "askd" process by name (in case state file is stale)
+# Use case-insensitive match (macOS may show "Python" not "python") and broader "askd" match
 if [[ "$ASKd_RUNNING" != true ]]; then
   if [[ -n "$(_pgrep_pattern '[p]ython.*askd')" ]] || [[ -n "$(_pgrep_pattern '[b]in/askd')" ]]; then
+    ASKd_RUNNING=true
+  fi
+fi
+if [[ "$ASKd_RUNNING" != true ]] && command -v pgrep >/dev/null 2>&1; then
+  if pgrep -fi 'askd' 2>/dev/null | head -1 | grep -q .; then
     ASKd_RUNNING=true
   fi
 fi
@@ -193,6 +199,31 @@ for pair in $PROVIDERS; do
   fi
 done
 
+# 5) Provider reachability via ping (source of truth; same as GUI)
+_provider_ping_reachable() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then echo "not_installed"; return; fi
+  local out; out="$("$cmd" --timeout 2 ping 2>&1)" || true
+  [[ "$out" == *[Pp]ong* ]] && echo "yes" || echo "no"
+}
+PING_RESULTS=""
+for pair in $PROVIDERS; do
+  prov="${pair%%:*}"
+  case "$prov" in
+    codex)  cmd="cask" ;;
+    gemini) cmd="gask" ;;
+    opencode) cmd="oask" ;;
+    claude) cmd="lask" ;;
+    droid)  cmd="dask" ;;
+    *)      cmd="" ;;
+  esac
+  if [[ -n "$cmd" ]]; then
+    val="$(_provider_ping_reachable "$cmd")"
+    PING_RESULTS="${PING_RESULTS} ${prov}:${val}"
+  fi
+done
+PING_RESULTS="${PING_RESULTS# }"
+
 # ---------- Output ----------
 if [[ "$FORMAT" == "json" ]]; then
   echo "{"
@@ -215,6 +246,16 @@ if [[ "$FORMAT" == "json" ]]; then
     _legacy_running "$prov" && running="true"
     [[ "$first" == true ]] && first=false || echo ","
     echo -n "    \"$prov\": { \"pid\": \"$pid\", \"state_file\": \"$state\", \"running\": $running }"
+  done
+  echo ""
+  echo "  },"
+  echo "  \"provider_ping\": {"
+  first=true
+  for entry in $PING_RESULTS; do
+    prov="${entry%%:*}"
+    val="${entry#*:}"
+    [[ "$first" == true ]] && first=false || echo ","
+    echo -n "    \"$prov\": \"$val\""
   done
   echo ""
   echo "  },"
@@ -278,6 +319,13 @@ else
   echo "CCB sessions: (none)"
 fi
 echo ""
+echo "--- Provider reachability (ping) ---"
+for entry in $PING_RESULTS; do
+  prov="${entry%%:*}"
+  val="${entry#*:}"
+  echo "  $prov: $val"
+done
+echo ""
 echo "--- Project session files (.ccb) ---"
 if [[ ${#HAS_SESSION[@]} -gt 0 ]]; then
   echo "  Found for: ${HAS_SESSION[*]}"
@@ -286,9 +334,26 @@ else
 fi
 echo "=============================================="
 
-# One-line summary
-if [[ "$ASKd_RUNNING" == true ]]; then
-  echo "Summary: askd is running (unified backend). Backends (codex/gemini/opencode/claude/droid) are available via this daemon."
+# One-line summary: prefer provider ping as source of truth
+ping_yes_count=0
+ping_yes_list=""
+for entry in $PING_RESULTS; do
+  prov="${entry%%:*}"
+  val="${entry#*:}"
+  if [[ "$val" == "yes" ]]; then
+    ((ping_yes_count++)) || true
+    ping_yes_list="${ping_yes_list} ${prov}"
+  fi
+done
+ping_yes_list="${ping_yes_list# }"
+set -- $PING_RESULTS
+total_providers=$#
+if [[ "$ping_yes_count" -gt 0 ]]; then
+  echo "Summary: $ping_yes_count/$total_providers providers reachable (ping):${ping_yes_list:+ $ping_yes_list}."
+elif [[ "$total_providers" -gt 0 ]]; then
+  echo "Summary: No providers reachable via ping (0/$total_providers). Ensure CCB is started and PATH includes CCB bin."
+elif [[ "$ASKd_RUNNING" == true ]]; then
+  echo "Summary: askd is running (unified backend). Provider ping did not respond; check PATH has CCB bin (cask, gask, ...)."
 else
   legacy_any=false
   for pair in $PROVIDERS; do
@@ -296,8 +361,8 @@ else
     _legacy_running "$prov" && legacy_any=true && break
   done
   if [[ "$legacy_any" == true ]]; then
-    echo "Summary: Unified askd not running; some legacy daemons are running."
+    echo "Summary: Unified askd not running; some legacy daemons are running. Run provider ping from a shell with CCB bin in PATH."
   else
-    echo "Summary: No askd or legacy daemons running. Start CCB with: ccb [providers...] (e.g. ccb codex claude)."
+    echo "Summary: No askd or legacy daemons running; no providers reachable. Start CCB with: ccb [providers...] (e.g. ccb codex claude)."
   fi
 fi

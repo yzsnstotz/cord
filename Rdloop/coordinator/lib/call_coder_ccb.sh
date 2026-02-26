@@ -37,17 +37,18 @@ except: print('')
 
 # P16: provider from collab_roles.executor (5th arg) or fallback to coder_model prefix
 ccb_bin="cask"
+ccb_provider="codex"
 if [ -n "$provider_arg" ]; then
   case "$provider_arg" in
-    claude)  ccb_bin="lask" ;;
-    codex)   ccb_bin="cask" ;;
-    gemini)  ccb_bin="gask" ;;
-    opencode) ccb_bin="oask" ;;
-    droid)   ccb_bin="dask" ;;
-    *)       ccb_bin="cask" ;;
+    claude)  ccb_bin="lask"; ccb_provider="claude" ;;
+    codex)   ccb_bin="cask"; ccb_provider="codex" ;;
+    gemini)  ccb_bin="gask"; ccb_provider="gemini" ;;
+    opencode) ccb_bin="oask"; ccb_provider="opencode" ;;
+    droid)   ccb_bin="dask"; ccb_provider="droid" ;;
+    *)       ccb_bin="cask"; ccb_provider="codex" ;;
   esac
 else
-  [[ "$coder_model" == gemini* ]] && ccb_bin="gask"
+  if [[ "$coder_model" == gemini* ]]; then ccb_bin="gask"; ccb_provider="gemini"; fi
 fi
 
 # P18: Session file from repo_path/.ccb/ (project-level), not worktree. cwd for cask/gask remains worktree_dir.
@@ -80,9 +81,9 @@ ${instruction}"
   ping_interval=1
   for (( attempt=1; attempt <= ping_retries; attempt++ )); do
     if [ -n "$ccb_session_file" ]; then
-      CCB_SESSION_FILE="$ccb_session_file" "$ccb_bin" --timeout 5 "ping" > /dev/null 2>&1 && { ccb_ping_ok=1; break; }
+      CCB_SESSION_FILE="$ccb_session_file" ccb-ping "$ccb_provider" > /dev/null 2>&1 && { ccb_ping_ok=1; break; }
     else
-      "$ccb_bin" --timeout 5 "ping" > /dev/null 2>&1 && { ccb_ping_ok=1; break; }
+      (cd "$worktree_dir" && ccb-ping "$ccb_provider") > /dev/null 2>&1 && { ccb_ping_ok=1; break; }
     fi
     if [ "$attempt" -lt "$ping_retries" ]; then
       echo "[CODER][semi-auto/ccb] ping attempt ${attempt}/${ping_retries} failed, retrying in ${ping_interval}s..."
@@ -92,7 +93,7 @@ ${instruction}"
 
   if [ "$ccb_ping_ok" -ne 1 ]; then
     echo "[CODER][semi-auto/ccb] CCB daemon unavailable after ${ping_retries} ping(s)"
-    echo "[CODER][semi-auto/ccb] diagnostic: provider=${ccb_bin} session_file=${ccb_session_file:-<unset>} session_file_exists=$([ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ] && echo yes || echo no) cask_cmd=$(command -v "$ccb_bin" 2>/dev/null || echo "$ccb_bin")"
+    echo "[CODER][semi-auto/ccb] diagnostic: provider=${ccb_provider} (ask=${ccb_bin}) session_file=${ccb_session_file:-<unset>} session_file_exists=$([ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ] && echo yes || echo no) ccb-ping=$(command -v ccb-ping 2>/dev/null || echo ccb-ping)"
     echo "127" > "${attempt_dir}/coder/rc.txt"
     exit 127
   fi
