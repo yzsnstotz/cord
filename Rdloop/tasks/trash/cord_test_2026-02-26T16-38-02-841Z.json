@@ -1,0 +1,44 @@
+{
+  "schema_version": "v1",
+  "task_id": "cord_test",
+  "task_type": "engineering_impl",
+  "execution_mode": "auto",
+  "channel_type": "ccb",
+  "base_ref": "main",
+  "goal": "",
+  "acceptance": [],
+  "test_cmd": "true",
+  "max_attempts": 3,
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 300,
+  "attempt_context_mode": "fresh_each",
+  "constraints": [],
+  "allowed_paths": [],
+  "forbidden_globs": [
+    "**/.env",
+    "**/secrets*",
+    "**/*.pem"
+  ],
+  "coder": "ccb",
+  "judge": "ccb",
+  "coder_model": "codex",
+  "judge_model": "gemini",
+  "collab_roles": {
+    "executor": "codex",
+    "reviewer": "gemini",
+    "designer": "codex",
+    "inspiration": "codex"
+  },
+  "executor_type": "solo_agent",
+  "session_mode": "continuous",
+  "workflow_mode": "solo",
+  "agent_config": {
+    "max_attempts": 10,
+    "auto_pass_threshold": 0.85,
+    "knowledge_shards": [],
+    "provider": "claude"
+  },
+  "knowledge_enabled": true,
+  "knowledge_project_path": "",
+  "created_at": "2026-02-26T14:16:11.134Z"
+}

@@ -1,0 +1,459 @@
+{
+  "project": "闭环AI自主研发体系 — 整合架构 v5.0",
+  "version": "5.0",
+  "created_at": "2026-02-26T00:00:00Z",
+  "description": "根据integrated_architecture_v4_to_v5_upgrade.md，完成以下升级：（1）废弃 workflow_mode，引入 executor_type × session_mode 两参数正交路由；（2）修复 api_call 模式 Bug1（judge feedback 未传递）和 Bug2（worktree 时序问题）；（3）统一 Git 工作流，新增 git_ops.sh 和 loop_lifecycle.sh；（4）Agent 规则文件升级至 v2.0；（5）GUI 新增 Git Status / Knowledge Debt / Loop Stats 三个视图。共 14 个 task。",
+  "execution_mode_default": "semi-auto",
+  "tasks": [
+
+    {
+      "task_id": "T01",
+      "title": "task.json schema 升级 — 废弃 workflow_mode，新增 executor_type / session_mode / agent_config",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "更新 task.json 的 schema 定义和校验逻辑。废弃 workflow_mode 字段，新增 executor_type（api_call | solo_agent | multi_agent）、session_mode（fresh | iterative | continuous）、agent_config（合并原 solo_config）、collab_roles 字段。提供迁移脚本 migrate_task_json.sh 实现向后兼容。",
+      "acceptance_criteria": [
+        "task.json schema 包含 executor_type、session_mode、agent_config、collab_roles 四个新字段",
+        "executor_type 枚举值：api_call | solo_agent | multi_agent",
+        "session_mode 枚举值：fresh | iterative | continuous",
+        "agent_config 涵盖 max_attempts、auto_pass_threshold、knowledge_shards、provider 字段，solo_config 已废弃",
+        "collab_roles 仅在 executor_type=multi_agent 时必填",
+        "migrate_task_json.sh 能将旧 workflow_mode 值正确映射：collab→multi_agent/continuous，solo→solo_agent/continuous，single→api_call/fresh",
+        "migrate_task_json.sh 迁移后删除 workflow_mode 字段",
+        "schema 校验脚本对缺失必填字段、非法枚举值均返回非零 rc 并输出明确错误信息",
+        "提供至少 3 个迁移前后的示例 JSON"
+      ],
+      "output_files": [
+        "docs/schema/task_schema_v5.json",
+        "tools/migrate_task_json.sh",
+        "tests/test_task_schema_v5.sh"
+      ],
+      "test_cmd": "bash tests/test_task_schema_v5.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "这是所有后续 task 的 schema 基础，T02～T14 均依赖本 task 定义的字段命名。迁移脚本需幂等。"
+    },
+
+    {
+      "task_id": "T02",
+      "title": "coordinator/run_task.sh — 两参数路由替代三模式路由",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T01"],
+      "description": "重构 run_task.sh 核心路由逻辑。废弃 workflow_mode case 分支，替换为 executor_type 和 session_mode 两个独立 case 分支组合路由。coder_adapter 由 executor_type 决定（cliproxy / solo / ccb），context_strategy 由 session_mode 决定（reset / carry / persist）。保留原有 adapter（cursor/codex/mock）不删除。",
+      "acceptance_criteria": [
+        "从 task.json 读取 executor_type，默认空字符串时报错退出",
+        "从 task.json 读取 session_mode，默认值为 continuous",
+        "executor_type=api_call → coder_adapter=cliproxy",
+        "executor_type=solo_agent → coder_adapter=solo",
+        "executor_type=multi_agent → coder_adapter=ccb",
+        "session_mode=fresh → context_strategy=reset",
+        "session_mode=iterative → context_strategy=carry",
+        "session_mode=continuous → context_strategy=persist",
+        "原有 workflow_mode 路由代码全部移除（不保留兼容分支）",
+        "原有 cursor / codex / mock adapter 调用路径保持不变",
+        "回归测试：solo_agent + continuous、multi_agent + continuous 场景通过"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh",
+        "tests/test_run_task_routing_v5.sh"
+      ],
+      "test_cmd": "bash tests/test_run_task_routing_v5.sh",
+      "coder_timeout_seconds": 500,
+      "notes": "核心路由变更，建议先写测试再改实现。注意保留 cursor/codex/mock 回归路径。"
+    },
+
+    {
+      "task_id": "T03",
+      "title": "Bug Fix — api_call worktree 前置初始化（修复 PAUSED_NOT_GIT_REPO）",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T02"],
+      "description": "修复 Bug2：worktree 初始化时序问题导致 coder 空转。v5 中 worktree 必须在 BranchInitSpec 处理阶段由 git_ops.sh create-branches 创建完毕，不在 attempt 内部初始化。coder 启动时 worktree 必然存在，PAUSED_NOT_GIT_REPO 状态在 api_call 场景下永久消除。",
+      "acceptance_criteria": [
+        "api_call 任务的 attempt 循环启动前，worktree 路径已由 git_ops.sh create-branches 创建",
+        "attempt 内部不再包含任何 git worktree add / git init 操作",
+        "coder elapsed 时间 > 0（验证 coder 实际执行，未空转）",
+        "模拟 worktree 缺失场景：run_task.sh 在启动 attempt 循环前检测 worktree 存在性，不存在时输出明确错误并以非零 rc 退出，不进入 attempt 循环",
+        "events.jsonl 不再出现 PAUSED_NOT_GIT_REPO 事件（api_call 场景）",
+        "有单元测试覆盖 worktree 存在 / 不存在两种启动路径"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh",
+        "tests/test_worktree_init_timing.sh"
+      ],
+      "test_cmd": "bash tests/test_worktree_init_timing.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "依赖 T07（git_ops.sh create-branches）提供 worktree 创建能力。可先 mock git_ops.sh 接口编写测试，T07 完成后做集成验证。"
+    },
+
+    {
+      "task_id": "T04",
+      "title": "Bug Fix — api_call judge feedback 注入（修复 next_instructions 未传递）",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T02", "T03"],
+      "description": "修复 Bug1：judge 的 next_instructions 未传递给下一次 attempt 的 coder。在 call_coder_cliproxy.sh 中，attempt > 1 时按 session_mode 组装 prompt：iterative 模式注入 prev_output（git show HEAD:<output_file>）和 judge.next_instructions（git show HEAD:.rdloop/attempt_N-1/verdict.json）；fresh 模式每次从零开始不注入任何历史。同时将 verdict.json commit 进 worker 分支，确保下一 attempt 可通过 git 读取。",
+      "acceptance_criteria": [
+        "attempt > 1 且 session_mode=iterative 时，instruction 包含上一版本产出（git show HEAD:<output_file>）",
+        "attempt > 1 且 session_mode=iterative 时，instruction 包含 judge.next_instructions（从 .rdloop/attempt_N-1/verdict.json 提取）",
+        "session_mode=fresh 时，所有 attempt 的 instruction 只含 goal + acceptance，不注入任何历史",
+        "verdict.json 在 judge 完成后以 amend commit 写入 .rdloop/attempt_N/verdict.json 并提交到 worker 分支",
+        "下一 attempt 通过 git show HEAD:.rdloop/attempt_N/verdict.json 能成功读取 next_instructions",
+        "judge 输出 next_instructions 为空时，prompt 中省略该节，不注入空字符串",
+        "有 mock judge verdict 的集成测试，验证 attempt_2 instruction 包含 attempt_1 的 next_instructions"
+      ],
+      "output_files": [
+        "coordinator/lib/call_coder_cliproxy.sh",
+        "tests/test_judge_feedback_injection.sh"
+      ],
+      "test_cmd": "bash tests/test_judge_feedback_injection.sh",
+      "coder_timeout_seconds": 500,
+      "notes": "参见升级文档第二章 2.2 节。next_instructions 提取是确定性 JSON 读取，无 LLM 参与。注意 amend commit 需在 judge 完成后执行。"
+    },
+
+    {
+      "task_id": "T05",
+      "title": "api_call attempt 状态机完整实现（含 decision_table）",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T03", "T04"],
+      "description": "实现完整的 api_call attempt 状态机：前置 worktree 检查 → call_coder_cliproxy（按 session_mode 组装 prompt）→ commit 产出 + verdict placeholder → call_judge_cliproxy → amend commit 写入 verdict.json → 执行 test_cmd → decision_table 决策（READY_FOR_REVIEW / 继续 / PAUSED）。状态机不得提前退出，decision_table 覆盖所有分支。",
+      "acceptance_criteria": [
+        "attempt 循环严格按顺序执行：coder → commit → judge → amend → test_cmd → decision",
+        "decision_table：score >= threshold AND rc == 0 → READY_FOR_REVIEW，开 PR",
+        "decision_table：score < threshold AND n < max_attempts → n++，继续下一 attempt",
+        "decision_table：n >= max_attempts → PAUSED",
+        "test_cmd rc 不可绕过：rc != 0 时不进入 READY_FOR_REVIEW，即使 judge score 达标",
+        "judge_enabled=false 时跳过 judge 步骤，score 视为满分",
+        "每次 attempt 的 commit message 格式为 'attempt N: score=XX'",
+        "events.jsonl 记录每次 attempt 的开始/结束/状态转移事件",
+        "端到端测试：3 次 attempt，前 2 次 score 不达标，第 3 次达标，验证最终状态为 READY_FOR_REVIEW"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh",
+        "tests/test_api_call_state_machine.sh"
+      ],
+      "test_cmd": "bash tests/test_api_call_state_machine.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "参见升级文档第二章 2.2 节完整状态机描述。建议用 mock coder/judge 编写确定性测试。"
+    },
+
+    {
+      "task_id": "T06",
+      "title": "Git 分支命名规范实现 — 统一三种 executor_type",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T01"],
+      "description": "实现统一的分支命名规范，适用三种 executor_type。task 主分支：task/<YYYYMMDD>-<slug>；worker 分支：worker/<slug>-content（api_call）、worker/<slug>-agent（solo_agent）、worker/<slug>-executor-A/B + worker/<slug>-reviewer（multi_agent）。分支状态语义：存在=已分配，PR open=进行中，PR changes_requested=blocked，PR merged=done。",
+      "acceptance_criteria": [
+        "BranchInitSpec 中 executor_type=api_call 时创建 worker/<slug>-content 分支",
+        "BranchInitSpec 中 executor_type=solo_agent 时创建 worker/<slug>-agent 分支",
+        "BranchInitSpec 中 executor_type=multi_agent 时创建各 executor worker 分支（按 workers 数组）",
+        "task 主分支格式为 task/<YYYYMMDD>-<slug>，date 从 BranchInitSpec.date 字段读取",
+        "分支命名函数有单元测试覆盖三种 executor_type",
+        "分支名中不允许空格和特殊字符，slug 自动 sanitize"
+      ],
+      "output_files": [
+        "tools/git_ops.sh",
+        "tests/test_branch_naming.sh"
+      ],
+      "test_cmd": "bash tests/test_branch_naming.sh",
+      "coder_timeout_seconds": 300,
+      "notes": "本 task 实现分支命名函数，T07 在此基础上实现 create-branches 完整功能。"
+    },
+
+    {
+      "task_id": "T07",
+      "title": "tools/git_ops.sh — create-branches / merge-pr / review-prep",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T06"],
+      "description": "实现 git_ops.sh 三个子命令：create-branches（接收 BranchInitSpec JSON，创建 task 主分支和所有 worker 分支及 worktree）、merge-pr（接收 MergeDecision JSON，执行 merge）、review-prep（接收 task_slug 和 contract_path，自动核对 interface contract，生成结构化报告 JSON）。LLM 不直接执行任何 git 命令。",
+      "acceptance_criteria": [
+        "create-branches：解析 BranchInitSpec JSON，创建 task 主分支和对应 worker 分支，同时建好 worktree",
+        "create-branches：幂等，分支已存在时不报错",
+        "merge-pr：解析 MergeDecision JSON，verdict=approve 时执行 merge，verdict=request_changes 时写 PR changes_requested 状态并退出",
+        "merge-pr：merge_after 字段指定的依赖任务未 merge 时，阻断并报错",
+        "review-prep：输出标准结构化 JSON，包含 task_id、executor_type、contract_check、diff_summary、judge_scores、pr_description",
+        "review-prep：multi_agent 类型填充 contract_check（required_exports、found_exports、missing、cross_contamination）",
+        "review-prep：api_call / solo_agent 类型 contract_check 为 null，填充 judge_scores",
+        "review-prep：cross_contamination 检测——worker 分支修改文件不在其 slug 对应路径时标记",
+        "所有子命令有对应测试（可用 bare git repo 作 fixture）"
+      ],
+      "output_files": [
+        "tools/git_ops.sh",
+        "tests/test_git_ops.sh"
+      ],
+      "test_cmd": "bash tests/test_git_ops.sh",
+      "coder_timeout_seconds": 700,
+      "notes": "参见升级文档第五章 5.2 节。review-prep 的 cross_contamination 检测是 multi_agent 场景的核心安全机制。"
+    },
+
+    {
+      "task_id": "T08",
+      "title": "tools/loop_lifecycle.sh — loop 结束收尾自动化",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T07"],
+      "description": "实现 loop_lifecycle.sh on-loop-complete <task_slug>，在所有 worker PR merged 后由 coordinator 自动触发，全程无 LLM。执行顺序：① regression gate（test_cmd，失败阻断）→ ② knowledge 写入（从 PR description 提取 file-level summary 写 module shard，提取已知欠债写 debt shard）→ ③ 写 loop_stats.jsonl → ④ 派生 session_state.json → ⑤ 写 loop_complete 事件到 events.jsonl。",
+      "acceptance_criteria": [
+        "on-loop-complete 在任意 worker PR 未 merged 时拒绝执行，输出明确错误",
+        "regression gate：执行 task.json 中 test_cmd，rc != 0 时写 REGRESSION_FAILED 事件并阻断后续步骤，等待人工介入",
+        "knowledge 写入：从各 PR description 的 '## 产出摘要' 节提取内容写对应 module shard",
+        "knowledge 写入：从各 PR description 的 '## 已知欠债' 节提取条目写 debt shard（格式参见升级文档 4.7 节）",
+        "loop_stats.jsonl：追加一条记录，包含 loop_id、各 task 实际 attempt 轮次、总耗时",
+        "session_state.json：从 git 分支状态派生更新，所有 task done → loop 完成标记",
+        "events.jsonl：写入 loop_complete 事件，包含 loop_id 和时间戳",
+        "幂等：重复执行不产生重复 knowledge 条目或重复 stats 记录"
+      ],
+      "output_files": [
+        "tools/loop_lifecycle.sh",
+        "tests/test_loop_lifecycle.sh"
+      ],
+      "test_cmd": "bash tests/test_loop_lifecycle.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "参见升级文档第五章 5.3 节。knowledge 提取是基于正则的文本解析，无 LLM。debt shard 写入需防止重复条目。"
+    },
+
+    {
+      "task_id": "T09",
+      "title": "AGENT.md — Rule Router 更新至 v2.0，Quick Rules 新增 git_collab",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": ["T07"],
+      "description": "更新 AGENT.md：废弃 cli_collab activated 规则路由，新增 git_collab activated 路由到 rules/git_collab.md；新增 design phase / interface def 路由到 rules/design_contract.md（DISCARD 模式）。Quick Rules 新增 git_collab 模式下四条核心规则：state update / task assign / task review / diff review。版本号升至 v2.0。",
+      "acceptance_criteria": [
+        "Rule Router 表格：移除 cli_collab activated 对应行",
+        "Rule Router 表格：新增 git_collab activated → rules/git_collab.md，KEEP 模式",
+        "Rule Router 表格：新增 design phase / interface def → rules/design_contract.md，DISCARD 模式",
+        "Quick Rules 新增 git_collab 专区，包含四条规则：state update / task assign / task review / diff review",
+        "Quick Rules state update：coordinator 从 git 状态派生，PM 不调用 state_update.sh",
+        "Quick Rules task assign：PM 发 BranchInitSpec JSON，coordinator 创建分支",
+        "Quick Rules task review：PM 发 MergeDecision JSON，coordinator 执行 merge",
+        "Quick Rules diff review：coordinator 执行 review-prep，结构化报告注入 PM，PM 不读 raw diff",
+        "文档版本号标注为 v2.0，变更日志简明"
+      ],
+      "output_files": [
+        "AGENT.md"
+      ],
+      "test_cmd": "bash tests/validate_markdown.sh AGENT.md",
+      "coder_timeout_seconds": 300,
+      "notes": "参见升级文档第四章 4.1 节。Quick Rules 是 PM 的核心行为约束，表述必须精确。"
+    },
+
+    {
+      "task_id": "T10",
+      "title": "rules/git_collab.md — 新增规则文件",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": ["T07"],
+      "description": "新建 rules/git_collab.md，定义 git_collab 模式下 PM 和 Executor 的完整行为约束，以及 BranchInitSpec / MergeDecision 的 JSON 格式规范。",
+      "acceptance_criteria": [
+        "PM 行为约束（HARD）：PM 不执行任何 git 命令",
+        "PM 行为约束（HARD）：PM 通过 BranchInitSpec 发起分支创建，通过 MergeDecision 发起 merge",
+        "PM 行为约束（HARD）：PM 收到 coordinator 结构化报告，不读 raw diff",
+        "PM 行为约束（HARD）：session_state.json 由 coordinator 维护，PM 不调用 state_update.sh",
+        "Executor 行为约束（HARD）：只在自己的 worker 分支工作，不修改其他分支",
+        "Executor 行为约束（HARD）：push 前必须确认本地测试通过",
+        "Executor 行为约束（HARD）：偏离 design_contract 须在 PR description 说明，不得静默偏离",
+        "BranchInitSpec JSON schema 含完整字段说明和示例（包含 workers 数组结构）",
+        "MergeDecision JSON schema 含完整字段说明和示例（包含 blocking_issues / merge_after）"
+      ],
+      "output_files": [
+        "rules/git_collab.md"
+      ],
+      "test_cmd": "bash tests/validate_markdown.sh rules/git_collab.md",
+      "coder_timeout_seconds": 300,
+      "notes": "参见升级文档第四章 4.3 节。HARD 约束需明确标注，避免歧义。"
+    },
+
+    {
+      "task_id": "T11",
+      "title": "rules/design_contract.md — 新增规则文件",
+      "owner_subsystem": "Agent体系",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "新建 rules/design_contract.md，规范 designer 输出 design_contract.md 的格式要求。仅 multi_agent 任务必须产出此文件；api_call 和 solo_agent 任务不需要。",
+      "acceptance_criteria": [
+        "明确说明适用范围：仅 multi_agent executor_type 任务必须",
+        "接口定义要求：精确到函数签名和文件路径，不允许模糊描述",
+        "依赖关系：必须显式声明 depends_on，并行 task 之间不允许未声明的文件依赖",
+        "保存路径规范：$project_path/docs/contracts/<task-slug>-contract.md",
+        "Hard Gate 说明：设计未获用户批准 → PM 不得发出 BranchInitSpec",
+        "提供一个完整的 design_contract.md 示例（函数签名 + 文件路径 + 依赖声明）"
+      ],
+      "output_files": [
+        "rules/design_contract.md"
+      ],
+      "test_cmd": "bash tests/validate_markdown.sh rules/design_contract.md",
+      "coder_timeout_seconds": 250,
+      "notes": "参见升级文档第四章 4.4 节。示例要有实质性内容，不能只是占位符。"
+    },
+
+    {
+      "task_id": "T12",
+      "title": "rules/collab_context.md + rules/session_mgmt.md — 精简更新",
+      "owner_subsystem": "Agent体系",
+      "priority": "P2",
+      "depends_on": ["T10"],
+      "description": "collab_context.md：删除 State Read Delegation 部分，保留 Role Assignment / Async Guardrail / Rubric A / Rubric B / Inspiration Constraint。session_mgmt.md：删除 session compression 流程，新增新 loop 上下文重建说明（coordinator 注入 _meta.json + 相关 shard + 上一 loop PR summary）。solo 模式保持原有 session compression 流程，加注说明。",
+      "acceptance_criteria": [
+        "collab_context.md 中 State Read Delegation 段落完全删除",
+        "collab_context.md 保留五项：Role Assignment / Async Guardrail / Rubric A / Rubric B / Inspiration Constraint",
+        "session_mgmt.md 中 session compression 流程段落完全删除",
+        "session_mgmt.md 新增新 loop 上下文重建说明：coordinator 注入 AGENT.md + _meta.json + 相关 shard + git log --oneline task/<prev-slug>",
+        "session_mgmt.md 保留 solo 模式 session compression 说明，并注明 'solo 模式专用'",
+        "两个文件均通过 markdown 格式校验"
+      ],
+      "output_files": [
+        "rules/collab_context.md",
+        "rules/session_mgmt.md"
+      ],
+      "test_cmd": "bash tests/validate_markdown.sh rules/collab_context.md && bash tests/validate_markdown.sh rules/session_mgmt.md",
+      "coder_timeout_seconds": 300,
+      "notes": "参见升级文档第四章 4.5 / 4.6 节。删除操作需小心，保留内容不能有遗漏。"
+    },
+
+    {
+      "task_id": "T13",
+      "title": "GUI 升级 — workflow_mode 控件替换 + Git Status / Knowledge Debt / Loop Stats 三视图",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T07", "T08"],
+      "description": "GUI 升级四项：（1）task 创建/编辑面板废弃 workflow_mode 单选，替换为 Executor Type 和 Session Mode 两个下拉，含联动约束（api_call 禁选 Continuous）；（2）新增 Git Status 视图（GET /api/task/:taskId/git-status）；（3）新增 Knowledge Debt 视图（GET /api/knowledge/shards/debt）；（4）新增 Loop Stats 面板（展示 loop_stats.jsonl）。",
+      "acceptance_criteria": [
+        "task 面板：workflow_mode 单选控件移除",
+        "task 面板：新增 Executor Type 下拉（API Call / Solo Agent / Multi Agent）",
+        "task 面板：新增 Session Mode 下拉（Fresh / Iterative / Continuous）",
+        "Session Mode 联动约束：Executor Type=API Call 时，Continuous 选项 disabled",
+        "Session Mode 联动约束：Executor Type=Solo Agent 或 Multi Agent 时，Fresh 和 Iterative 选项 disabled",
+        "GET /api/task/:taskId/git-status 返回：活跃 worker 分支状态（open/changes_requested/merged）+ contract_check / judge_scores",
+        "GET /api/knowledge/shards/debt 返回：debt shard 所有条目，按 severity 和 loop_id 分组",
+        "Loop Stats 面板：从 loop_stats.jsonl 读取，展示各 loop 执行时间和各 task 实际 attempt 次数 vs max_attempts，纯展示无交互",
+        "三个新端点文件不存在时返回 404（非 500）",
+        "Solo Agent Progress 面板、Knowledge Viewer shard 列表、项目/step/attempt 三层视图保持不变"
+      ],
+      "output_files": [
+        "coordinator/gui/server.js",
+        "coordinator/gui/src/TaskEditor.jsx",
+        "coordinator/gui/src/GitStatusPanel.jsx",
+        "coordinator/gui/src/KnowledgeDebtPanel.jsx",
+        "coordinator/gui/src/LoopStatsPanel.jsx",
+        "tests/test_gui_endpoints_v5.sh"
+      ],
+      "test_cmd": "npm test --prefix coordinator/gui && bash tests/test_gui_endpoints_v5.sh",
+      "coder_timeout_seconds": 700,
+      "notes": "参见升级文档第六章。联动约束逻辑在前端实现即可，server 端也需校验非法组合。"
+    },
+
+    {
+      "task_id": "T14",
+      "title": "集成测试 — v5.0 端到端验证（三种 executor_type + Bug Fix + Git 工作流）",
+      "owner_subsystem": "集成",
+      "priority": "P1",
+      "depends_on": ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10", "T11", "T12", "T13"],
+      "description": "验证 v5.0 完整工作流。核心验证点：（1）api_call + iterative：3 次 attempt，judge feedback 正确传递，第 3 次达标进入 READY_FOR_REVIEW；（2）solo_agent + continuous：正常路由执行；（3）multi_agent + continuous：双 worker 分支并行，review-prep 检测 cross_contamination；（4）loop_lifecycle.sh 在 merge 后正确写入 knowledge shard 和 debt shard；（5）新 loop 启动时 coordinator 注入上下文无需人工 session compression。",
+      "acceptance_criteria": [
+        "migrate_task_json.sh 将 v4 task.json 正确迁移为 v5 格式（所有三种 workflow_mode）",
+        "api_call + iterative：attempt_2 的 instruction 包含 attempt_1 的 next_instructions",
+        "api_call + fresh：attempt_2 的 instruction 不包含任何 attempt_1 内容",
+        "PAUSED_NOT_GIT_REPO 事件在 api_call 场景下不出现",
+        "multi_agent：cross_contamination=true 时 review-prep 报告标记 fail",
+        "loop_lifecycle.sh：test_cmd 失败时阻断，debt shard 正确从 PR description 提取",
+        "session_state.json 在 loop_lifecycle.sh 后从 git 分支状态派生，无需 PM 调用 state_update.sh",
+        "GUI 三个新端点返回正确数据",
+        "端到端测试使用 mock LLM（不依赖真实 API 调用），CI 可运行"
+      ],
+      "output_files": [
+        "tests/integration/test_v5_e2e.sh",
+        "tests/integration/fixtures/mock_project_v5/"
+      ],
+      "test_cmd": "bash tests/integration/test_v5_e2e.sh",
+      "coder_timeout_seconds": 1200,
+      "notes": "建议用 mock coder/judge 替代真实 LLM 调用加速 CI。multi_agent 场景需要两个并行 worker 分支的 fixture。"
+    }
+
+  ],
+
+  "shared_contracts": {
+    "task.json executor_type / session_mode 字段": {
+      "owner_task": "T01",
+      "dependents": ["T02", "T03", "T04", "T05", "T06", "T07", "T13"],
+      "interface_summary": "executor_type: api_call | solo_agent | multi_agent；session_mode: fresh | iterative | continuous；agent_config 含 max_attempts / auto_pass_threshold / knowledge_shards / provider"
+    },
+    "tools/git_ops.sh": {
+      "owner_task": "T07",
+      "dependents": ["T03", "T08", "T09", "T13"],
+      "interface_summary": "git_ops.sh create-branches <branch_init_spec.json> | merge-pr <merge_decision.json> | review-prep <task_slug> <contract_path>"
+    },
+    "BranchInitSpec JSON schema": {
+      "owner_task": "T10",
+      "dependents": ["T07", "T13"],
+      "interface_summary": "type: BranchInitSpec，task_slug，date（YYYYMMDD），workers[]{task_id, executor_type, label}"
+    },
+    "MergeDecision JSON schema": {
+      "owner_task": "T10",
+      "dependents": ["T07", "T13"],
+      "interface_summary": "type: MergeDecision，task_id，verdict: approve | request_changes，blocking_issues[]，merge_after[]"
+    },
+    "review-prep 结构化报告 JSON": {
+      "owner_task": "T07",
+      "dependents": ["T13", "T14"],
+      "interface_summary": "task_id, executor_type, contract_check{required_exports, found_exports, missing, path_matches, cross_contamination}, diff_summary, judge_scores, pr_description"
+    },
+    "loop_stats.jsonl schema": {
+      "owner_task": "T08",
+      "dependents": ["T13"],
+      "interface_summary": "每行一条记录：loop_id, task_attempts[]{task_id, actual_attempts, max_attempts}, total_duration_seconds, completed_at"
+    },
+    "debt shard schema": {
+      "owner_task": "T08",
+      "dependents": ["T13"],
+      "interface_summary": "entries key 格式 debt:<task_id>-<date>，含 type/task_id/file/description/severity/loop_id/written_by"
+    }
+  },
+
+  "delivery_order": [
+    ["T01", "T06", "T11"],
+    ["T02", "T07", "T10"],
+    ["T03", "T04", "T09"],
+    ["T05", "T08", "T12"],
+    ["T13"],
+    ["T14"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd 执行 rc=0",
+      "output_files 全部存在",
+      "与 shared_contracts 接口定义一致",
+      "无硬编码路径（全部从配置或参数读取）"
+    ],
+    "T02_special": [
+      "原有 cursor / codex / mock adapter 回归测试通过",
+      "workflow_mode 路由代码已完全移除"
+    ],
+    "T03_special": [
+      "events.jsonl 无 PAUSED_NOT_GIT_REPO 事件（api_call 场景）",
+      "coder elapsed > 0（验证未空转）"
+    ],
+    "T04_special": [
+      "iterative 模式：attempt_2 instruction 包含 next_instructions",
+      "fresh 模式：attempt_2 instruction 不含任何历史"
+    ],
+    "T07_special": [
+      "review-prep cross_contamination 检测覆盖多 worker 场景",
+      "create-branches 幂等验证"
+    ],
+    "T08_special": [
+      "regression gate 失败时后续步骤确认阻断",
+      "debt shard 写入无重复条目"
+    ],
+    "T13_special": [
+      "Session Mode 联动约束正确：API Call 禁选 Continuous",
+      "三个新端点文件不存在时返回 404 非 500",
+      "原有 Solo Agent Progress 面板和三层视图回归验证"
+    ]
+  }
+}

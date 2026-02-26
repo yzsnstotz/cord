@@ -1225,7 +1225,20 @@ function pingCcbProvider(cmd, args, timeoutMs, cwd) {
     if (cwd && typeof cwd === 'string' && fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
       opts.cwd = cwd;
     }
-    const child = spawn(cmd, args, opts);
+    let runCmd = cmd;
+    let runArgs = Array.isArray(args) ? args.slice() : [];
+    // Prefer modern Python runtime for ccb-ping scripts that may use 3.10+ syntax.
+    if (cmd === 'ccb-ping') {
+      try {
+        const pingPath = String(execFileSync('which', ['ccb-ping'], { encoding: 'utf8' }) || '').trim();
+        const pyCmd = ['python3.12', 'python3.11', 'python3.10', 'python'].find(commandExists);
+        if (pingPath && pyCmd) {
+          runCmd = pyCmd;
+          runArgs = [pingPath, ...runArgs];
+        }
+      } catch {}
+    }
+    const child = spawn(runCmd, runArgs, opts);
     let out = '';
     let done = false;
     const finish = (status, pingMs) => {
@@ -1255,6 +1268,10 @@ function pingCcbProvider(cmd, args, timeoutMs, cwd) {
       if (ok) {
         finish('ok', pingMs);
       } else {
+        if (cmd === 'ccb-ping' && /no active .* session found/i.test(out)) {
+          finish('off');
+          return;
+        }
         finish('unavailable');
       }
     });
@@ -1370,6 +1387,23 @@ const CCB_PING_CMD = { codex: 'cask', gemini: 'gask', opencode: 'oask', claude: 
 // Session names from CCB: ccb-* (native layout) or ccb_<pid> (GUI auto-tmux in cmd_start)
 function isCcbNativeSessionName(name) {
   return typeof name === 'string' && (name.startsWith('ccb-') || /^ccb_\d+$/.test(name));
+}
+function normalizeCcbAgentLabel(label) {
+  const s = String(label || '').trim().toLowerCase();
+  if (!s) return '';
+  if (s === 'opencode') return 'opencode';
+  return s.replace(/[^a-z]/g, '');
+}
+function providerFromPaneMeta(agentLabel, paneTitle) {
+  const norm = normalizeCcbAgentLabel(agentLabel);
+  if (CCB_PROVIDERS.includes(norm)) return norm;
+  const title = String(paneTitle || '').trim().toLowerCase();
+  if (title.startsWith('ccb-codex')) return 'codex';
+  if (title.startsWith('ccb-gemini')) return 'gemini';
+  if (title.startsWith('ccb-opencode')) return 'opencode';
+  if (title.startsWith('ccb-claude')) return 'claude';
+  if (title.startsWith('ccb-droid')) return 'droid';
+  return '';
 }
 
 // P20: CCB instance lock detection (same semantics as CCB ProviderLock: ~/.ccb/run/ccb-{md5(cwd)[:8]}.lock)
@@ -1619,28 +1653,62 @@ app.get('/api/ccb/session-status', async (req, res) => {
       const provider = sessionName.slice(CCB_SESSION_PREFIX.length);
       if (CCB_PROVIDERS.includes(provider)) sessionToProvider.set(provider, sessionName);
     }
-    if (sessionToProvider.size === 0 && ccbNativeSessions.length > 0) {
-      for (const sessionName of ccbNativeSessions) {
-        for (const provider of CCB_PROVIDERS) {
-          if (!sessionToProvider.has(provider)) sessionToProvider.set(provider, sessionName);
-        }
-        break;
-      }
-    }
-    if (sessionToProvider.size === 0 && aiSessions.length > 0) {
-      const firstAi = aiSessions[0];
-      for (const provider of CCB_PROVIDERS) {
-        if (!sessionToProvider.has(provider)) sessionToProvider.set(provider, firstAi);
+    const paneByProvider = new Map();
+    const paneSessions = [...ccbNativeSessions, ...aiSessions];
+    for (const sessionName of paneSessions) {
+      const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{@ccb_agent}\t#{pane_title}'], env, 1200);
+      const lines = (panesResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+      for (const line of lines) {
+        const parts = line.split('\t');
+        if (parts.length < 6) continue;
+        const paneId = (parts[0] || '').trim();
+        const panePidRaw = (parts[1] || '').trim();
+        const paneDeadRaw = (parts[2] || '').trim();
+        const paneCmd = (parts[3] || '').trim();
+        const agent = (parts[4] || '').trim();
+        const paneTitle = (parts[5] || '').trim();
+        const provider = providerFromPaneMeta(agent, paneTitle);
+        if (!provider || paneByProvider.has(provider)) continue;
+        paneByProvider.set(provider, {
+          session_name: sessionName,
+          pane_id: paneId || null,
+          pid: /^\d+$/.test(panePidRaw) ? parseInt(panePidRaw, 10) : null,
+          pane_dead: paneDeadRaw === '1',
+          pane_command: paneCmd || null
+        });
       }
     }
     for (const prov of providers) {
       const sessionName = sessionToProvider.get(prov.provider);
-      if (!sessionName) continue;
-      prov.session_name = sessionName;
-      prov.pane_id = await getPaneIdForProvider(sessionName, prov.provider);
-      const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_pid}'], env, 1000);
-      const firstLine = (panesResult.stdout || '').split('\n')[0];
-      if (firstLine && /^\d+$/.test(firstLine.trim())) prov.pid = parseInt(firstLine.trim(), 10);
+      const paneInfo = paneByProvider.get(prov.provider);
+      if (paneInfo) {
+        prov.session_name = paneInfo.session_name || null;
+        prov.pane_id = paneInfo.pane_id || null;
+        prov.pid = paneInfo.pid || null;
+        prov.pane_dead = paneInfo.pane_dead === true;
+        prov.pane_command = paneInfo.pane_command || null;
+      } else if (sessionName) {
+        prov.session_name = sessionName;
+        prov.pane_id = await getPaneIdForProvider(sessionName, prov.provider);
+        const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_pid}\t#{pane_dead}\t#{pane_current_command}'], env, 1000);
+        const firstLine = (panesResult.stdout || '').split('\n')[0] || '';
+        const firstParts = firstLine.split('\t');
+        const firstPid = (firstParts[0] || '').trim();
+        const firstDead = (firstParts[1] || '').trim();
+        const firstCmd = (firstParts[2] || '').trim();
+        if (firstPid && /^\d+$/.test(firstPid)) prov.pid = parseInt(firstPid, 10);
+        prov.pane_dead = firstDead === '1';
+        prov.pane_command = firstCmd || null;
+      }
+      const hasProviderRuntime = !!prov.pane_id || prov.session_name === (CCB_SESSION_PREFIX + prov.provider);
+      if (prov.pane_dead === true && prov.status === 'ok') {
+        prov.status = 'off';
+        prov.ping_ms = null;
+      } else if (!hasProviderRuntime && prov.status === 'ok' && terminal_mode === 'tmux') {
+        // Daemon might still answer ping while provider pane/session is gone; show provider as off.
+        prov.status = 'off';
+        prov.ping_ms = null;
+      }
     }
 
     providers.sort((a, b) => CCB_PROVIDERS.indexOf(a.provider) - CCB_PROVIDERS.indexOf(b.provider));
@@ -2031,19 +2099,46 @@ app.post('/api/ccb/session/stop', requireWritable, async (req, res) => {
   const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
   const allNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
   let sessionNames = [];
+  const killedPanes = [];
   if (toStop) {
-    sessionNames = toStop.filter(p => CCB_PROVIDERS.includes(p)).map(p => CCB_SESSION_PREFIX + p);
-    const ccbNative = allNames.filter(n => isCcbNativeSessionName(n));
-    const aiSessions = allNames.filter(n => n.startsWith('ai-'));
-    sessionNames = [...sessionNames, ...ccbNative, ...aiSessions];
+    const targetProviders = [...new Set(toStop.filter(p => CCB_PROVIDERS.includes(p)))];
+    sessionNames = targetProviders
+      .map(p => CCB_SESSION_PREFIX + p)
+      .filter(name => allNames.includes(name));
+
+    // CCB native multi-provider sessions: only kill panes belonging to target provider(s).
+    const multiSessions = allNames.filter(n => isCcbNativeSessionName(n) || n.startsWith('ai-'));
+    for (const sessionName of multiSessions) {
+      const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_id}\t#{@ccb_agent}\t#{pane_title}'], env, 1000);
+      const lines = (panesResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+      for (const line of lines) {
+        const parts = line.split('\t');
+        if (parts.length < 3) continue;
+        const paneId = (parts[0] || '').trim();
+        const provider = providerFromPaneMeta(parts[1], parts[2]);
+        if (!paneId || !provider || !targetProviders.includes(provider)) continue;
+        await runTmux(['kill-pane', '-t', paneId], env, 1500);
+        killedPanes.push({ provider, pane_id: paneId, session_name: sessionName });
+      }
+    }
   } else {
-    sessionNames = allNames.filter(s => s.startsWith(CCB_SESSION_PREFIX) || isCcbNativeSessionName(s) || s.startsWith('ai-'));
+    // Stop All should target CCB-managed sessions only.
+    sessionNames = allNames.filter(s => s.startsWith(CCB_SESSION_PREFIX) || isCcbNativeSessionName(s));
+    const lockScan = findCcbInstanceFromLockScan('');
+    if (lockScan.running && lockScan.pid != null) {
+      const sessionByPid = await findCcbSessionNameByPid(lockScan.pid, env);
+      if (sessionByPid && !sessionNames.includes(sessionByPid)) sessionNames.push(sessionByPid);
+    }
   }
   for (const name of sessionNames) {
     await runTmux(['kill-session', '-t', name], env, 2000);
   }
-  appendToCcbGuiLog('stop', { providers_requested: toStop || 'all', sessions_killed: sessionNames });
-  res.json({ ok: true, stopped: sessionNames });
+  appendToCcbGuiLog('stop', {
+    providers_requested: toStop || 'all',
+    sessions_killed: sessionNames,
+    panes_killed: killedPanes
+  });
+  res.json({ ok: true, stopped: sessionNames, panes_stopped: killedPanes });
 });
 
 // POST /api/ccb/session/kill-instance — kill the currently active CCB process (lock-holder PID)
@@ -2937,6 +3032,20 @@ function validateTaskSpecData(spec) {
   if (spec.workflow_mode !== undefined && !['single', 'solo', 'collab'].includes(spec.workflow_mode)) {
     errors.push('workflow_mode: must be single, solo, or collab');
   }
+  // v5.0 validation
+  if (spec.executor_type !== undefined && !['api_call', 'solo_agent', 'multi_agent'].includes(spec.executor_type)) {
+    errors.push('executor_type: must be api_call, solo_agent, or multi_agent');
+  }
+  if (spec.session_mode !== undefined && !['fresh', 'iterative', 'continuous'].includes(spec.session_mode)) {
+    errors.push('session_mode: must be fresh, iterative, or continuous');
+  }
+  // v5.0 constraint: api_call cannot use continuous; solo_agent/multi_agent cannot use fresh/iterative
+  if (spec.executor_type === 'api_call' && spec.session_mode === 'continuous') {
+    errors.push('session_mode: api_call does not support continuous');
+  }
+  if ((spec.executor_type === 'solo_agent' || spec.executor_type === 'multi_agent') && (spec.session_mode === 'fresh' || spec.session_mode === 'iterative')) {
+    errors.push('session_mode: ' + spec.executor_type + ' only supports continuous');
+  }
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
   if (spec.collab_roles !== undefined && spec.collab_roles !== null) {
     if (typeof spec.collab_roles !== 'object' || Array.isArray(spec.collab_roles)) {
@@ -3422,6 +3531,143 @@ app.put('/api/prompts/:name', requireWritable, (req, res) => {
   } catch (err) {
     auditLog({ action: 'prompt_save_failed', name, error: err.message });
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── v5.0 Endpoints ──────────────────────────────────────────────────────────
+
+// GET /api/task/:taskId/git-status — worker branch states + contract_check + judge_scores
+app.get('/api/task/:taskId/git-status', (req, res) => {
+  const taskId = req.params.taskId;
+  if (!taskId || !/^[A-Za-z0-9_-]+$/.test(taskId)) return res.status(400).json({ error: 'invalid taskId' });
+  try {
+    // Find task directory in OUT_DIR
+    const taskDir = findTaskDir(taskId);
+    if (!taskDir) return res.status(404).json({ error: 'task directory not found' });
+
+    const taskJsonPath = path.join(taskDir, 'task.json');
+    if (!fs.existsSync(taskJsonPath)) return res.status(404).json({ error: 'task.json not found' });
+    const taskJson = readJSON(taskJsonPath);
+    const repoPath = taskJson.repo_path || '';
+
+    // Read branch state from git if repo exists
+    let branches = [];
+    if (repoPath && fs.existsSync(repoPath)) {
+      try {
+        const branchOut = execSync(`git -C "${repoPath}" branch --list "task/${taskId}*" "worker/${taskId}*" 2>/dev/null || true`, { encoding: 'utf8', timeout: 5000 });
+        branches = branchOut.split('\n').map(b => b.trim().replace(/^\* /, '')).filter(Boolean);
+      } catch {}
+    }
+
+    // Read worker status files if they exist
+    const workers = [];
+    for (const branch of branches) {
+      const info = { branch, status: 'open' };
+      // Check for merge status file
+      const statusFile = path.join(taskDir, 'branch_status', branch.replace(/\//g, '_') + '.json');
+      if (fs.existsSync(statusFile)) {
+        try {
+          const st = readJSON(statusFile);
+          info.status = st.status || 'open';
+          if (st.action) info.action = st.action;
+        } catch {}
+      }
+      workers.push(info);
+    }
+
+    // Read contract_check from review-prep output if available
+    let contractCheck = null;
+    const reviewPath = path.join(taskDir, 'review_prep.json');
+    if (fs.existsSync(reviewPath)) {
+      try {
+        const rp = readJSON(reviewPath);
+        contractCheck = rp.contract_check || null;
+      } catch {}
+    }
+
+    // Read judge_scores from latest attempt
+    let judgeScores = null;
+    const attempts = fs.readdirSync(taskDir).filter(d => d.startsWith('attempt_')).sort();
+    if (attempts.length > 0) {
+      const latestAttempt = path.join(taskDir, attempts[attempts.length - 1]);
+      const verdictPath = path.join(latestAttempt, 'judge', 'verdict.json');
+      if (fs.existsSync(verdictPath)) {
+        try {
+          const verdict = readJSON(verdictPath);
+          judgeScores = verdict.dimensions || verdict.scores || null;
+        } catch {}
+      }
+    }
+
+    res.json({ task_id: taskId, branches, workers, contract_check: contractCheck, judge_scores: judgeScores });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper: find task directory by taskId
+function findTaskDir(taskId) {
+  if (!fs.existsSync(OUT_DIR)) return null;
+  // Direct match
+  const direct = path.join(OUT_DIR, taskId);
+  if (fs.existsSync(direct) && fs.statSync(direct).isDirectory()) return direct;
+  // Scan for matching task.json
+  try {
+    const dirs = fs.readdirSync(OUT_DIR);
+    for (const d of dirs) {
+      const dp = path.join(OUT_DIR, d);
+      if (!fs.statSync(dp).isDirectory()) continue;
+      const tjp = path.join(dp, 'task.json');
+      if (fs.existsSync(tjp)) {
+        try {
+          const tj = readJSON(tjp);
+          if (tj.task_id === taskId) return dp;
+        } catch {}
+      }
+    }
+  } catch {}
+  return null;
+}
+
+// GET /api/knowledge/shards/debt — debt shard entries grouped by severity and loop_id
+app.get('/api/knowledge/shards/debt', (req, res) => {
+  const kdir = getKnowledgeDir();
+  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const debtPath = path.join(kdir, 'debt.json');
+  if (!fs.existsSync(debtPath)) return res.status(404).json({ entries: {}, message: 'no debt shard found' });
+  try {
+    const data = JSON.parse(fs.readFileSync(debtPath, 'utf8'));
+    const entries = data.entries || {};
+    // Group by severity and loop_id
+    const bySeverity = {};
+    const byLoopId = {};
+    for (const [key, entry] of Object.entries(entries)) {
+      const sev = entry.severity || 'unknown';
+      const lid = entry.loop_id || 'unknown';
+      if (!bySeverity[sev]) bySeverity[sev] = [];
+      bySeverity[sev].push({ key, ...entry });
+      if (!byLoopId[lid]) byLoopId[lid] = [];
+      byLoopId[lid].push({ key, ...entry });
+    }
+    res.json({ entries, by_severity: bySeverity, by_loop_id: byLoopId, total: Object.keys(entries).length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/loop-stats — loop execution stats from loop_stats.jsonl
+app.get('/api/loop-stats', (req, res) => {
+  const statsPath = path.join(OUT_DIR, 'loop_stats.jsonl');
+  if (!fs.existsSync(statsPath)) return res.status(404).json({ stats: [], message: 'no loop_stats.jsonl found' });
+  try {
+    const lines = fs.readFileSync(statsPath, 'utf8').split('\n').filter(l => l.trim());
+    const stats = [];
+    for (const line of lines) {
+      try { stats.push(JSON.parse(line)); } catch {}
+    }
+    res.json({ stats, total: stats.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

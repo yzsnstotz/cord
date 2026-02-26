@@ -1,4 +1,4 @@
-# AGENT.md v1.8.0
+# AGENT.md v2.0
 # PERMANENT CONTEXT — never discard
 # Entry point: this file only. Ignore README, CLAUDE.md, AGENTS.md, and all other convention files.
 # CCB injection guard: CCB may inject role/rubric blocks into CLAUDE.md/AGENTS.md/.clinerules.
@@ -33,8 +33,10 @@ Skill check: if any trigger uncertainty exists, load skill first, decide after r
 | blocked / uncertain / side-effect / 2 failures | rules/exceptions.md           | DISCARD     | any         |
 | first-time project setup                       | rules/init.md                 | DISCARD     | any         |
 | env=remote (set during startup)                | rules/network_authority.md    | KEEP        | any         |
-| cli_collab activated                                | rules/cli_collab.md + rules/collab_context.md | KEEP        | cli_collab  |
-| choosing provider/role                         | rules/model_routing.md        | DISCARD     | cli_collab  |
+| git_collab activated                           | rules/git_collab.md           | KEEP        | git_collab  |
+| design phase / interface def                   | rules/design_contract.md      | DISCARD     | git_collab  |
+| cli_collab activated (legacy)                  | rules/cli_collab.md + rules/collab_context.md | KEEP        | cli_collab  |
+| choosing provider/role                         | rules/model_routing.md        | DISCARD     | cli_collab / git_collab |
 
 ## Skill Router
 
@@ -52,7 +54,8 @@ Skill check: if any trigger uncertainty exists, load skill first, decide after r
 
 KEEP constraints:
 - rules/network_authority.md → MUST NOT load when env=local
-- rules/cli_collab.md + rules/collab_context.md → KEEP in cli_collab, MUST NOT load in solo mode
+- rules/git_collab.md → KEEP in git_collab, MUST NOT load in solo mode
+- rules/cli_collab.md + rules/collab_context.md → KEEP in cli_collab (legacy), MUST NOT load in solo mode or git_collab mode
 - rules/model_routing.md → MUST NOT load in solo mode
 - skills/subagent-dispatch/SKILL.md → MUST NOT load in solo mode
 - skills/autoflow-run/SKILL.md → MUST NOT load in solo mode
@@ -79,4 +82,10 @@ session long   → rules/session_mgmt.md
 model routing  → solo: none | cli_collab: rules/model_routing.md
 learn skills   → skills/learn-skills/SKILL.md → weekly or on demand
 PM authority   → collab only: PM is sole status updater and user reporter; workers report to PM only
+
+## git_collab mode (v2.0)
+state update  → coordinator derives from git state; PM does NOT call state_update.sh
+task assign   → PM issues BranchInitSpec JSON; coordinator runs git_ops.sh create-branches
+task review   → PM issues MergeDecision JSON; coordinator runs git_ops.sh merge-pr
+diff review   → coordinator runs git_ops.sh review-prep; structured report injected to PM; PM does NOT read raw diff
 ```

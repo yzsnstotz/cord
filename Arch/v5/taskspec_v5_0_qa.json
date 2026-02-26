@@ -1,0 +1,412 @@
+{
+  "project": "闭环AI自主研发体系 — v5.0 升级补丁测试套件",
+  "version": "5.0-qa",
+  "created_at": "2026-02-26T00:00:00Z",
+  "description": "针对 taskspec_v5_0.json 所有研发变更的独立测试任务集。覆盖范围：（A）单元测试——各模块独立行为验证；（B）集成测试——跨模块协作验证，含 Bug Fix 回归；（C）系统测试——三种 executor_type 完整工作流 + 跨 loop 生命周期；（D）回归测试——v4 兼容性与已有功能保护。所有测试任务均使用 mock LLM，不依赖真实 API，CI 可全量运行。共 11 个 task。",
+  "execution_mode_default": "semi-auto",
+
+  "test_strategy": {
+    "mock_boundary": "所有 LLM 调用（coder/judge）通过 mock adapter 替代，mock 脚本位于 tests/mocks/，可注入预设 score、next_instructions、rc",
+    "git_isolation": "每个测试用例使用独立临时 bare repo（mktemp -d），测试结束后清理，不污染工作区",
+    "fixture_location": "tests/fixtures/v5/",
+    "ci_entry": "bash tests/run_all_v5_qa.sh",
+    "coverage_target": "核心状态机路径 100%；边界条件和错误路径 ≥ 80%"
+  },
+
+  "tasks": [
+
+    {
+      "task_id": "QA01",
+      "title": "测试基础设施 — mock 适配器 + fixture 工厂 + 测试运行器",
+      "owner_subsystem": "测试基础设施",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "构建所有后续测试 task 依赖的基础设施。包括：mock_coder.sh（可注入 rc 和产出文件）、mock_judge.sh（可注入 score / next_instructions / verdict.json）、mock_git_ops.sh（可注入 create-branches / merge-pr / review-prep 响应）；fixture 工厂脚本 make_fixture.sh（按参数生成 v4/v5 task.json、bare git repo、PR description 模板）；统一测试运行器 run_all_v5_qa.sh（汇总各 task 测试结果，输出通过/失败统计）。",
+      "acceptance_criteria": [
+        "mock_coder.sh 接受 --rc <0|1> --output-file <path> --content <string> 参数，写入指定产出文件并返回对应 rc",
+        "mock_judge.sh 接受 --score <float> --next-instructions <string> --rc <0|1> 参数，写入 verdict.json 并返回 rc",
+        "mock_git_ops.sh 支持 create-branches（创建真实临时分支）、merge-pr（执行真实 merge）、review-prep（输出预设 JSON）三个子命令",
+        "make_fixture.sh --type v4-single|v4-solo|v4-collab|v5-api_call-fresh|v5-api_call-iterative|v5-solo_agent|v5-multi_agent 生成对应 task.json",
+        "make_fixture.sh --type bare-repo 在 mktemp -d 中创建 bare git repo，返回路径",
+        "make_fixture.sh --type pr-description --executor-type <type> 生成符合 v5 PR description 模板的文本，含 '## 产出摘要' 和 '## 已知欠债' 节",
+        "run_all_v5_qa.sh 串行执行 QA01～QA11，每个 task 独立报告 PASS/FAIL，最终输出汇总行和总 rc",
+        "所有 mock 脚本幂等，重复调用不产生副作用"
+      ],
+      "output_files": [
+        "tests/mocks/mock_coder.sh",
+        "tests/mocks/mock_judge.sh",
+        "tests/mocks/mock_git_ops.sh",
+        "tests/fixtures/v5/make_fixture.sh",
+        "tests/run_all_v5_qa.sh"
+      ],
+      "test_cmd": "bash tests/mocks/mock_coder.sh --rc 0 --output-file /tmp/qa01_smoke.txt --content 'ok' && cat /tmp/qa01_smoke.txt | grep -q 'ok'",
+      "coder_timeout_seconds": 500,
+      "notes": "这是所有测试的地基，必须最先完成。mock 脚本须严格隔离，不能调用真实 LLM 或产生网络请求。"
+    },
+
+    {
+      "task_id": "QA02",
+      "title": "单元测试 — task.json schema 校验与 migrate_task_json.sh",
+      "owner_subsystem": "单元测试",
+      "priority": "P0",
+      "depends_on": ["QA01"],
+      "description": "针对 T01 产出的 schema 校验逻辑和迁移脚本编写完整单元测试。覆盖：字段合法性校验（合法值、非法枚举、缺失必填）；三种 v4 workflow_mode 到 v5 字段的迁移映射；迁移脚本幂等性；collab_roles 条件必填逻辑。",
+      "acceptance_criteria": [
+        "合法 v5 task.json（六种 executor_type × session_mode 组合）均校验通过",
+        "非法 executor_type 值（如 'batch'）校验返回 rc != 0，错误信息包含字段名和合法值列表",
+        "非法 session_mode 值校验返回 rc != 0",
+        "executor_type=multi_agent 且 collab_roles 缺失时校验返回 rc != 0",
+        "executor_type=api_call 且 session_mode=continuous 时校验返回 rc != 0（非法组合）",
+        "migrate_task_json.sh：workflow_mode=single → executor_type=api_call, session_mode=fresh，workflow_mode 字段删除",
+        "migrate_task_json.sh：workflow_mode=solo → executor_type=solo_agent, session_mode=continuous",
+        "migrate_task_json.sh：workflow_mode=collab → executor_type=multi_agent, session_mode=continuous",
+        "migrate_task_json.sh 对已迁移（无 workflow_mode）的文件重复执行结果不变（幂等）",
+        "solo_config 字段存在时，migrate 后重命名为 agent_config，原字段消失",
+        "测试覆盖率：所有校验分支 100%"
+      ],
+      "output_files": [
+        "tests/unit/test_task_schema_v5.sh"
+      ],
+      "test_cmd": "bash tests/unit/test_task_schema_v5.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "executor_type=api_call + session_mode=continuous 是非法组合，需有专项测试。"
+    },
+
+    {
+      "task_id": "QA03",
+      "title": "单元测试 — run_task.sh 两参数路由逻辑",
+      "owner_subsystem": "单元测试",
+      "priority": "P0",
+      "depends_on": ["QA01"],
+      "description": "针对 T02 产出的路由逻辑编写单元测试。通过 stub 替代 adapter 调用，仅验证路由决策本身：executor_type → coder_adapter 映射、session_mode → context_strategy 映射、缺失字段默认值行为、非法值的退出行为。同时验证 v4 adapter（cursor/codex/mock）的路由路径未被破坏。",
+      "acceptance_criteria": [
+        "executor_type=api_call → coder_adapter 变量值为 cliproxy",
+        "executor_type=solo_agent → coder_adapter 变量值为 solo",
+        "executor_type=multi_agent → coder_adapter 变量值为 ccb",
+        "session_mode=fresh → context_strategy 变量值为 reset",
+        "session_mode=iterative → context_strategy 变量值为 carry",
+        "session_mode=continuous → context_strategy 变量值为 persist",
+        "executor_type 缺失时 run_task.sh 以 rc != 0 退出，输出包含 'executor_type' 字样",
+        "session_mode 缺失时默认值为 continuous，不报错",
+        "v4 adapter：cursor / codex / mock 仍可被正确路由（stub 验证调用路径存在）",
+        "workflow_mode 字段出现在 task.json 中时，run_task.sh 输出警告并忽略（不以旧逻辑路由）",
+        "六种合法 executor_type × session_mode 组合全部有用例"
+      ],
+      "output_files": [
+        "tests/unit/test_run_task_routing_v5.sh"
+      ],
+      "test_cmd": "bash tests/unit/test_run_task_routing_v5.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "路由测试通过环境变量捕获 coder_adapter 和 context_strategy 的实际赋值，不执行真实 adapter。"
+    },
+
+    {
+      "task_id": "QA04",
+      "title": "单元测试 — git_ops.sh 三子命令",
+      "owner_subsystem": "单元测试",
+      "priority": "P0",
+      "depends_on": ["QA01"],
+      "description": "针对 T07 产出的 git_ops.sh 三个子命令（create-branches / merge-pr / review-prep）编写单元测试，使用真实临时 git repo（由 make_fixture.sh 生成），不依赖任何 LLM。",
+      "acceptance_criteria": [
+        "create-branches：api_call fixture → 生成 task/<date>-<slug> 主分支 + worker/<slug>-content worker 分支",
+        "create-branches：solo_agent fixture → 生成 worker/<slug>-agent 分支",
+        "create-branches：multi_agent fixture（含 2 个 executor）→ 生成 worker/<slug>-executor-A 和 worker/<slug>-executor-B 两个分支",
+        "create-branches：重复执行同一 BranchInitSpec 不报错，分支已存在时幂等",
+        "create-branches：同时建好对应 worktree，worktree 路径为有效 git 工作区",
+        "merge-pr：verdict=approve → 分支成功 merge，PR 状态标记为 merged",
+        "merge-pr：verdict=request_changes → 分支未 merge，PR 状态标记为 changes_requested",
+        "merge-pr：merge_after 列表中存在未 merged 的 task_id 时，以 rc != 0 退出并阻断",
+        "review-prep（multi_agent）：输出 JSON 含 contract_check 字段，cross_contamination 为 bool",
+        "review-prep（api_call）：contract_check 为 null，judge_scores 字段存在",
+        "review-prep：检测到 worker 分支修改文件超出其 slug 路径时，cross_contamination=true",
+        "review-prep：无跨分支污染时，cross_contamination=false",
+        "分支命名 slug sanitize：slug 含空格时自动替换为连字符，含特殊字符时过滤"
+      ],
+      "output_files": [
+        "tests/unit/test_git_ops.sh"
+      ],
+      "test_cmd": "bash tests/unit/test_git_ops.sh",
+      "coder_timeout_seconds": 500,
+      "notes": "每个用例在独立 mktemp -d 中运行，测试结束清理。cross_contamination 测试需要构造跨路径修改的 commit fixture。"
+    },
+
+    {
+      "task_id": "QA05",
+      "title": "集成测试 — Bug Fix 回归：worktree 时序 + judge feedback 注入",
+      "owner_subsystem": "集成测试",
+      "priority": "P0",
+      "depends_on": ["QA01", "QA03", "QA04"],
+      "description": "专项验证 T03（Bug2）和 T04（Bug1）的修复效果，同时确认修复后原有问题不再复现。两个 bug 的验证场景均使用 mock coder/judge，通过 events.jsonl 和 instruction 内容进行断言。",
+      "acceptance_criteria": [
+        "[Bug2 修复] api_call 场景下，attempt 循环启动前 worktree 已存在（stat worktree_path 返回 rc=0）",
+        "[Bug2 修复] events.jsonl 中不存在 PAUSED_NOT_GIT_REPO 事件条目",
+        "[Bug2 修复] mock_coder.sh 记录的 elapsed 时间 > 0 秒（验证未空转）",
+        "[Bug2 回归] 构造 worktree 缺失场景（不调用 create-branches）：run_task.sh 应以 rc != 0 退出，不进入 attempt 循环，events.jsonl 写入明确错误事件",
+        "[Bug1 修复] api_call + iterative，attempt_2 的 instruction 文本包含 attempt_1 mock_judge 返回的 next_instructions 全文",
+        "[Bug1 修复] api_call + iterative，attempt_2 的 instruction 文本包含 git show HEAD:<output_file> 返回的 attempt_1 产出",
+        "[Bug1 修复] api_call + fresh，attempt_2 的 instruction 文本不包含任何 attempt_1 next_instructions 内容",
+        "[Bug1 修复] api_call + fresh，attempt_2 的 instruction 文本不包含任何 attempt_1 产出内容",
+        "[Bug1 边界] mock_judge 返回 next_instructions 为空字符串时，attempt_2 instruction 中不出现空的 '=== Judge 修改指引 ===' 节",
+        "[Bug1 边界] verdict.json 不存在（首次 attempt 时）时，不报错，instruction 正常生成"
+      ],
+      "output_files": [
+        "tests/integration/test_bug_fix_regression.sh"
+      ],
+      "test_cmd": "bash tests/integration/test_bug_fix_regression.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "这是本次升级最核心的回归测试。Bug2 测试需要两套场景：正常路径（worktree 已建）和故障注入路径（worktree 未建）。通过检查 instruction 文件内容验证 Bug1。"
+    },
+
+    {
+      "task_id": "QA06",
+      "title": "集成测试 — api_call 状态机完整路径（fresh / iterative × decision_table 全分支）",
+      "owner_subsystem": "集成测试",
+      "priority": "P0",
+      "depends_on": ["QA05"],
+      "description": "覆盖 api_call attempt 状态机的所有决策路径，使用 mock coder/judge 注入不同 score 和 rc，验证 decision_table 每个分支的状态转移和产出行为。",
+      "acceptance_criteria": [
+        "[path-1] score >= threshold AND rc=0 → 第 1 次 attempt 即进入 READY_FOR_REVIEW，开 PR，不继续 attempt",
+        "[path-2] score < threshold AND n < max_attempts → 继续下一 attempt，n 正确递增",
+        "[path-3] n >= max_attempts → 进入 PAUSED，不再发起新 attempt，events.jsonl 记录 PAUSED 事件",
+        "[path-4] rc != 0 AND score >= threshold → 不进入 READY_FOR_REVIEW，继续 attempt 或进入 PAUSED",
+        "[path-5] judge_enabled=false → 跳过 judge 步骤，score 视为满分，test_cmd rc=0 → READY_FOR_REVIEW",
+        "[iterative] 3 次 attempt 链：score 55 → 71 → 85，verify attempt_3 instruction 包含 attempt_2 next_instructions，最终状态 READY_FOR_REVIEW",
+        "[fresh] 3 次 attempt 链：每次 instruction 内容相同（均为 goal + acceptance），无任何历史注入",
+        "每次 attempt commit message 格式为 'attempt N: score=XX'，git log 可验证",
+        "verdict.json 在 worker 分支的 .rdloop/attempt_N/verdict.json 路径可通过 git show 读取",
+        "events.jsonl 包含每次 attempt 的 ATTEMPT_START 和 ATTEMPT_END 事件，含 score 和 rc 字段"
+      ],
+      "output_files": [
+        "tests/integration/test_api_call_state_machine.sh"
+      ],
+      "test_cmd": "bash tests/integration/test_api_call_state_machine.sh",
+      "coder_timeout_seconds": 700,
+      "notes": "path-4（rc!=0 且 score 达标）是关键边界：test_cmd 不可绕过原则的直接验证。mock_coder 和 mock_judge 需支持按 attempt 编号返回不同值（通过环境变量注入序列）。"
+    },
+
+    {
+      "task_id": "QA07",
+      "title": "集成测试 — git_ops.sh × loop_lifecycle.sh 跨模块协作",
+      "owner_subsystem": "集成测试",
+      "priority": "P0",
+      "depends_on": ["QA04"],
+      "description": "验证 git_ops.sh 和 loop_lifecycle.sh 的完整协作流程：BranchInitSpec → 分支创建 → worker 执行 → MergeDecision → merge → loop_lifecycle.sh on-loop-complete → regression gate → knowledge 写入 → stats → session_state 派生。所有步骤在真实临时 git repo 中运行，loop_lifecycle 的 knowledge 提取使用文本解析（无 LLM）。",
+      "acceptance_criteria": [
+        "BranchInitSpec → create-branches → worktree 建立 → mock worker commit → MergeDecision → merge 完整流程 rc=0",
+        "loop_lifecycle.sh：所有 worker PR 已 merged 后才允许执行，未全 merged 时 rc != 0",
+        "regression gate：test_cmd 返回 rc=0 时继续；rc != 0 时写入 REGRESSION_FAILED 事件并以 rc != 0 退出，后续步骤（knowledge 写入、stats）均不执行",
+        "knowledge 写入：PR description 含 '## 产出摘要' 节时，内容写入对应 module shard",
+        "knowledge 写入：PR description 含 '## 已知欠债' 节时，条目写入 debt shard，格式符合 schema",
+        "knowledge 写入：重复执行 on-loop-complete 时，debt shard 不产生重复条目（幂等）",
+        "loop_stats.jsonl：追加一条记录，loop_id、各 task actual_attempts、total_duration_seconds 字段存在且合法",
+        "loop_stats.jsonl：重复执行时新增条目而非覆盖（append 语义）",
+        "session_state.json：所有 task done 后 loop 完成标记字段为 true",
+        "events.jsonl：包含 loop_complete 事件，含 loop_id 和 completed_at"
+      ],
+      "output_files": [
+        "tests/integration/test_git_ops_lifecycle.sh"
+      ],
+      "test_cmd": "bash tests/integration/test_git_ops_lifecycle.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "regression gate 失败路径是关键：需验证后续步骤真正被阻断。debt shard 幂等测试通过比较两次执行后 entries 数量实现。"
+    },
+
+    {
+      "task_id": "QA08",
+      "title": "系统测试 — 三种 executor_type 完整工作流（端到端，含 Git 工作流）",
+      "owner_subsystem": "系统测试",
+      "priority": "P1",
+      "depends_on": ["QA05", "QA06", "QA07"],
+      "description": "三个独立场景分别跑通从 BranchInitSpec 到 loop_lifecycle 的完整工作流，使用 mock coder/judge，不依赖真实 LLM。每个场景均验证分支结构、commit 历史、状态转移事件、PR description 格式。",
+      "acceptance_criteria": [
+        "[场景 A：api_call + iterative] BranchInitSpec → create-branches → 3 次 attempt（mock score 递增） → READY_FOR_REVIEW → PR 开启 → MergeDecision approve → merge → loop_lifecycle 完成，全程 rc=0",
+        "[场景 A] git log worker/<slug>-content 显示 3 条 'attempt N: score=XX' commit",
+        "[场景 A] PR description 包含 '## 质量评分' 节和最终 judge_scores",
+        "[场景 B：solo_agent + continuous] BranchInitSpec → create-branches → mock solo adapter 执行 → READY_FOR_REVIEW → merge → loop_lifecycle 完成",
+        "[场景 B] worker/<slug>-agent 分支存在且包含 mock 产出 commit",
+        "[场景 C：multi_agent + continuous] BranchInitSpec → 创建两个 executor 分支 → 两个 mock worker 分别 commit → review-prep 生成结构化报告 → MergeDecision → 按 merge_after 顺序 merge → loop_lifecycle 完成",
+        "[场景 C] review-prep 报告中 contract_check.required_exports 与 found_exports 一致时 missing=[]",
+        "[场景 C] 构造跨分支污染：executor-A 的 commit 修改 executor-B 路径下的文件 → review-prep 报告 cross_contamination=true",
+        "三个场景的 session_state.json 在 loop_lifecycle 后均显示 loop 完成标记",
+        "三个场景的 debt shard 均正确提取自 PR description 的 '## 已知欠债' 节"
+      ],
+      "output_files": [
+        "tests/system/test_e2e_api_call.sh",
+        "tests/system/test_e2e_solo_agent.sh",
+        "tests/system/test_e2e_multi_agent.sh"
+      ],
+      "test_cmd": "bash tests/system/test_e2e_api_call.sh && bash tests/system/test_e2e_solo_agent.sh && bash tests/system/test_e2e_multi_agent.sh",
+      "coder_timeout_seconds": 900,
+      "notes": "场景 C 的跨分支污染测试需要在 fixture 中预构造一个「非法 commit」（修改了不属于自己 slug 路径的文件）。三个场景各用独立临时 repo。"
+    },
+
+    {
+      "task_id": "QA09",
+      "title": "系统测试 — 跨 loop 生命周期：knowledge shard 持久化 + 新 loop 上下文注入",
+      "owner_subsystem": "系统测试",
+      "priority": "P1",
+      "depends_on": ["QA07", "QA08"],
+      "description": "验证跨 loop 的知识持久化和上下文重建机制。Loop N 完成后，debt shard / module shard / decision_log shard / loop_stats 均已写入；Loop N+1 启动时，coordinator 能从 git 和 knowledge shard 正确重建上下文，无需人工 session compression。同时验证 decision_log shard 和 debt shard 的写入格式符合 v5 schema。",
+      "acceptance_criteria": [
+        "Loop N 完成后，module shard 包含从 PR description '## 产出摘要' 提取的内容",
+        "Loop N 完成后，debt shard 包含从 PR description '## 已知欠债' 提取的条目，severity 字段为 high/medium/low 之一",
+        "Loop N 完成后，loop_stats.jsonl 新增一条记录，actual_attempts 字段与 events.jsonl 中的 attempt 次数一致",
+        "decision_log shard 写入：包含 type/decided/rationale/rejected_options/constraints/written_by/loop_id 七个字段",
+        "Loop N+1 启动：coordinator 注入内容包含 _meta.json（shard 索引）、debt shard 内容、decision_log shard 内容",
+        "Loop N+1 启动：coordinator 注入内容包含 'git log --oneline task/<loop-N-slug>' 输出的 PR summary",
+        "Loop N+1 启动：注入内容不依赖 session compression（测试中明确不执行 session compression 步骤）",
+        "两个连续 loop 的 debt shard 条目共存，互不覆盖，按 loop_id 可区分",
+        "knowledge shard 在 git repo 异常（如 bare repo 损坏）时降级写入本地文件，不崩溃"
+      ],
+      "output_files": [
+        "tests/system/test_cross_loop_lifecycle.sh"
+      ],
+      "test_cmd": "bash tests/system/test_cross_loop_lifecycle.sh",
+      "coder_timeout_seconds": 700,
+      "notes": "需要构造两个连续 loop 的 fixture（loop-N 已完成状态 + loop-N+1 初始状态）。decision_log shard 写入在本测试中通过脚本直接写入（不通过 PM），验证格式合规性。"
+    },
+
+    {
+      "task_id": "QA10",
+      "title": "回归测试 — v4 兼容性保护（adapter / session_state / solo 模式）",
+      "owner_subsystem": "回归测试",
+      "priority": "P0",
+      "depends_on": ["QA03"],
+      "description": "确保 v5 升级没有破坏 v4 的现有能力。覆盖：原有 adapter（cursor/codex/mock）的调用路径；solo 模式下 state_update.sh 仍由 PM 调用；solo 模式 session compression 流程保留；已废弃文件的废弃确认（cli_collab、audit_append 等在 git_collab 模式下不被调用）。",
+      "acceptance_criteria": [
+        "cursor adapter：v5 run_task.sh 以 executor_type=solo_agent + provider=cursor 路由时，正确调用 cursor adapter，rc=0",
+        "codex adapter：以 executor_type=solo_agent + provider=codex 路由时，正确调用 codex adapter，rc=0",
+        "mock adapter：以 executor_type=api_call + provider=mock 路由时，正确调用 mock adapter，rc=0",
+        "solo 模式（executor_type=solo_agent）：state_update.sh 仍可被 PM 调用，写入 session_state.json，不报错",
+        "solo 模式：session_mgmt.md 中 'solo 模式专用' session compression 流程说明存在且完整",
+        "git_collab 模式（executor_type=multi_agent）：state_update.sh 不被 coordinator 自动调用（通过 strace 或调用日志验证）",
+        "git_collab 模式：audit_append.sh 不被调用",
+        "git_collab 模式：index_upsert.sh / index_verify.sh / hash.sh 不被调用",
+        "collab_context.md：State Read Delegation 段落已删除，其余五项保留且内容完整",
+        "v4 task.json（含 workflow_mode 字段）经 migrate_task_json.sh 迁移后可被 v5 run_task.sh 正常路由"
+      ],
+      "output_files": [
+        "tests/regression/test_v4_compat.sh"
+      ],
+      "test_cmd": "bash tests/regression/test_v4_compat.sh",
+      "coder_timeout_seconds": 500,
+      "notes": "废弃工具的「不被调用」验证可通过包装脚本记录调用日志实现（wrapper 写 /tmp/call_log，测试后断言 call_log 为空）。"
+    },
+
+    {
+      "task_id": "QA11",
+      "title": "GUI 测试 — 新端点行为 + 联动约束 + 回归保护",
+      "owner_subsystem": "GUI 测试",
+      "priority": "P1",
+      "depends_on": ["QA01"],
+      "description": "验证 T13 GUI 升级的所有变更：三个新 API 端点的响应格式和错误处理；前端 Executor Type / Session Mode 联动约束逻辑；原有视图未被破坏。使用 supertest 或 curl 对 server.js 做 API 级别测试，前端联动约束通过 DOM 断言（jsdom 或 playwright）验证。",
+      "acceptance_criteria": [
+        "GET /api/task/:taskId/git-status：文件存在时返回含 worker_branches / contract_check / judge_scores 的 JSON，HTTP 200",
+        "GET /api/task/:taskId/git-status：git-status 数据文件不存在时返回 HTTP 404，body 含 error 字段",
+        "GET /api/knowledge/shards/debt：debt shard 存在时返回按 severity 分组的条目数组，HTTP 200",
+        "GET /api/knowledge/shards/debt：debt shard 不存在时返回 HTTP 404",
+        "GET /api/knowledge/shards/debt：返回条目按 high → medium → low severity 排序",
+        "Loop Stats 端点（或静态读取）：loop_stats.jsonl 存在时数据可正确渲染，不存在时展示空状态而非崩溃",
+        "前端联动约束：Executor Type=API Call 时，Continuous 选项的 DOM 属性包含 disabled=true",
+        "前端联动约束：Executor Type=Solo Agent 时，Fresh 和 Iterative 选项 disabled=true",
+        "前端联动约束：Executor Type=Multi Agent 时，Fresh 和 Iterative 选项 disabled=true",
+        "前端联动约束：Executor Type=API Call 时，Fresh 和 Iterative 选项 enabled",
+        "server 端校验：POST task 时 executor_type=api_call + session_mode=continuous 返回 HTTP 400",
+        "原有端点回归：GET /api/project/tasks / GET /api/project/steps/:task_id / GET /api/knowledge 均返回 HTTP 200（fixture 数据存在时）",
+        "workflow_mode 字段在 task 创建 API 中被拒绝接受（HTTP 400 或忽略并不写入）"
+      ],
+      "output_files": [
+        "tests/gui/test_gui_endpoints_v5.sh",
+        "tests/gui/test_gui_frontend_constraints.js"
+      ],
+      "test_cmd": "bash tests/gui/test_gui_endpoints_v5.sh && node tests/gui/test_gui_frontend_constraints.js",
+      "coder_timeout_seconds": 600,
+      "notes": "前端联动约束测试优先使用 jsdom（轻量，CI 友好），playwright 作备选。server 端校验需要 server.js 实现对非法 executor_type × session_mode 组合的拦截。"
+    }
+
+  ],
+
+  "shared_contracts": {
+    "tests/mocks/mock_coder.sh": {
+      "owner_task": "QA01",
+      "dependents": ["QA05", "QA06", "QA08", "QA09"],
+      "interface_summary": "mock_coder.sh --rc <int> --output-file <path> --content <string> [--attempt-sequence <scores_csv>]"
+    },
+    "tests/mocks/mock_judge.sh": {
+      "owner_task": "QA01",
+      "dependents": ["QA05", "QA06", "QA08", "QA09"],
+      "interface_summary": "mock_judge.sh --score <float> --next-instructions <string> --rc <int> [--attempt-sequence <scores_csv>]"
+    },
+    "tests/mocks/mock_git_ops.sh": {
+      "owner_task": "QA01",
+      "dependents": ["QA05", "QA07", "QA08"],
+      "interface_summary": "mock_git_ops.sh create-branches|merge-pr|review-prep，接口与真实 git_ops.sh 一致，review-prep 返回预设 JSON"
+    },
+    "tests/fixtures/v5/make_fixture.sh": {
+      "owner_task": "QA01",
+      "dependents": ["QA02", "QA04", "QA05", "QA06", "QA07", "QA08", "QA09", "QA10"],
+      "interface_summary": "make_fixture.sh --type <fixture_type> [--slug <slug>] [--date <YYYYMMDD>]，输出 fixture 路径或内容"
+    }
+  },
+
+  "delivery_order": [
+    ["QA01"],
+    ["QA02", "QA03", "QA04"],
+    ["QA05"],
+    ["QA06", "QA07", "QA11"],
+    ["QA08", "QA10"],
+    ["QA09"]
+  ],
+
+  "review_checklist": {
+    "each_task": [
+      "test_cmd 执行 rc=0",
+      "output_files 全部存在",
+      "所有用例使用 mock adapter，不发起真实 LLM / 网络调用",
+      "每个用例在独立临时目录运行，测试后自动清理"
+    ],
+    "QA01_special": [
+      "mock_coder.sh 在无 --attempt-sequence 参数时退化为单次固定行为",
+      "run_all_v5_qa.sh 输出最终 PASS/FAIL 汇总并返回正确 rc"
+    ],
+    "QA05_special": [
+      "Bug2 故障注入路径（worktree 缺失）明确验证 attempt 循环未进入",
+      "Bug1 fresh 模式验证 instruction 文本内容不含 attempt_1 产出的任何子串"
+    ],
+    "QA06_special": [
+      "path-4（rc!=0 AND score 达标）验证 test_cmd 不可绕过原则",
+      "按 attempt 编号注入不同 score 的机制明确文档化"
+    ],
+    "QA07_special": [
+      "regression gate 失败场景：明确验证 knowledge 写入步骤未执行（检查 shard 文件未创建）",
+      "幂等测试：两次 on-loop-complete 后 debt shard 条目数量不变"
+    ],
+    "QA08_special": [
+      "场景 C 跨分支污染：构造非法 commit 的方式在 fixture 说明中文档化",
+      "三个场景均在独立 repo 中运行，互不干扰"
+    ],
+    "QA10_special": [
+      "废弃工具「不被调用」通过 wrapper 调用日志验证，不依赖代码静态分析",
+      "v4 adapter 回归测试覆盖 cursor / codex / mock 三种"
+    ],
+    "QA11_special": [
+      "HTTP 404 vs 500 断言必须检查 HTTP 状态码，不能只检查 body",
+      "前端联动约束测试覆盖所有三种 Executor Type 的选项禁用状态"
+    ]
+  },
+
+  "ci_integration": {
+    "entry_point": "bash tests/run_all_v5_qa.sh",
+    "estimated_duration_seconds": 600,
+    "parallelizable_groups": [
+      ["QA02", "QA03", "QA04"],
+      ["QA06", "QA07", "QA11"],
+      ["QA08", "QA10"]
+    ],
+    "hard_gates": [
+      "QA01 必须 PASS 才能运行任何其他 task",
+      "QA05 必须 PASS（Bug Fix 回归）才能运行 QA06～QA09",
+      "任意 P0 task FAIL → 整体 CI FAIL，阻断后续步骤"
+    ]
+  }
+}

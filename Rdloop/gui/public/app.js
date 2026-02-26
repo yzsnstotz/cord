@@ -518,14 +518,17 @@ function updateCcbProviderRows(providers, tmuxOk) {
     const statusTextEl = document.getElementById('ccb-status-text-' + p.provider);
     const card = document.getElementById('ccb-card-' + p.provider);
 
+    const hasProviderSession = !!p.pane_id || (typeof p.session_name === 'string' && p.session_name === ('ccb_' + p.provider));
     const isOn = p.status === 'ok';
-    const isRunning = p.status === 'running_no_daemon';
+    const isRunning = p.status === 'running_no_daemon' || (hasProviderSession && !isOn);
     const isOff = p.status === 'off';
+    const isNotInstalled = p.status === 'not_installed';
 
     let dot, text;
     if (isOn) { dot = '🟢'; text = p.ping_ms != null ? p.ping_ms + 'ms' : 'online'; }
-    else if (isRunning) { dot = '🟡'; text = 'no daemon'; }
+    else if (isRunning) { dot = '🟡'; text = 'session active'; }
     else if (isOff) { dot = '⚪'; text = 'off'; }
+    else if (isNotInstalled) { dot = '⚫'; text = 'not installed'; }
     else { dot = '🔴'; text = 'unavailable'; }
 
     if (statusEl) statusEl.textContent = dot;
@@ -602,13 +605,16 @@ async function renderCcbPanel() {
 
   // Build provider cards
   const providerCards = providers.map(p => {
+    const hasProviderSession = !!p.pane_id || (typeof p.session_name === 'string' && p.session_name === ('ccb_' + p.provider));
     const isOn = p.status === 'ok';
-    const isRunning = p.status === 'running_no_daemon';
+    const isRunning = p.status === 'running_no_daemon' || (hasProviderSession && !isOn);
     const isOff = p.status === 'off';
+    const isNotInstalled = p.status === 'not_installed';
     let statusDot, statusText;
     if (isOn) { statusDot = '🟢'; statusText = p.ping_ms != null ? p.ping_ms + 'ms' : 'online'; }
-    else if (isRunning) { statusDot = '🟡'; statusText = 'no daemon'; }
+    else if (isRunning) { statusDot = '🟡'; statusText = 'session active'; }
     else if (isOff) { statusDot = '⚪'; statusText = 'off'; }
+    else if (isNotInstalled) { statusDot = '⚫'; statusText = 'not installed'; }
     else { statusDot = '🔴'; statusText = 'unavailable'; }
 
     // Primary action: Start if off, Open if running
@@ -1071,7 +1077,10 @@ function renderCcbBanner(items, status, config, sessionStatus) {
   const hasSemiAuto = Array.isArray(items) && items.some(t => t.execution_mode === 'semi-auto');
   // Use session-status ccb_instance.running as primary signal (daemon ping is unreliable for WezTerm/FIFO-only setups)
   const ccbInstanceRunning = sessionStatus && sessionStatus.ccb_instance && sessionStatus.ccb_instance.running;
-  const anyProviderOnline = sessionStatus && Array.isArray(sessionStatus.providers) && sessionStatus.providers.some(p => p.status === 'ok' || p.status === 'running_no_daemon');
+  const anyProviderOnline = sessionStatus && Array.isArray(sessionStatus.providers) && sessionStatus.providers.some(p => {
+    if (p.status === 'ok' || p.status === 'running_no_daemon') return true;
+    return !!p.pane_id || (typeof p.session_name === 'string' && p.session_name === ('ccb_' + p.provider));
+  });
   const ccbUnavailable = !ccbInstanceRunning && !anyProviderOnline;
   if (!hasSemiAuto || !ccbUnavailable) {
     const el = document.getElementById('ccb-warn-banner');
@@ -1519,11 +1528,11 @@ async function loadAttempt(taskId, n) {
       <pre class="attempt-block">${escapeHtml(data.metrics ? JSON.stringify(data.metrics, null, 2) : '(no metrics)')}</pre>
     </div>
   `;
-  // Task 10 Step 4: Solo progress panel + 5s refresh when workflow_mode === 'solo'
+  // Task 10 Step 4: Solo progress panel + 5s refresh when executor_type === 'solo_agent' (or legacy workflow_mode === 'solo')
   const soloContainer = document.getElementById('solo-progress-container');
   if (soloContainer) {
     const runData = await api(`/task/${encodeURIComponent(taskId)}`).catch(() => ({}));
-    const isSolo = runData.task && runData.task.workflow_mode === 'solo';
+    const isSolo = runData.task && (runData.task.executor_type === 'solo_agent' || runData.task.workflow_mode === 'solo');
     if (isSolo) {
       await renderSoloProgress(taskId, n, soloContainer);
       _soloProgressRefreshIntervalId = setInterval(async () => {
@@ -2360,31 +2369,66 @@ async function onTaskTypeChange() {
   container.innerHTML = buildThresholdsUI(taskType, null);
 }
 
-// ── Three-Mode workflow toggle ───────────────────────────────────────────────
-let _currentWorkflowMode = 'solo';
+// ── v5.0: Executor Type × Session Mode (replaces Three-Mode workflow toggle) ──
+let _currentExecutorType = 'api_call';
+let _currentSessionMode = 'fresh';
 
-function setWorkflowMode(mode) {
-  _currentWorkflowMode = mode;
-  // Update toggle button highlights
-  ['single', 'solo', 'collab'].forEach(m => {
-    const btn = document.getElementById('mode-btn-' + m);
-    if (btn) btn.classList.toggle('btn-primary', m === mode);
-  });
-  // Show/hide sections based on mode
+// Legacy compat: keep workflow_mode variable for any remaining references
+let _currentWorkflowMode = 'single';
+
+function setExecutorType(type) {
+  _currentExecutorType = type;
+  const el = document.getElementById('modal-executor-type');
+  if (el && el.value !== type) el.value = type;
+  updateSessionModeConstraints();
+  // Map to legacy workflow_mode for backward compat
+  if (type === 'api_call') _currentWorkflowMode = 'single';
+  else if (type === 'solo_agent') _currentWorkflowMode = 'solo';
+  else if (type === 'multi_agent') _currentWorkflowMode = 'collab';
+  // Show/hide sections based on executor type
   const showIf = (id, show) => {
     const el = document.getElementById(id);
     if (el) el.style.display = show ? '' : 'none';
   };
-  showIf('section-adapter-grid', mode !== 'solo');
-  showIf('collab-config-wrap', mode === 'collab');
-  showIf('section-repo-git', mode !== 'single');
-  showIf('section-loop-config', mode === 'solo');
-  showIf('section-knowledge', mode !== 'single');
-  showIf('section-observation', mode === 'solo');
-  showIf('section-acceptance', mode !== 'solo');
+  showIf('section-adapter-grid', type !== 'solo_agent');
+  showIf('collab-config-wrap', type === 'multi_agent');
+  showIf('section-repo-git', type !== 'api_call' || true);
+  showIf('section-loop-config', type === 'solo_agent');
+  showIf('section-knowledge', type !== 'api_call');
+  showIf('section-observation', type === 'solo_agent');
+  showIf('section-acceptance', type !== 'solo_agent');
   showIf('section-channel-type', false);
   showIf('section-execution-mode', false);
-  showIf('section-attempt-context', mode !== 'solo');
+  showIf('section-attempt-context', type === 'api_call');
+}
+
+function updateSessionModeConstraints() {
+  const smEl = document.getElementById('modal-session-mode');
+  if (!smEl) return;
+  const type = _currentExecutorType;
+  const options = smEl.options;
+  for (let i = 0; i < options.length; i++) {
+    const val = options[i].value;
+    if (type === 'api_call') {
+      options[i].disabled = (val === 'continuous');
+    } else {
+      // solo_agent / multi_agent: only continuous
+      options[i].disabled = (val === 'fresh' || val === 'iterative');
+    }
+  }
+  // Auto-select valid option if current is disabled
+  if (smEl.options[smEl.selectedIndex]?.disabled) {
+    if (type === 'api_call') smEl.value = 'fresh';
+    else smEl.value = 'continuous';
+  }
+  _currentSessionMode = smEl.value;
+}
+
+function setWorkflowMode(mode) {
+  // Legacy compat shim — map to v5 executor_type
+  if (mode === 'single') setExecutorType('api_call');
+  else if (mode === 'solo') setExecutorType('solo_agent');
+  else if (mode === 'collab') setExecutorType('multi_agent');
 }
 
 // A2-1: Open "New Task" modal (A6: apply saved default adapters when no template selected)
@@ -2475,12 +2519,20 @@ async function openNewSpecModal() {
         <h3 style="margin-top:0">New Task Spec</h3>
 
         <div style="margin-bottom:12px">
-          <label class="form-label">Workflow Mode</label>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button type="button" class="btn" id="mode-btn-single" onclick="setWorkflowMode('single')">Single Flow</button>
-            <button type="button" class="btn btn-primary" id="mode-btn-solo" onclick="setWorkflowMode('solo')">Solo Agent</button>
-            <button type="button" class="btn" id="mode-btn-collab" onclick="setWorkflowMode('collab')">Collab</button>
-          </div>
+          <label class="form-label">Executor Type (v5)</label>
+          <select id="modal-executor-type" class="form-select" onchange="setExecutorType(this.value); syncFormToJson()">
+            <option value="api_call">API Call — single-flow LLM via CLI proxy</option>
+            <option value="solo_agent">Solo Agent — autonomous agent loop</option>
+            <option value="multi_agent">Multi Agent — collaborative multi-worker</option>
+          </select>
+        </div>
+        <div style="margin-bottom:12px">
+          <label class="form-label">Session Mode (v5)</label>
+          <select id="modal-session-mode" class="form-select" onchange="_currentSessionMode=this.value; syncFormToJson()">
+            <option value="fresh">Fresh — each attempt from scratch</option>
+            <option value="iterative">Iterative — carry context across attempts</option>
+            <option value="continuous" disabled>Continuous — persistent agent session</option>
+          </select>
         </div>
 
         <div style="margin-bottom:12px">
@@ -2702,8 +2754,8 @@ async function openNewSpecModal() {
   refreshModelSelector('coder').catch(() => {});
   refreshModelSelector('judge').catch(() => {});
 
-  // Apply default workflow mode
-  setWorkflowMode('solo');
+  // Apply default executor type (v5)
+  setExecutorType('api_call');
 
   // Store templates for use in applyTemplate
   window._specTemplates = TEMPLATES;
@@ -2917,27 +2969,28 @@ async function saveNewSpec() {
     if (thresholds) spec.rubric_thresholds = thresholds;
   }
 
-  // workflow_mode (v4.0)
+  // v5.0: executor_type + session_mode (replaces workflow_mode)
+  spec.executor_type = _currentExecutorType;
+  spec.session_mode = _currentSessionMode || document.getElementById('modal-session-mode')?.value || 'fresh';
+  // Legacy compat: keep workflow_mode for backward compat
   spec.workflow_mode = _currentWorkflowMode;
-  if (_currentWorkflowMode === 'single') {
+  if (_currentExecutorType === 'api_call') {
     spec.execution_mode = 'auto';
-  } else if (_currentWorkflowMode === 'solo') {
+  } else if (_currentExecutorType === 'solo_agent') {
     spec.execution_mode = 'auto';
-    spec.solo_config = {
-      max_iterations: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
-      approval_mode: document.getElementById('modal-approval-mode')?.value || 'agent_decides',
-      session_strategy: document.getElementById('modal-session-strategy')?.value || 'continuous',
+    spec.agent_config = {
+      max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
       auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
       knowledge_shards: (document.getElementById('modal-knowledge-shards')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
-      open_terminal: document.getElementById('modal-open-terminal')?.checked || false
+      provider: document.getElementById('modal-solo-provider')?.value || 'claude'
     };
     const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
     if (testCmdSolo) spec.test_cmd = testCmdSolo;
-  } else if (_currentWorkflowMode === 'collab') {
+  } else if (_currentExecutorType === 'multi_agent') {
     spec.execution_mode = 'semi-auto';
   }
-  // Knowledge settings for solo + collab
-  if (_currentWorkflowMode !== 'single') {
+  // Knowledge settings for solo + multi_agent
+  if (_currentExecutorType !== 'api_call') {
     const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
     if (knEnabled) {
       spec.knowledge_enabled = true;
@@ -3687,6 +3740,92 @@ async function deleteKnowledgeEntry(shardName, key) {
     await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), { method: 'DELETE' });
     selectKnowledgeShard(shardName);
   } catch (e) { alert(e?.message || 'Failed'); }
+}
+
+// ── v5.0 Panels: Git Status, Knowledge Debt, Loop Stats ───────────────────
+
+async function renderGitStatusPanel(taskId) {
+  const container = document.getElementById('git-status-panel');
+  if (!container) return;
+  try {
+    const data = await api(`/task/${encodeURIComponent(taskId)}/git-status`);
+    let html = `<h4 style="margin:0 0 8px">Git Status: ${escapeHtml(taskId)}</h4>`;
+    if (data.branches && data.branches.length > 0) {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Branch</th><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Status</th></tr></thead><tbody>';
+      for (const w of (data.workers || [])) {
+        const statusColor = w.status === 'merged' ? '#3fb950' : w.status === 'changes_requested' ? '#f85149' : '#d29922';
+        html += `<tr><td style="padding:4px;border-bottom:1px solid #21262d;font-family:monospace">${escapeHtml(w.branch)}</td><td style="padding:4px;border-bottom:1px solid #21262d"><span style="color:${statusColor}">${escapeHtml(w.status)}</span></td></tr>`;
+      }
+      html += '</tbody></table>';
+    } else {
+      html += '<div style="color:#8b949e;font-size:12px">No git branches found for this task.</div>';
+    }
+    if (data.contract_check) {
+      html += `<div style="margin-top:8px"><strong>Contract Check:</strong> <span style="color:${data.contract_check.pass ? '#3fb950' : '#f85149'}">${data.contract_check.pass ? 'PASS' : 'FAIL'}</span></div>`;
+    }
+    if (data.judge_scores) {
+      html += '<div style="margin-top:8px"><strong>Judge Scores:</strong><pre style="font-size:11px;background:#0d1117;padding:8px;border-radius:4px;overflow-x:auto">' + escapeHtml(JSON.stringify(data.judge_scores, null, 2)) + '</pre></div>';
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div style="color:#f85149;font-size:12px">Git status unavailable: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+async function renderKnowledgeDebtPanel() {
+  const container = document.getElementById('knowledge-debt-panel');
+  if (!container) return;
+  try {
+    const data = await api('/knowledge/shards/debt');
+    let html = '<h4 style="margin:0 0 8px">Knowledge Debt</h4>';
+    if (data.total === 0 || !data.entries || Object.keys(data.entries).length === 0) {
+      html += '<div style="color:#8b949e;font-size:12px">No debt entries found.</div>';
+    } else {
+      html += `<div style="font-size:12px;color:#8b949e;margin-bottom:8px">${data.total} entries total</div>`;
+      // Show by severity
+      if (data.by_severity) {
+        for (const [sev, entries] of Object.entries(data.by_severity)) {
+          const sevColor = sev === 'high' ? '#f85149' : sev === 'medium' ? '#d29922' : '#8b949e';
+          html += `<div style="margin-bottom:8px"><strong style="color:${sevColor}">${escapeHtml(sev)}</strong> (${entries.length})`;
+          html += '<ul style="margin:4px 0;padding-left:16px;font-size:12px">';
+          for (const e of entries) {
+            html += `<li><code>${escapeHtml(e.key)}</code>: ${escapeHtml(e.summary || e.description || '(no summary)')}</li>`;
+          }
+          html += '</ul></div>';
+        }
+      }
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div style="color:#8b949e;font-size:12px">No debt data available.</div>`;
+  }
+}
+
+async function renderLoopStatsPanel() {
+  const container = document.getElementById('loop-stats-panel');
+  if (!container) return;
+  try {
+    const data = await api('/loop-stats');
+    let html = '<h4 style="margin:0 0 8px">Loop Stats</h4>';
+    if (!data.stats || data.stats.length === 0) {
+      html += '<div style="color:#8b949e;font-size:12px">No loop stats recorded yet.</div>';
+    } else {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Loop ID</th><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Tasks</th><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Attempts</th><th style="text-align:left;padding:4px;border-bottom:1px solid #30363d">Completed</th></tr></thead><tbody>';
+      for (const s of data.stats) {
+        const tasks = s.task_attempts || [];
+        for (const t of tasks) {
+          html += `<tr><td style="padding:4px;border-bottom:1px solid #21262d;font-family:monospace">${escapeHtml(s.loop_id || '')}</td><td style="padding:4px;border-bottom:1px solid #21262d">${escapeHtml(t.task_id || '')}</td><td style="padding:4px;border-bottom:1px solid #21262d">${t.actual_attempts || 0} / ${t.max_attempts || '?'}</td><td style="padding:4px;border-bottom:1px solid #21262d">${escapeHtml(s.completed_at || '')}</td></tr>`;
+        }
+        if (tasks.length === 0) {
+          html += `<tr><td style="padding:4px;border-bottom:1px solid #21262d;font-family:monospace">${escapeHtml(s.loop_id || '')}</td><td colspan="3" style="padding:4px;border-bottom:1px solid #21262d;color:#8b949e">No task data</td></tr>`;
+        }
+      }
+      html += '</tbody></table>';
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div style="color:#8b949e;font-size:12px">Loop stats unavailable.</div>`;
+  }
 }
 
 // Initial load (K7-1: load health for read_only first so banner and button state are correct)

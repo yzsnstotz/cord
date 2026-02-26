@@ -1,8 +1,10 @@
-# collab_context.md v1.7.0
-# Single source of truth for all collab worker context.
+# collab_context.md v2.0
+# Single source of truth for all collab worker context (cli_collab mode).
+# For git_collab mode, see rules/git_collab.md instead.
 # PM embeds relevant sections into every /ask task package.
 # CCB must NOT inject role or rubric content into CLAUDE.md / AGENTS.md / .clinerules.
 # KEEP full session when cli_collab is active.
+# v2.0: State Read Delegation removed (coordinator reads git state directly in git_collab mode).
 
 ## Purpose
 
