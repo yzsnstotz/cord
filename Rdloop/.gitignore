@@ -18,4 +18,6 @@ examples/dummy_repo/.git/
 
 # docs build / exports (if any)
 docs/**/bak/
-docs/
+docs/*
+!docs/schema/
+!docs/schema/*

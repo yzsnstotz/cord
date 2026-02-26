@@ -854,38 +854,65 @@ build_instruction() {
   local ifile="${att_dir}/coder/prompt.txt"
   local legacy_ifile="${att_dir}/coder/instruction.txt"
   local task_type; task_type=$(json_read "$TASK_JSON" "task_type" "")
+  # v5: use session_mode / context_strategy for instruction assembly
+  local cur_session_mode; cur_session_mode=$(json_read "$TASK_JSON" "session_mode" "")
+  # Legacy fallback: attempt_context_mode
   local attempt_context_mode; attempt_context_mode=$(json_read "$TASK_JSON" "attempt_context_mode" "fresh_each")
+  # Determine effective context strategy
+  local eff_ctx="reset"  # default: fresh
+  if [ -n "$cur_session_mode" ]; then
+    case "$cur_session_mode" in
+      iterative) eff_ctx="carry" ;;
+      continuous) eff_ctx="persist" ;;
+      fresh) eff_ctx="reset" ;;
+    esac
+  elif [ "$attempt_context_mode" = "iterative" ]; then
+    eff_ctx="carry"
+  fi
   local is_eng_impl=""
   [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
   mkdir -p "${att_dir}/coder"
   {
     echo "=== CONTEXT ==="
     echo ""
-    # Iterative mode: include previous attempt's coder output so coder can refine on it
-    if [ "$att_num" -gt 1 ] && [ "$attempt_context_mode" = "iterative" ]; then
+    # v5 Bug1 fix: session_mode-aware context injection
+    # fresh (reset): no previous output, no judge feedback — each attempt starts clean
+    # iterative (carry): inject previous output + judge next_instructions
+    # continuous (persist): agent maintains own context, inject judge feedback only
+    if [ "$att_num" -gt 1 ] && [ "$eff_ctx" = "carry" ]; then
       local pp; pp=$(printf "%03d" $(( att_num - 1 )))
+      # Inject previous coder output (iterative mode)
       local prev_run_log="${TASK_DIR}/attempt_${pp}/coder/run.log"
+      [ ! -f "$prev_run_log" ] && prev_run_log="${TASK_DIR}/attempt_${pp}/coder/stdout.log"
       if [ -f "$prev_run_log" ]; then
-        echo "=== PREVIOUS CODER OUTPUT (attempt $(( att_num - 1 ))) ==="
+        echo "=== PREVIOUS VERSION (attempt $(( att_num - 1 ))) ==="
         echo "(Use this as the basis to modify or improve; do not start from zero.)"
         echo ""
-        # Limit size to avoid token overflow (tail ~80k chars; adapter logs at start are small)
         tail -c 80000 "$prev_run_log" 2>/dev/null | head -c 80000
         echo ""
         echo ""
       fi
     fi
-    if [ "$att_num" -gt 1 ]; then
+    # v5 Bug1 fix: inject judge next_instructions for iterative AND continuous modes
+    # (fresh mode: skip entirely — each attempt starts from zero)
+    if [ "$att_num" -gt 1 ] && [ "$eff_ctx" != "reset" ]; then
       local pp; pp=$(printf "%03d" $(( att_num - 1 )))
-      local pv="${TASK_DIR}/attempt_${pp}/judge/verdict.json"
-      if [ -f "$pv" ]; then
-        local ni; ni=$(json_read "$pv" "next_instructions" "")
-        if [ -n "$ni" ]; then
-          echo "Previous judge instructions:"
-          echo "$ni"
-          echo ""
-        fi
+      # Try git first (.rdloop/attempt_N/verdict.json in worktree), then filesystem fallback
+      local ni=""
+      if [ -d "$wt/.git" ] || [ -f "$wt/.git" ]; then
+        ni=$(git -C "$wt" show "HEAD:.rdloop/attempt_${pp}/verdict.json" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('next_instructions',''))" 2>/dev/null || echo "")
       fi
+      # Filesystem fallback
+      if [ -z "$ni" ]; then
+        local pv="${TASK_DIR}/attempt_${pp}/judge/verdict.json"
+        [ -f "$pv" ] && ni=$(json_read "$pv" "next_instructions" "")
+      fi
+      if [ -n "$ni" ]; then
+        echo "=== Judge 修改指引 (attempt $(( att_num - 1 ))) ==="
+        echo "$ni"
+        echo ""
+      fi
+      # Previous test results (engineering tasks)
       if [ -n "$is_eng_impl" ]; then
         local prc_f="${TASK_DIR}/attempt_${pp}/test/rc.txt"
         local plog="${TASK_DIR}/attempt_${pp}/test/stdout.log"
@@ -998,11 +1025,15 @@ run_attempt() {
     [ -z "$coder_model" ] && coder_model=$(json_read "$config_json" "default_coder_model" "")
     [ -z "$judge_model" ] && judge_model=$(json_read "$config_json" "default_judge_model" "")
   fi
-  # workflow_mode (v4.0): takes precedence over execution_mode
-  local workflow_mode; workflow_mode=$(json_read "$TASK_JSON" "workflow_mode" "")
-  if [ -n "$workflow_mode" ]; then
-    case "$workflow_mode" in
-      single)
+  # v5.0: executor_type × session_mode two-parameter routing (replaces workflow_mode)
+  local executor_type; executor_type=$(json_read "$TASK_JSON" "executor_type" "")
+  local session_mode; session_mode=$(json_read "$TASK_JSON" "session_mode" "continuous")
+  local context_strategy=""
+
+  if [ -n "$executor_type" ]; then
+    # v5 routing: executor_type determines coder_adapter, session_mode determines context_strategy
+    case "$executor_type" in
+      api_call)
         coder_type="cliproxy"
         local judge_enabled_flag; judge_enabled_flag=$(json_read "$TASK_JSON" "judge_enabled" "true")
         if [ "$judge_enabled_flag" = "false" ]; then
@@ -1011,25 +1042,32 @@ run_attempt() {
           judge_type="cliproxy"
         fi
         ;;
-      solo)
+      solo_agent)
         coder_type="solo"
         judge_type="none"  # agent self-reviews via coordinator loop
         ;;
-      collab)
+      multi_agent)
         coder_type="ccb"
         judge_type="ccb"
         ;;
+      *)
+        log_error "Unknown executor_type: ${executor_type}"
+        exit 1
+        ;;
+    esac
+
+    case "$session_mode" in
+      fresh)      context_strategy="reset"   ;;
+      iterative)  context_strategy="carry"   ;;
+      continuous) context_strategy="persist" ;;
+      *)
+        log_error "Unknown session_mode: ${session_mode}"
+        exit 1
+        ;;
     esac
   else
-    # Legacy: execution_mode routing (v3.0)
-    local execution_mode; execution_mode=$(json_read "$TASK_JSON" "execution_mode" "auto")
-    if [ "$execution_mode" = "auto" ]; then
-      coder_type="bridge"
-      judge_type="bridge"
-    elif [ "$execution_mode" = "semi-auto" ]; then
-      coder_type="ccb"
-      judge_type="ccb"
-    fi
+    log_error "executor_type is required in task.json. Run: tools/migrate_task_json.sh <task.json> to migrate from v4."
+    exit 1
   fi
   [ -z "$coder_type" ] && coder_type="mock"
   [ -z "$judge_type" ] && judge_type="mock"
@@ -1072,14 +1110,29 @@ run_attempt() {
 
   # Worktree
   local wt
-  # Single flow: skip worktree if no repo_path (plan Task 8 Step 3)
-  if [ "$workflow_mode" = "single" ]; then
+  # api_call: skip worktree if no repo_path; v5 worktree pre-created by git_ops.sh
+  if [ "$executor_type" = "api_call" ]; then
     local repo_path_check; repo_path_check=$(json_read "$TASK_JSON" "repo_path" "")
     if [ -z "$repo_path_check" ] || [ "$repo_path_check" = "dummy_repo" ]; then
       wt="${TASK_DIR}"
       mkdir -p "$wt"
     else
-      wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+      # v5: check for pre-created worktree from git_ops.sh create-branches
+      local pre_wt="${WORKTREES_DIR}/${TASK_ID}"
+      if [ -d "$pre_wt" ]; then
+        # Use first found worktree subdirectory
+        local found_wt=""
+        for d in "$pre_wt"/*/; do
+          [ -d "$d" ] && { found_wt="$d"; break; }
+        done
+        if [ -n "$found_wt" ]; then
+          wt="$found_wt"
+        else
+          wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+        fi
+      else
+        wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+      fi
     fi
   else
     wt=$(setup_worktree "$att_num" "$repo" "$base_ref")

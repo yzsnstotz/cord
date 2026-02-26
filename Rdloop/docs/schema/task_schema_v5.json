@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rdloop.local/schema/task_schema_v5.json",
+  "title": "task.json v5",
+  "description": "v5 task spec: executor_type × session_mode (workflow_mode deprecated)",
+  "type": "object",
+  "required": ["executor_type", "session_mode"],
+  "properties": {
+    "task_id": { "type": "string", "description": "Unique task identifier" },
+    "executor_type": {
+      "type": "string",
+      "enum": ["api_call", "solo_agent", "multi_agent"],
+      "description": "Execution mode: api_call (single LLM flow), solo_agent (autonomous agent), multi_agent (collaborative workers)"
+    },
+    "session_mode": {
+      "type": "string",
+      "enum": ["fresh", "iterative", "continuous"],
+      "description": "Context strategy: fresh (each attempt from scratch), iterative (carry context across attempts), continuous (persistent session)"
+    },
+    "agent_config": {
+      "type": "object",
+      "description": "Agent loop config (merged from legacy solo_config)",
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "auto_pass_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "knowledge_shards": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provider": { "type": "string" }
+      }
+    },
+    "collab_roles": {
+      "type": "object",
+      "description": "Required when executor_type=multi_agent; maps role to provider",
+      "additionalProperties": { "type": "string" }
+    },
+    "goal": { "type": "string" },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "acceptance": { "type": "string" },
+    "test_cmd": { "type": "string" },
+    "max_attempts": { "type": "integer" },
+    "schema_version": { "type": "string", "enum": ["v5"] }
+  },
+  "if": {
+    "properties": { "executor_type": { "const": "multi_agent" } },
+    "required": ["executor_type"]
+  },
+  "then": { "required": ["collab_roles"] }
+}
