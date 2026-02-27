@@ -20,6 +20,10 @@ WORKTREES_DIR="${RDLOOP_WORKTREES_DIR:-${RDLOOP_ROOT}/worktrees}"
 LIB_DIR="${RDLOOP_ROOT}/coordinator/lib"
 export COORDINATOR_LIB="$LIB_DIR"
 PROMPTS_DIR="${RDLOOP_ROOT}/prompts"
+SESSION_ID_GEN="${RDLOOP_ROOT}/tools/session_id_gen.sh"
+REQ_CODE_GEN="${RDLOOP_ROOT}/tools/req_code_gen.sh"
+REQ_SEGMENT_EXTRACTOR="${RDLOOP_ROOT}/tools/extract_req_segment.sh"
+GIT_OPS_BIN="${RDLOOP_ROOT}/tools/git_ops.sh"
 
 LOCK_STALE_SECONDS=1800
 JUDGE_MAX_RETRIES=2
@@ -103,6 +107,144 @@ try:
   print(int(calendar.timegm(dt.timetuple())))
 except: print(0)
 " "$1" 2>/dev/null || echo "0"
+}
+
+# Derive v5.1 routing fields from task.json.
+# Output: shell exports (DERIVED_*).
+# - Compat mode (default): maps legacy executor_type/workflow_mode and run_surface/execution_mode.
+# - Strict mode (RDLOOP_V51_STRICT_ROUTING=1): requires explicit v5.1 fields.
+derive_v51_routing_exports() {
+  local strict="${RDLOOP_V51_STRICT_ROUTING:-0}"
+  python3 - "$TASK_JSON" "$strict" <<'PY'
+import json
+import shlex
+import sys
+
+task_json_path = sys.argv[1]
+strict = str(sys.argv[2]).strip() in {"1", "true", "TRUE", "yes", "on"}
+
+with open(task_json_path, encoding="utf-8") as f:
+    doc = json.load(f)
+
+if not isinstance(doc, dict):
+    raise SystemExit("task.json must be a JSON object")
+
+valid_task_types = {"copywriting", "solo", "multi_agent"}
+valid_launch_modes = {"ccb", "bridge"}
+
+def norm(v):
+    return str(v or "").strip()
+
+task_type = norm(doc.get("task_type"))
+launch_mode = norm(doc.get("launch_mode")).lower()
+locked = doc.get("launch_mode_locked")
+
+migration_applied = False
+reasons = []
+
+if task_type not in valid_task_types:
+    if strict:
+        raise SystemExit(
+            "task_type is required and must be one of copywriting|solo|multi_agent. "
+            "Either migrate task.json to v5.1 first or unset RDLOOP_V51_STRICT_ROUTING."
+        )
+    map_executor = {
+        "api_call": "copywriting",
+        "solo_agent": "solo",
+        "multi_agent": "multi_agent",
+    }
+    map_workflow = {
+        "single": "copywriting",
+        "solo": "solo",
+        "collab": "multi_agent",
+    }
+    et = norm(doc.get("executor_type"))
+    wf = norm(doc.get("workflow_mode"))
+    cand_et = map_executor.get(et)
+    cand_wf = map_workflow.get(wf)
+    if cand_et and cand_wf and cand_et != cand_wf:
+        raise SystemExit(
+            f"ambiguous task_type mapping: executor_type={et}->{cand_et}, "
+            f"workflow_mode={wf}->{cand_wf}. Set task_type explicitly."
+        )
+    task_type = cand_et or cand_wf
+    if task_type:
+        migration_applied = True
+        reasons.append("task_type_mapped_from_legacy")
+    else:
+        raise SystemExit(
+            "task_type missing and cannot be derived from legacy fields. "
+            "Set task_type directly or provide a supported executor_type/workflow_mode."
+        )
+
+if launch_mode not in valid_launch_modes:
+    if strict:
+        raise SystemExit(
+            "launch_mode is required and must be ccb|bridge. "
+            "Either migrate task.json to v5.1 first or unset RDLOOP_V51_STRICT_ROUTING."
+        )
+    map_surface = {"visual_ccb": "ccb", "bridge": "bridge"}
+    map_exec = {"semi-auto": "ccb", "auto": "bridge"}
+    rs = norm(doc.get("run_surface")).lower()
+    em = norm(doc.get("execution_mode")).lower()
+    cand_rs = map_surface.get(rs)
+    cand_em = map_exec.get(em)
+    if cand_rs and cand_em and cand_rs != cand_em:
+        raise SystemExit(
+            f"ambiguous launch_mode mapping: run_surface={rs}->{cand_rs}, "
+            f"execution_mode={em}->{cand_em}. Set launch_mode explicitly."
+        )
+    launch_mode = cand_rs or cand_em
+    if launch_mode:
+        migration_applied = True
+        reasons.append("launch_mode_mapped_from_legacy")
+    else:
+        raise SystemExit(
+            "launch_mode missing and cannot be derived from legacy fields. "
+            "Set launch_mode directly or provide a supported run_surface/execution_mode."
+        )
+
+if isinstance(locked, bool):
+    launch_mode_locked = locked
+elif locked is None or locked == "":
+    launch_mode_locked = False
+    migration_applied = True
+    reasons.append("launch_mode_locked_defaulted")
+elif isinstance(locked, str) and locked.strip().lower() in {"true", "false"}:
+    launch_mode_locked = locked.strip().lower() == "true"
+    migration_applied = True
+    reasons.append("launch_mode_locked_normalized")
+elif isinstance(locked, int) and locked in {0, 1}:
+    launch_mode_locked = bool(locked)
+    migration_applied = True
+    reasons.append("launch_mode_locked_normalized")
+else:
+    raise SystemExit("launch_mode_locked must be boolean")
+
+def out(name, value):
+    print(f"{name}={shlex.quote(value)}")
+
+out("DERIVED_TASK_TYPE", task_type)
+out("DERIVED_LAUNCH_MODE", launch_mode)
+out("DERIVED_LAUNCH_MODE_LOCKED", "true" if launch_mode_locked else "false")
+out("DERIVED_MIGRATION_APPLIED", "true" if migration_applied else "false")
+out("DERIVED_MIGRATION_REASON", ";".join(reasons))
+PY
+}
+
+extract_req_payload_segment() {
+  local req_code="$1" input_file="$2" output_file="$3" role="$4"
+  [ -n "$req_code" ] || return 0
+  [ -f "$input_file" ] || return 0
+  [ -x "$REQ_SEGMENT_EXTRACTOR" ] || return 0
+  if ! grep -q "\[RDLOOP_REQ:${req_code}:START\]" "$input_file" 2>/dev/null; then
+    return 0
+  fi
+  if "$REQ_SEGMENT_EXTRACTOR" "$req_code" "$input_file" > "$output_file"; then
+    write_event_ext "req_segment_extracted" "{\"role\":\"${role}\",\"req_code\":\"${req_code}\",\"path\":\"${output_file}\"}"
+  else
+    write_event_ext "req_segment_extract_error" "{\"role\":\"${role}\",\"req_code\":\"${req_code}\",\"path\":\"${input_file}\"}"
+  fi
 }
 
 ##############################################################################
@@ -1107,88 +1249,105 @@ run_attempt() {
     [ -z "$coder_model" ] && coder_model=$(json_read "$config_json" "default_coder_model" "")
     [ -z "$judge_model" ] && judge_model=$(json_read "$config_json" "default_judge_model" "")
   fi
-  # v5.0: executor_type × session_mode routing, with run_surface for solo/multi.
-  local executor_type; executor_type=$(json_read "$TASK_JSON" "executor_type" "")
-  local session_mode; session_mode=$(json_read "$TASK_JSON" "session_mode" "continuous")
-  local run_surface; run_surface=$(json_read "$TASK_JSON" "run_surface" "")
-  if [ -z "$run_surface" ]; then
-    local legacy_execution_mode
-    legacy_execution_mode=$(json_read "$TASK_JSON" "execution_mode" "auto")
-    if [ "$legacy_execution_mode" = "semi-auto" ]; then
-      run_surface="visual_ccb"
-    else
-      run_surface="bridge"
-    fi
-  fi
-  local context_strategy=""
-
-  if [ -n "$executor_type" ]; then
-    # v5 routing: executor_type determines coder_adapter, session_mode determines context_strategy
-    case "$executor_type" in
-      api_call)
-        coder_type="cliproxy"
-        local judge_enabled_flag; judge_enabled_flag=$(json_read "$TASK_JSON" "judge_enabled" "true")
-        if [ "$judge_enabled_flag" = "false" ]; then
-          judge_type="none"
-        else
-          judge_type="cliproxy"
-        fi
-        ;;
-      solo_agent)
-        # Solo mode: coder and judge should use the same provider/model, but run in separate instances/contexts.
-        [ -z "$judge_model" ] && judge_model="$coder_model"
-        local solo_provider="claude"
-        case "${coder_model}" in
-          codex*|*codex*) solo_provider="codex" ;;
-          gemini*|*gemini*) solo_provider="antigravity" ;;
-          opencode*|*opencode*) solo_provider="opencode" ;;
-          droid*|*droid*) solo_provider="droid" ;;
-          cursor*|*cursor*) solo_provider="cursor" ;;
-          antigravity*|*antigravity*) solo_provider="antigravity" ;;
-          *) solo_provider="claude" ;;
-        esac
-        if [ "$run_surface" = "visual_ccb" ]; then
-          coder_type="ccb"
-          judge_type="ccb"
-        else
-          coder_type="solo"
-          case "$solo_provider" in
-            codex) judge_type="codex" ;;
-            claude) judge_type="claude" ;;
-            cursor) judge_type="cursor" ;;
-            antigravity) judge_type="antigravity" ;;
-            *)
-              enter_paused "PAUSED_UNSUPPORTED_PROVIDER" \
-                "solo_agent + bridge unsupported provider: coder_model='${coder_model}' resolved provider='${solo_provider}' (supported: claude, codex, cursor, antigravity/gemini)" \
-                "[\"Use run_surface=visual_ccb for opencode/droid, or switch coder_model to claude/codex/cursor/gemini(antigravity) for bridge mode.\"]"
-              NORMAL_EXIT=1; exit 0
-              ;;
-          esac
-        fi
-        ;;
-      multi_agent)
-        coder_type="ccb"
-        judge_type="ccb"
-        ;;
-      *)
-        log_error "Unknown executor_type: ${executor_type}"
-        exit 1
-        ;;
-    esac
-
-    case "$session_mode" in
-      fresh)      context_strategy="reset"   ;;
-      iterative)  context_strategy="carry"   ;;
-      continuous) context_strategy="persist" ;;
-      *)
-        log_error "Unknown session_mode: ${session_mode}"
-        exit 1
-        ;;
-    esac
-  else
-    log_error "executor_type is required in task.json. Run: tools/migrate_task_json.sh <task.json> to migrate from v4."
+  # v5.1 routing derivation (task_type + launch_mode), with legacy compat mapping.
+  local task_type launch_mode launch_mode_locked
+  local derive_exports=""
+  if ! derive_exports="$(derive_v51_routing_exports 2>&1)"; then
+    log_error "${derive_exports}"
+    log_error "Routing remediation: run tools/migrate_task_json_v51.sh --in-place --keep-legacy <task.json> and set task_type/launch_mode explicitly if ambiguous."
     exit 1
   fi
+  eval "${derive_exports}"
+  task_type="${DERIVED_TASK_TYPE}"
+  launch_mode="${DERIVED_LAUNCH_MODE}"
+  launch_mode_locked="${DERIVED_LAUNCH_MODE_LOCKED}"
+
+  if [ "${DERIVED_MIGRATION_APPLIED}" = "true" ]; then
+    write_event "$att_num" "MIGRATION_APPLIED" "in-memory v5.1 routing mapping applied: ${DERIVED_MIGRATION_REASON}" "$att_dir"
+  fi
+
+  local executor_type=""
+  case "$task_type" in
+    copywriting) executor_type="api_call" ;;
+    solo) executor_type="solo_agent" ;;
+    multi_agent) executor_type="multi_agent" ;;
+    *)
+      log_error "task_type is required and must be one of: copywriting, solo, multi_agent"
+      exit 1
+      ;;
+  esac
+
+  local run_surface=""
+  case "$launch_mode" in
+    ccb) run_surface="visual_ccb" ;;
+    bridge) run_surface="bridge" ;;
+    *)
+      log_error "launch_mode is required and must be one of: ccb, bridge"
+      exit 1
+      ;;
+  esac
+  write_event_ext "launch_mode_selected" "{\"launch_mode\":\"${launch_mode}\",\"locked\":${launch_mode_locked}}"
+
+  # session_mode is accepted for backward compatibility but does not control routing.
+  local session_mode; session_mode=$(json_read "$TASK_JSON" "session_mode" "continuous")
+  local context_strategy=""
+  case "$session_mode" in
+    fresh)      context_strategy="reset"   ;;
+    iterative)  context_strategy="carry"   ;;
+    continuous|"") context_strategy="persist" ;;
+    *)
+      log_info "Unknown legacy session_mode='${session_mode}', fallback to context_strategy=persist"
+      context_strategy="persist"
+      ;;
+  esac
+
+  case "$executor_type" in
+    api_call)
+      coder_type="ccb"
+      local judge_enabled_flag; judge_enabled_flag=$(json_read "$TASK_JSON" "judge_enabled" "true")
+      if [ "$judge_enabled_flag" = "false" ]; then
+        judge_type="none"
+      else
+        judge_type="ccb"
+      fi
+      ;;
+    solo_agent)
+      # Solo mode: coder and judge should use the same provider/model, but run in separate instances/contexts.
+      [ -z "$judge_model" ] && judge_model="$coder_model"
+      local solo_provider="claude"
+      case "${coder_model}" in
+        codex*|*codex*) solo_provider="codex" ;;
+        gemini*|*gemini*) solo_provider="antigravity" ;;
+        opencode*|*opencode*) solo_provider="opencode" ;;
+        droid*|*droid*) solo_provider="droid" ;;
+        cursor*|*cursor*) solo_provider="cursor" ;;
+        antigravity*|*antigravity*) solo_provider="antigravity" ;;
+        *) solo_provider="claude" ;;
+      esac
+      if [ "$run_surface" = "visual_ccb" ]; then
+        coder_type="ccb"
+        judge_type="ccb"
+      else
+        coder_type="solo"
+        case "$solo_provider" in
+          codex) judge_type="codex" ;;
+          claude) judge_type="claude" ;;
+          cursor) judge_type="cursor" ;;
+          antigravity) judge_type="antigravity" ;;
+          *)
+            enter_paused "PAUSED_UNSUPPORTED_PROVIDER" \
+              "solo + bridge unsupported provider: coder_model='${coder_model}' resolved provider='${solo_provider}' (supported: claude, codex, cursor, antigravity/gemini)" \
+              "[\"Use launch_mode=ccb for opencode/droid, or switch coder_model to claude/codex/cursor/gemini(antigravity) for bridge mode.\"]"
+            NORMAL_EXIT=1; exit 0
+            ;;
+        esac
+      fi
+      ;;
+    multi_agent)
+      coder_type="ccb"
+      judge_type="ccb"
+      ;;
+  esac
   [ -z "$coder_type" ] && coder_type="mock"
   [ -z "$judge_type" ] && judge_type="mock"
   # Unique task code + attempt for handoff tracing (coder/judge 1:1)
@@ -1227,7 +1386,6 @@ run_attempt() {
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")
   max_att=$(json_read "$TASK_JSON" "max_attempts" "3")
-  local task_type; task_type=$(json_read "$TASK_JSON" "task_type" "")
   local is_eng_impl=""
   [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
 
@@ -1326,14 +1484,40 @@ run_attempt() {
     coder_rc=1
   else
     local c_s_epoch; c_s_epoch=$(date +%s)
+    local coder_session_id="" coder_req_code=""
+    if [ "$coder_script_suffix" = "ccb" ] || [ "$coder_script_suffix" = "bridge" ]; then
+      coder_session_id="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "$att_num")"
+      write_event_ext "session_id_assigned" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\",\"attempt\":${att_num}}"
+      if [ "$coder_script_suffix" = "ccb" ]; then
+        coder_req_code="$("$REQ_CODE_GEN" "$coder_session_id")"
+        write_event_ext "req_code_assigned" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\",\"attempt\":${att_num}}"
+        write_event_ext "ccb_call" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\"}"
+      else
+        write_event_ext "bridge_call" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\"}"
+      fi
+    fi
     # timeout
     local tout=""
     command -v timeout >/dev/null 2>&1 && tout="timeout"
     [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
-    if [ -n "$tout" ]; then
-      set +e; $tout "$coder_timeout" bash "$coder_script" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
+    if [ "$coder_script_suffix" = "ccb" ]; then
+      if [ -n "$tout" ]; then
+        set +e; $tout "$coder_timeout" bash "$coder_script" --session-id "$coder_session_id" --req-code "$coder_req_code" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
+      else
+        set +e; bash "$coder_script" --session-id "$coder_session_id" --req-code "$coder_req_code" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
+      fi
+    elif [ "$coder_script_suffix" = "bridge" ]; then
+      if [ -n "$tout" ]; then
+        set +e; $tout "$coder_timeout" bash "$coder_script" --session-id "$coder_session_id" "$TASK_JSON" "$att_dir" "$wt" "$ifile"; coder_rc=$?; set -e
+      else
+        set +e; bash "$coder_script" --session-id "$coder_session_id" "$TASK_JSON" "$att_dir" "$wt" "$ifile"; coder_rc=$?; set -e
+      fi
     else
-      set +e; bash "$coder_script" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
+      if [ -n "$tout" ]; then
+        set +e; $tout "$coder_timeout" bash "$coder_script" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
+      else
+        set +e; bash "$coder_script" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
+      fi
     fi
     local c_e_epoch; c_e_epoch=$(date +%s)
     local c_secs=$(( c_e_epoch - c_s_epoch ))
@@ -1344,6 +1528,9 @@ run_attempt() {
     [ ! -f "${att_dir}/coder/rc.txt" ] && echo "$coder_rc" > "${att_dir}/coder/rc.txt"
     if [ ! -s "${att_dir}/coder/stdout.log" ] && [ -f "${att_dir}/coder/run.log" ]; then
       cp "${att_dir}/coder/run.log" "${att_dir}/coder/stdout.log" 2>/dev/null || true
+    fi
+    if [ "$coder_script_suffix" = "ccb" ] && [ -n "$coder_req_code" ]; then
+      extract_req_payload_segment "$coder_req_code" "${att_dir}/coder/stdout.log" "${att_dir}/coder/req_payload.txt" "executor"
     fi
     [ -f "${att_dir}/coder/stderr.log" ] || : > "${att_dir}/coder/stderr.log"
     write_commands_log "$att_num" "coder:${coder_type}" "$coder_rc" "$c_secs" "$cmd_log"
@@ -1584,6 +1771,18 @@ EOF
 
   # B4-7: run.log records Judge temperature=0 (deterministic output)
   log_info "Judge run with temperature=0 (B4-7)"
+  local judge_session_id="" judge_req_code=""
+  if [ "$judge_script_suffix" = "ccb" ] || [ "$judge_script_suffix" = "bridge" ]; then
+    judge_session_id="$("$SESSION_ID_GEN" "$TASK_ID" "reviewer" "$att_num")"
+    write_event_ext "session_id_assigned" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\",\"attempt\":${att_num}}"
+    if [ "$judge_script_suffix" = "ccb" ]; then
+      judge_req_code="$("$REQ_CODE_GEN" "$judge_session_id")"
+      write_event_ext "req_code_assigned" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\",\"attempt\":${att_num}}"
+      write_event_ext "ccb_call" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\"}"
+    else
+      write_event_ext "bridge_call" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\"}"
+    fi
+  fi
 
   while [ "$j_retries" -le "$JUDGE_MAX_RETRIES" ]; do
     local j_s_e; j_s_e=$(date +%s)
@@ -1591,12 +1790,30 @@ EOF
     command -v timeout >/dev/null 2>&1 && tout="timeout"
     [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
     set +e
-    if [ -n "$tout" ]; then
-      $tout "$judge_timeout" bash "$judge_script" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt" ${ccb_judge_provider:+"$ccb_judge_provider"}
-      judge_rc=$?
+    if [ "$judge_script_suffix" = "ccb" ]; then
+      if [ -n "$tout" ]; then
+        $tout "$judge_timeout" bash "$judge_script" --session-id "$judge_session_id" --req-code "$judge_req_code" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt" ${ccb_judge_provider:+"$ccb_judge_provider"}
+        judge_rc=$?
+      else
+        bash "$judge_script" --session-id "$judge_session_id" --req-code "$judge_req_code" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt" ${ccb_judge_provider:+"$ccb_judge_provider"}
+        judge_rc=$?
+      fi
+    elif [ "$judge_script_suffix" = "bridge" ]; then
+      if [ -n "$tout" ]; then
+        $tout "$judge_timeout" bash "$judge_script" --session-id "$judge_session_id" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt"
+        judge_rc=$?
+      else
+        bash "$judge_script" --session-id "$judge_session_id" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt"
+        judge_rc=$?
+      fi
     else
-      bash "$judge_script" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt" ${ccb_judge_provider:+"$ccb_judge_provider"}
-      judge_rc=$?
+      if [ -n "$tout" ]; then
+        $tout "$judge_timeout" bash "$judge_script" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt" ${ccb_judge_provider:+"$ccb_judge_provider"}
+        judge_rc=$?
+      else
+        bash "$judge_script" "$TASK_JSON" "${att_dir}/evidence.json" "$att_dir" "$jprompt" ${ccb_judge_provider:+"$ccb_judge_provider"}
+        judge_rc=$?
+      fi
     fi
     set -e
     [ ! -f "${att_dir}/judge/rc.txt" ] && echo "$judge_rc" > "${att_dir}/judge/rc.txt"
@@ -1605,6 +1822,9 @@ EOF
     write_commands_log "$att_num" "judge:${judge_type}" "$judge_rc" "$j_secs" "$cmd_log"
     if [ ! -s "${att_dir}/judge/stdout.log" ] && [ -f "${att_dir}/judge/run.log" ]; then
       cp "${att_dir}/judge/run.log" "${att_dir}/judge/stdout.log" 2>/dev/null || true
+    fi
+    if [ "$judge_script_suffix" = "ccb" ] && [ -n "$judge_req_code" ]; then
+      extract_req_payload_segment "$judge_req_code" "${att_dir}/judge/stdout.log" "${att_dir}/judge/req_payload.txt" "reviewer"
     fi
     [ -f "${att_dir}/judge/stderr.log" ] || : > "${att_dir}/judge/stderr.log"
 
@@ -1744,6 +1964,360 @@ EOF
 
   local dj; dj=$(call_decision_table "judge" "$judge_rc" "" "$decision" "$verdict_gated" "$thresholds_pass")
   act_on_decision "$dj" "$hc" "$att_num" "$max_att"
+}
+
+##############################################################################
+# 10b. v5.1 role-based flow (task_type + launch_mode)
+##############################################################################
+is_v51_role_task() {
+  local tt=""
+  [ -f "${TASK_JSON:-}" ] && tt=$(json_read "$TASK_JSON" "task_type" "")
+  case "$tt" in
+    copywriting|solo|multi_agent) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_v51_signature_task() {
+  local sv lm ll tt
+  sv=$(json_read "$TASK_JSON" "schema_version" "")
+  lm=$(json_read "$TASK_JSON" "launch_mode" "")
+  ll=$(json_read "$TASK_JSON" "launch_mode_locked" "")
+  tt=$(json_read "$TASK_JSON" "task_type" "")
+  case "$tt" in
+    copywriting|solo|multi_agent) return 0 ;;
+  esac
+  [ "$sv" = "v51" ] && return 0
+  [ -n "$lm" ] && return 0
+  [ -n "$ll" ] && return 0
+  return 1
+}
+
+task_json_set_top_field() {
+  local field="$1" value="$2" vtype="${3:-string}"
+  python3 - "$TASK_JSON" "$field" "$value" "$vtype" <<'PY'
+import json, os, sys
+fpath, field, value, vtype = sys.argv[1:5]
+with open(fpath, encoding="utf-8") as f:
+    d = json.load(f)
+if vtype == "bool":
+    d[field] = str(value).lower() == "true"
+elif vtype == "int":
+    d[field] = int(value)
+else:
+    d[field] = value
+tmp = fpath + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(d, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, fpath)
+PY
+}
+
+write_event_ext() {
+  local etype="$1" payload_json="${2-}"
+  [ -z "$payload_json" ] && payload_json='{}'
+  python3 - "$TASK_DIR" "$TASK_ID" "$etype" "$payload_json" <<'PY'
+import datetime, json, os, sys
+task_dir, task_id, etype, payload_raw = sys.argv[1:5]
+payload = {}
+try:
+    payload = json.loads(payload_raw)
+except Exception:
+    payload = {}
+event = {
+    "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "task_id": task_id,
+    "type": etype
+}
+event.update(payload)
+os.makedirs(task_dir, exist_ok=True)
+with open(os.path.join(task_dir, "events.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+PY
+}
+
+upsert_task_state_pane() {
+  local role="$1" pane_idx="$2" status="$3" session_id="$4" launch_mode="$5"
+  python3 - "$TASK_DIR" "$role" "$pane_idx" "$status" "$session_id" "$launch_mode" <<'PY'
+import json, os, sys
+task_dir, role, pane_idx, status, session_id, launch_mode = sys.argv[1:7]
+state_path = os.path.join(task_dir, "task_state.json")
+data = {"sessions": {}, "panes": []}
+if os.path.exists(state_path):
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {"sessions": {}, "panes": []}
+sessions = data.get("sessions") or {}
+panes = data.get("panes") or []
+pane_key = f"{role}-{int(pane_idx):02d}"
+sessions[pane_key] = session_id
+found = False
+for pane in panes:
+    if pane.get("pane") == pane_key:
+        pane["role"] = role
+        pane["status"] = status
+        pane["session_id"] = session_id
+        pane["launch_mode"] = launch_mode
+        found = True
+        break
+if not found:
+    panes.append({
+        "pane": pane_key,
+        "role": role,
+        "status": status,
+        "session_id": session_id,
+        "launch_mode": launch_mode
+    })
+data["sessions"] = sessions
+data["panes"] = panes
+tmp = state_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, state_path)
+PY
+}
+
+get_commit_sha() {
+  local repo="$1"
+  git -C "$repo" rev-parse HEAD 2>/dev/null || true
+}
+
+knowledge_agent_query() {
+  local to_role="$1" from_role="${2:-}" from_sid="${3:-}" commit_sha="${4:-}" handoff_path="${5:-}"
+  write_event_ext "knowledge_inject" "{\"to_role\":\"${to_role}\",\"from_role\":\"${from_role}\",\"from_session_id\":\"${from_sid}\",\"commit_sha\":\"${commit_sha}\",\"handoff_path\":\"${handoff_path}\"}"
+  # v5.1: coordinator-owned context assembly hook. Keep lightweight by default.
+  echo ""
+}
+
+resolve_provider_for_role() {
+  local role="$1" task_type="$2"
+  local fallback=""
+  fallback=$(json_read "$TASK_JSON" "agent_config.provider" "claude")
+  [ -z "$fallback" ] && fallback="claude"
+  case "$task_type" in
+    solo)
+      local p=""
+      p=$(json_read "$TASK_JSON" "collab_roles.pm" "")
+      [ -z "$p" ] && p=$(json_read "$TASK_JSON" "collab_roles.executor" "")
+      [ -z "$p" ] && p="$fallback"
+      echo "$p"
+      ;;
+    copywriting)
+      local p=""
+      p=$(json_read "$TASK_JSON" "collab_roles.${role}" "")
+      [ -z "$p" ] && p="$fallback"
+      echo "$p"
+      ;;
+    multi_agent)
+      local p=""
+      p=$(json_read "$TASK_JSON" "collab_roles.${role}" "")
+      [ -z "$p" ] && p="$fallback"
+      echo "$p"
+      ;;
+    *)
+      echo "$fallback"
+      ;;
+  esac
+}
+
+resolve_launch_mode_v51() {
+  local locked launch_mode waited cfg mode_from_cfg
+  locked=$(json_read "$TASK_JSON" "launch_mode_locked" "false")
+  launch_mode=$(json_read "$TASK_JSON" "launch_mode" "")
+
+  if [ "$locked" = "true" ]; then
+    if [ -z "$launch_mode" ]; then
+      cfg="${RDLOOP_ROOT}/rdloop.config.json"
+      mode_from_cfg=$(json_read "$cfg" "default_launch_mode" "")
+      if [ -z "$mode_from_cfg" ]; then
+        local rs
+        rs=$(json_read "$cfg" "default_run_surface" "")
+        case "$rs" in
+          visual_ccb) mode_from_cfg="ccb" ;;
+          bridge) mode_from_cfg="bridge" ;;
+          *) mode_from_cfg="" ;;
+        esac
+      fi
+      case "$mode_from_cfg" in
+        ccb|bridge) launch_mode="$mode_from_cfg" ;;
+        *) launch_mode="ccb" ;;
+      esac
+      task_json_set_top_field "launch_mode" "$launch_mode" "string"
+    fi
+  else
+    local wait_max="${RDLOOP_LAUNCH_MODE_WAIT_SECONDS:-60}"
+    waited=0
+    while [ "$waited" -lt "$wait_max" ]; do
+      launch_mode=$(json_read "$TASK_JSON" "launch_mode" "")
+      case "$launch_mode" in
+        ccb|bridge) break ;;
+      esac
+      sleep 1
+      waited=$((waited + 1))
+    done
+    case "$launch_mode" in
+      ccb|bridge) ;;
+      *)
+        launch_mode="ccb"
+        task_json_set_top_field "launch_mode" "$launch_mode" "string"
+        ;;
+    esac
+  fi
+
+  write_event_ext "launch_mode_selected" "{\"launch_mode\":\"${launch_mode}\",\"locked\":${locked}}"
+  echo "$launch_mode"
+}
+
+ccb_launch_pane() {
+  local role="$1" pane_idx="$2" provider="$3" session_id="$4" _context="$5"
+  local req_code=""
+  req_code="$("$REQ_CODE_GEN" "$session_id")"
+  write_event_ext "session_id_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"pane_idx\":${pane_idx}}"
+  write_event_ext "req_code_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\"}"
+  upsert_task_state_pane "$role" "$pane_idx" "running" "$session_id" "ccb"
+  write_event_ext "role_start" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"launch_mode\":\"ccb\"}"
+  write_event_ext "ccb_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\",\"provider\":\"${provider}\"}"
+}
+
+bridge_launch_pane() {
+  local role="$1" pane_idx="$2" provider="$3" session_id="$4" _context="$5"
+  write_event_ext "session_id_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"pane_idx\":${pane_idx}}"
+  upsert_task_state_pane "$role" "$pane_idx" "running" "$session_id" "bridge"
+  write_event_ext "role_start" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"launch_mode\":\"bridge\"}"
+  write_event_ext "bridge_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\"}"
+}
+
+write_role_handoff_pointer() {
+  local from_role="$1" from_sid="$2" to_role="$3" to_sid="$4" commit_sha="$5" launch_mode="$6"
+  python3 - "$TASK_DIR" "$TASK_ID" "$from_role" "$from_sid" "$to_role" "$to_sid" "$commit_sha" "$launch_mode" <<'PY'
+import json
+import os
+import sys
+import datetime
+
+task_dir, task_id, from_role, from_sid, to_role, to_sid, commit_sha, launch_mode = sys.argv[1:9]
+handoff_dir = os.path.join(task_dir, "handoff")
+os.makedirs(handoff_dir, exist_ok=True)
+fname = f"{from_role}_to_{to_role}_{from_sid}.json"
+path = os.path.join(handoff_dir, fname)
+doc = {
+    "task_id": task_id,
+    "from_role": from_role,
+    "from_session_id": from_sid,
+    "to_role": to_role,
+    "to_session_id": to_sid,
+    "commit_sha": commit_sha,
+    "launch_mode": launch_mode,
+    "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(doc, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+print(path)
+PY
+}
+
+role_transition_v51() {
+  local from_role="$1" from_idx="$2" from_sid="$3"
+  local to_role="$4" to_idx="$5" to_sid="$6"
+  local launch_mode="$7" provider="$8"
+  local repo_path="" commit_sha="" next_context="" handoff_path=""
+
+  upsert_task_state_pane "$from_role" "$from_idx" "done" "$from_sid" "$launch_mode"
+  write_event_ext "role_end" "{\"role\":\"${from_role}\",\"session_id\":\"${from_sid}\"}"
+
+  repo_path=$(json_read "$TASK_JSON" "repo_path" "")
+  if [ -n "$repo_path" ] && [ -d "$repo_path" ]; then
+    bash "$GIT_OPS_BIN" role-commit --task "$TASK_ID" --role "$from_role" --session-id "$from_sid" --attempt-id "$from_idx" --message "phase complete" --repo "$repo_path" >/dev/null 2>&1 || true
+    commit_sha=$(get_commit_sha "$repo_path")
+  fi
+  write_event_ext "role_commit" "{\"task_id\":\"${TASK_ID}\",\"role\":\"${from_role}\",\"commit_sha\":\"${commit_sha}\",\"timestamp\":\"$(now_iso)\",\"session_id\":\"${from_sid}\"}"
+
+  handoff_path=$(write_role_handoff_pointer "$from_role" "$from_sid" "$to_role" "$to_sid" "$commit_sha" "$launch_mode")
+  write_event_ext "handoff_pointer_written" "{\"path\":\"${handoff_path}\",\"from\":\"${from_role}\",\"to\":\"${to_role}\",\"session_id\":\"${from_sid}\"}"
+  next_context=$(knowledge_agent_query "$to_role" "$from_role" "$from_sid" "$commit_sha" "$handoff_path")
+  case "$launch_mode" in
+    ccb) ccb_launch_pane "$to_role" "$to_idx" "$provider" "$to_sid" "$next_context" ;;
+    bridge) bridge_launch_pane "$to_role" "$to_idx" "$provider" "$to_sid" "$next_context" ;;
+  esac
+  write_event_ext "role_transition" "{\"from\":\"${from_role}\",\"to\":\"${to_role}\",\"session_id\":\"${to_sid}\",\"handoff_path\":\"${handoff_path}\"}"
+}
+
+run_v51_flow() {
+  local task_type launch_mode max_att
+  task_type=$(json_read "$TASK_JSON" "task_type" "")
+  if [ -z "$task_type" ]; then
+    log_error "task_type is required in task.json"
+    exit 1
+  fi
+  case "$task_type" in
+    copywriting|solo|multi_agent) ;;
+    *)
+      log_error "Unsupported task_type for v5.1 flow: ${task_type}"
+      exit 1
+      ;;
+  esac
+
+  launch_mode=$(resolve_launch_mode_v51)
+  max_att=$(json_read "$TASK_JSON" "max_attempts" "1")
+  write_status "RUNNING" "0" "$max_att" "false" "" "v5.1 role flow started" "[]" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
+
+  local roles=()
+  case "$task_type" in
+    copywriting) roles=(pm executor reviewer) ;;
+    solo|multi_agent) roles=(pm designer executor reviewer) ;;
+  esac
+
+  if [ "$task_type" = "solo" ]; then
+    local solo_values
+    solo_values=$(python3 - "$TASK_JSON" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+roles = d.get("collab_roles") if isinstance(d.get("collab_roles"), dict) else {}
+vals = {str(v).strip().lower() for v in roles.values() if str(v).strip()}
+print(len(vals))
+PY
+)
+    if [ "${solo_values:-0}" -gt 1 ]; then
+      log_error "task_type=solo requires the same provider for all collab_roles"
+      exit 1
+    fi
+  fi
+
+  local idx=0 prev_role="" prev_idx=0 prev_sid="" role sid provider context
+  for role in "${roles[@]}"; do
+    sid="$("$SESSION_ID_GEN" "$TASK_ID" "$role" "$idx")"
+    provider="$(resolve_provider_for_role "$role" "$task_type")"
+    if [ -z "$prev_role" ]; then
+      context="$(knowledge_agent_query "$role" "" "" "" "")"
+      case "$launch_mode" in
+        ccb) ccb_launch_pane "$role" "$idx" "$provider" "$sid" "$context" ;;
+        bridge) bridge_launch_pane "$role" "$idx" "$provider" "$sid" "$context" ;;
+      esac
+    else
+      role_transition_v51 "$prev_role" "$prev_idx" "$prev_sid" "$role" "$idx" "$sid" "$launch_mode" "$provider"
+    fi
+    prev_role="$role"
+    prev_idx="$idx"
+    prev_sid="$sid"
+    idx=$((idx + 1))
+  done
+
+  # Mark last role complete and finalize.
+  if [ -n "$prev_role" ]; then
+    upsert_task_state_pane "$prev_role" "$prev_idx" "done" "$prev_sid" "$launch_mode"
+    write_event_ext "role_end" "{\"role\":\"${prev_role}\",\"session_id\":\"${prev_sid}\"}"
+  fi
+
+  write_status "READY_FOR_REVIEW" "1" "$max_att" "false" "READY_FOR_REVIEW" "v5.1 role flow complete" "[]" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
+  write_final_summary "READY_FOR_REVIEW" "READY_FOR_REVIEW" "1" "$max_att" "v5.1 role flow complete" "[]" "" "" ""
 }
 
 ##############################################################################
@@ -1916,6 +2490,19 @@ with open(sys.argv[1],'w') as f: json.dump(d,f,indent=2)
     NORMAL_EXIT=1; exit 0
   fi
 
+  if is_v51_signature_task; then
+    if ! is_v51_role_task; then
+      log_error "task_type is required and must be one of: copywriting, solo, multi_agent"
+      release_lock
+      NORMAL_EXIT=1
+      exit 1
+    fi
+    run_v51_flow
+    release_lock
+    NORMAL_EXIT=1
+    exit 0
+  fi
+
   local att=1
   while [ "$att" -le "$EFFECTIVE_MAX_ATTEMPTS" ]; do
     process_control
@@ -1971,6 +2558,18 @@ cmd_continue() {
   fi
   if ! acquire_lock; then
     ensure_status_on_lock_fail; log_info "Task ${TASK_ID} already running"; NORMAL_EXIT=1; exit 0
+  fi
+  if is_v51_signature_task; then
+    if ! is_v51_role_task; then
+      log_error "task_type is required and must be one of: copywriting, solo, multi_agent"
+      release_lock
+      NORMAL_EXIT=1
+      exit 1
+    fi
+    run_v51_flow
+    release_lock
+    NORMAL_EXIT=1
+    exit 0
   fi
   local nxt=$(( mx + 1 ))
   if [ "$nxt" -le "$EFFECTIVE_MAX_ATTEMPTS" ]; then

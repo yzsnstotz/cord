@@ -6,17 +6,35 @@
 
 set -uo pipefail
 
-task_json="$1"
-attempt_dir="$2"
-worktree_dir="$3"
-instruction_path="$4"
+session_id=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) session_id="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+if [ -z "${session_id:-}" ]; then
+  echo "Usage: call_coder_bridge.sh --session-id <id> <task_json> <attempt_dir> <worktree_dir> <instruction_path>" >&2
+  exit 2
+fi
+
+task_json="${1:-}"
+attempt_dir="${2:-}"
+worktree_dir="${3:-}"
+instruction_path="${4:-}"
+[ -n "$task_json" ] || { echo "missing task_json" >&2; exit 2; }
+[ -n "$attempt_dir" ] || { echo "missing attempt_dir" >&2; exit 2; }
+[ -n "$worktree_dir" ] || { echo "missing worktree_dir" >&2; exit 2; }
+[ -n "$instruction_path" ] || { echo "missing instruction_path" >&2; exit 2; }
 
 mkdir -p "${attempt_dir}/coder"
 
 RDLOOP_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BRIDGE_INDEX="${RDLOOP_ROOT}/claude_bridge/index.js"
 BRIDGE_DIR="${attempt_dir}/bridge_ipc"
-ATTEMPT_ID=$(basename "$attempt_dir")
 
 run_log="${attempt_dir}/coder/run.log"
 instruction=$(cat "$instruction_path" 2>/dev/null || echo "")
@@ -35,6 +53,7 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
 
 {
   echo "[CODER][auto/bridge] $(date -u +%Y-%m-%dT%H:%M:%SZ) coordinator-spawned session"
+  echo "[CODER][auto/bridge] session_id: ${session_id}"
   echo "[CODER][auto/bridge] worktree: ${worktree_dir}"
   echo "[CODER][auto/bridge] timeout: ${timeout_s}s"
 
@@ -42,7 +61,7 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
     $tout "$timeout_s" \
       node "$BRIDGE_INDEX" \
         --bridge-dir "$BRIDGE_DIR" \
-        --session-id "$ATTEMPT_ID" \
+        --session-id "$session_id" \
         -- -p "$full_instruction" \
            --cwd "$worktree_dir" \
            --dangerously-skip-permissions 2>&1
@@ -51,7 +70,7 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
   else
     node "$BRIDGE_INDEX" \
       --bridge-dir "$BRIDGE_DIR" \
-      --session-id "$ATTEMPT_ID" \
+      --session-id "$session_id" \
       -- -p "$full_instruction" \
          --cwd "$worktree_dir" \
          --dangerously-skip-permissions 2>&1

@@ -6,11 +6,33 @@
 
 set -uo pipefail
 
-task_json="$1"
-attempt_dir="$2"
-worktree_dir="$3"
-instruction_path="$4"
+session_id=""
+req_code=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) session_id="${2:-}"; shift 2 ;;
+    --req-code) req_code="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+if [ -z "${session_id:-}" ] || [ -z "${req_code:-}" ]; then
+  echo "Usage: call_coder_ccb.sh --session-id <id> --req-code <code> <task_json> <attempt_dir> <worktree_dir> <instruction_path> [provider]" >&2
+  exit 2
+fi
+
+task_json="${1:-}"
+attempt_dir="${2:-}"
+worktree_dir="${3:-}"
+instruction_path="${4:-}"
 provider_arg="${5:-}"
+
+[ -n "$task_json" ] || { echo "missing task_json" >&2; exit 2; }
+[ -n "$attempt_dir" ] || { echo "missing attempt_dir" >&2; exit 2; }
+[ -n "$worktree_dir" ] || { echo "missing worktree_dir" >&2; exit 2; }
+[ -n "$instruction_path" ] || { echo "missing instruction_path" >&2; exit 2; }
 
 mkdir -p "${attempt_dir}/coder"
 
@@ -206,10 +228,13 @@ restore_latest_stale_session() {
 }
 
 instruction=$(cat "$instruction_path" 2>/dev/null || echo "")
-full_prompt="${instruction}"
+full_prompt="[RDLOOP_REQ:${req_code}:START]
+${instruction}
+[RDLOOP_REQ:${req_code}:END]"
 
 {
   echo "[CODER][semi-auto/ccb] $(date -u +%Y-%m-%dT%H:%M:%SZ) attached to human tmux session"
+  echo "[CODER][semi-auto/ccb] session_id=${session_id} req_code=${req_code}"
   echo "[CODER][semi-auto/ccb] provider=${ccb_bin} timeout=${timeout_s}s project_path=${project_path:-<unset>} session_root=${session_root:-<unset>}"
   if [ -n "$ccb_session_file" ]; then
     restore_latest_stale_session "$ccb_session_file"

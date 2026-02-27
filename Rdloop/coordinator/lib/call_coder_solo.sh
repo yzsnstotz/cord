@@ -70,7 +70,7 @@ tmux_session="solo_${task_id}"
 bridge_started=0
 fresh_flag=""
 [ "$session_strategy" = "fresh_per_step" ] && fresh_flag="--fresh-per-step"
-bridge_cmd="bash ${COORDINATOR_LIB}/solo_bridge.sh ${bridge_provider} ${session_dir} ${attempt_dir} ${fresh_flag}"
+bridge_cmd="bash ${COORDINATOR_LIB}/bridge.sh ${bridge_provider} ${session_dir} ${attempt_dir} ${fresh_flag}"
 if command -v tmux >/dev/null 2>&1; then
   if tmux new-session -d -s "$tmux_session" -c "$worktree_dir" 2>/dev/null; then
     :

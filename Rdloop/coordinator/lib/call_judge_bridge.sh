@@ -6,17 +6,35 @@
 
 set -uo pipefail
 
-task_json_path="$1"
-evidence_json_path="$2"
-attempt_dir="$3"
-judge_prompt_path="$4"
+session_id=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) session_id="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+if [ -z "${session_id:-}" ]; then
+  echo "Usage: call_judge_bridge.sh --session-id <id> <task_json> <evidence_json> <attempt_dir> <judge_prompt>" >&2
+  exit 2
+fi
+
+task_json_path="${1:-}"
+evidence_json_path="${2:-}"
+attempt_dir="${3:-}"
+judge_prompt_path="${4:-}"
+[ -n "$task_json_path" ] || { echo "missing task_json_path" >&2; exit 2; }
+[ -n "$evidence_json_path" ] || { echo "missing evidence_json_path" >&2; exit 2; }
+[ -n "$attempt_dir" ] || { echo "missing attempt_dir" >&2; exit 2; }
+[ -n "$judge_prompt_path" ] || { echo "missing judge_prompt_path" >&2; exit 2; }
 
 mkdir -p "${attempt_dir}/judge"
 
 RDLOOP_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BRIDGE_INDEX="${RDLOOP_ROOT}/claude_bridge/index.js"
 BRIDGE_DIR="${attempt_dir}/bridge_ipc_judge"
-ATTEMPT_ID=$(basename "$attempt_dir")
 
 run_log="${attempt_dir}/judge/run.log"
 
@@ -65,6 +83,7 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
 
 {
   echo "[JUDGE][auto/bridge] $(date -u +%Y-%m-%dT%H:%M:%SZ) coordinator-spawned"
+  echo "[JUDGE][auto/bridge] session_id: ${session_id}"
   echo "[JUDGE][auto/bridge] timeout: ${judge_timeout}s"
 
   if [ -n "$tout" ]; then
@@ -72,7 +91,7 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
     $tout "$judge_timeout" \
       node "$BRIDGE_INDEX" \
         --bridge-dir "$BRIDGE_DIR" \
-        --session-id "${ATTEMPT_ID}-judge" \
+        --session-id "${session_id}" \
         -- -p "$full_instruction" \
            --cwd "$worktree_dir" \
            --dangerously-skip-permissions 2>"${attempt_dir}/judge/bridge_stderr.txt" | tee "$raw_out"
@@ -82,7 +101,7 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
     raw_out="${attempt_dir}/judge/raw_out.txt"
     node "$BRIDGE_INDEX" \
       --bridge-dir "$BRIDGE_DIR" \
-      --session-id "${ATTEMPT_ID}-judge" \
+      --session-id "${session_id}" \
       -- -p "$full_instruction" \
          --cwd "$worktree_dir" \
          --dangerously-skip-permissions 2>"${attempt_dir}/judge/bridge_stderr.txt" | tee "$raw_out"
