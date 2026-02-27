@@ -24,9 +24,15 @@ Known: yzliu@YZ-Mac-mini.local = mini | leo@MacBook-Air-2.local = Air
 ## STEP 1 — Operating Mode
 
 ```
-if cli_collab explicitly requested → load cli_collab.md, KEEP full session; mode=cli_collab
-else                               → mode=solo
+if git_collab explicitly requested:
+  load git_collab.md, KEEP full session; mode=git_collab
+else if cli_collab explicitly requested:
+  load cli_collab.md, KEEP full session; mode=cli_collab
+else:
+  mode=solo
+
 mode is FIXED for session
+git_collab and cli_collab are mutually exclusive in one session
 
 session context: { mode }
 ```

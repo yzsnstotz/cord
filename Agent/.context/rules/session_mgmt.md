@@ -1,4 +1,4 @@
-# session_mgmt.md v2.0
+# session_mgmt.md v2.1
 # Trigger: calls >20 / context loss signs / stale task at STEP 3
 # DISCARD after new session starts
 # v2.0: Compression replaced by loop context rebuild (git_collab mode).
@@ -57,7 +57,7 @@ When coordinator starts a new session for a loop continuation:
 1. Inject AGENT.md (permanent context)
 
 2. Inject _meta.json from task directory
-   _meta.json contains: task_id, goal, acceptance, executor_type, session_mode, attempt count
+   _meta.json contains: task_id, goal, acceptance, task_type, launch_mode, attempt_count
 
 3. Inject related knowledge shards from .context/knowledge/
    - module_task_<slug>.json → file summaries from previous loops
