@@ -28,7 +28,8 @@ approval_mode=$(json_read "$task_json" "solo_config.approval_mode" "agent_decide
 session_strategy=$(json_read "$task_json" "solo_config.session_strategy" "continuous")
 auto_pass_threshold=$(json_read "$task_json" "solo_config.auto_pass_threshold" "0.85")
 open_terminal=$(json_read "$task_json" "solo_config.open_terminal" "true")
-knowledge_shards=$(json_read "$task_json" "solo_config.knowledge_shards" "[]")
+knowledge_shards=$(json_read "$task_json" "agent_config.knowledge_shards" "[]")
+[ "$knowledge_shards" = "[]" ] && knowledge_shards=$(json_read "$task_json" "solo_config.knowledge_shards" "[]")
 knowledge_project=$(json_read "$task_json" "knowledge_project_path" "")
 provider=$(json_read "$task_json" "coder_model" "claude")
 
@@ -37,7 +38,7 @@ bridge_provider="claude"
 case "$provider" in
   codex*) bridge_provider="codex" ;;
   cursor*) bridge_provider="cursor" ;;
-  gemini*) bridge_provider="gemini" ;;
+  gemini*|antigravity*) bridge_provider="antigravity" ;;
 esac
 
 session_dir="${attempt_dir}/solo"
@@ -46,8 +47,13 @@ mkdir -p "${attempt_dir}/coder"
 
 # Load knowledge shards if enabled
 knowledge_context=""
-if [ "$(json_read "$task_json" "knowledge_enabled" "false")" = "true" ] && [ -n "$knowledge_project" ]; then
-  knowledge_dir="${knowledge_project}/.context/knowledge"
+if [ "$(json_read "$task_json" "knowledge_enabled" "false")" = "true" ]; then
+  if [ -z "$knowledge_project" ]; then
+    repo_path=$(json_read "$task_json" "repo_path" "")
+    [ -n "$repo_path" ] && knowledge_project="${repo_path}/.knowledge"
+  fi
+  knowledge_dir="${knowledge_project}"
+  [ -n "$knowledge_dir" ] && mkdir -p "$knowledge_dir" 2>/dev/null || true
   if [ -d "$knowledge_dir" ]; then
     for shard in $(echo "$knowledge_shards" | python3 -c "import sys,json; [print(s) for s in json.load(sys.stdin)]" 2>/dev/null); do
       shard_file="${knowledge_dir}/${shard}.json"
@@ -61,16 +67,37 @@ fi
 # Create tmux session for bridge
 task_id=$(json_read "$task_json" "task_id" "unknown")
 tmux_session="solo_${task_id}"
-tmux new-session -d -s "$tmux_session" -c "$worktree_dir" 2>/dev/null || true
-
-# Start bridge in tmux
+bridge_started=0
 fresh_flag=""
 [ "$session_strategy" = "fresh_per_step" ] && fresh_flag="--fresh-per-step"
-tmux send-keys -t "$tmux_session" \
-  "bash ${COORDINATOR_LIB}/solo_bridge.sh ${bridge_provider} ${session_dir} ${attempt_dir} ${fresh_flag}" Enter
+bridge_cmd="bash ${COORDINATOR_LIB}/solo_bridge.sh ${bridge_provider} ${session_dir} ${attempt_dir} ${fresh_flag}"
+if command -v tmux >/dev/null 2>&1; then
+  if tmux new-session -d -s "$tmux_session" -c "$worktree_dir" 2>/dev/null; then
+    :
+  else
+    tmux_session=""
+  fi
+else
+  tmux_session=""
+fi
+
+# Start bridge in tmux
+if [ -n "$tmux_session" ]; then
+  if tmux send-keys -t "$tmux_session" "$bridge_cmd" Enter 2>/dev/null; then
+    bridge_started=1
+  fi
+fi
+
+# Fallback when tmux cannot be used in current environment.
+if [ "$bridge_started" != "1" ]; then
+  (cd "$worktree_dir" 2>/dev/null || cd /tmp; eval "$bridge_cmd") > "${session_dir}/bridge.log" 2>&1 &
+  bridge_pid=$!
+  echo "$bridge_pid" > "${session_dir}/bridge.pid"
+  bridge_started=1
+fi
 
 # Open terminal for user if configured
-if [ "$open_terminal" = "true" ]; then
+if [ "$open_terminal" = "true" ] && [ -n "$tmux_session" ]; then
   if [ "$(uname)" = "Darwin" ]; then
     osascript -e "tell application \"Terminal\" to do script \"tmux attach -t ${tmux_session}\"" 2>/dev/null || true
   fi
@@ -157,17 +184,57 @@ json.dump(req, open('${step_dir}/request.json','w'), indent=2)
 
   # Wait for bridge to write response
   timeout_s=$(json_read "$task_json" "coder_timeout_seconds" "600")
+  no_output_timeout_s=$(json_read "$task_json" "solo_config.no_output_timeout_seconds" "")
+  if ! [[ "$timeout_s" =~ ^[0-9]+$ ]] || [ "$timeout_s" -le 0 ]; then
+    timeout_s=600
+  fi
+  # Fail fast when there is no observable bridge output progress for a while.
+  if ! [[ "${no_output_timeout_s}" =~ ^[0-9]+$ ]] || [ "${no_output_timeout_s}" -le 0 ]; then
+    if [ "$timeout_s" -le 120 ]; then
+      no_output_timeout_s=$((timeout_s / 2))
+      [ "$no_output_timeout_s" -lt 30 ] && no_output_timeout_s=30
+    else
+      no_output_timeout_s=120
+    fi
+  fi
   elapsed=0
+  no_progress_elapsed=0
+  progress_bytes=0
+  stalled_no_output=0
   while [ ! -f "${session_dir}/response.json" ] || \
         [ "$(stat -f%m "${session_dir}/response.json" 2>/dev/null || stat -c%Y "${session_dir}/response.json" 2>/dev/null || echo 0)" -le \
           "$(stat -f%m "${session_dir}/request.json" 2>/dev/null || stat -c%Y "${session_dir}/request.json" 2>/dev/null || echo 999999999)" ]; do
     sleep 5
     elapsed=$((elapsed + 5))
+    no_progress_elapsed=$((no_progress_elapsed + 5))
+
+    current_bytes=0
+    [ -f "${session_dir}/_raw_output.txt" ] && current_bytes=$((current_bytes + $(wc -c < "${session_dir}/_raw_output.txt" 2>/dev/null || echo 0)))
+    [ -f "${step_dir}/agent.log" ] && current_bytes=$((current_bytes + $(wc -c < "${step_dir}/agent.log" 2>/dev/null || echo 0)))
+    if [ "$current_bytes" -gt "$progress_bytes" ]; then
+      progress_bytes="$current_bytes"
+      no_progress_elapsed=0
+    fi
+
+    if [ "$no_progress_elapsed" -ge "$no_output_timeout_s" ]; then
+      echo '{"self_eval":"dead_loop","summary":"no output progress from solo bridge"}' > "${step_dir}/response.json"
+      printf '[solo_adapter] no output progress for %ss (threshold=%ss); fail-fast with infra rc=206\n' \
+        "$no_progress_elapsed" "$no_output_timeout_s" >> "${attempt_dir}/coder/stderr.log"
+      stalled_no_output=1
+      break
+    fi
+
     if [ "$elapsed" -ge "$timeout_s" ]; then
       echo '{"self_eval":"dead_loop","summary":"timeout"}' > "${step_dir}/response.json"
       break
     fi
   done
+
+  if [ "$stalled_no_output" = "1" ]; then
+    cp "${session_dir}/_raw_output.txt" "${attempt_dir}/coder/stdout.log" 2>/dev/null || true
+    echo "206" > "${attempt_dir}/coder/rc.txt"
+    break
+  fi
 
   # Copy response to step dir
   cp "${session_dir}/response.json" "${step_dir}/response.json" 2>/dev/null || true
@@ -209,6 +276,13 @@ done
 
 # Signal bridge to exit
 echo '{"action":"exit"}' > "${session_dir}/control.json"
+if [ -f "${session_dir}/bridge.pid" ]; then
+  bridge_pid=$(cat "${session_dir}/bridge.pid" 2>/dev/null || echo "")
+  if [ -n "$bridge_pid" ]; then
+    kill -0 "$bridge_pid" 2>/dev/null && sleep 1
+    kill -0 "$bridge_pid" 2>/dev/null && kill "$bridge_pid" 2>/dev/null || true
+  fi
+fi
 
 # Write solo summary
 python3 -c "

@@ -16,7 +16,7 @@ export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
 ##############################################################################
 RDLOOP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${RDLOOP_OUT_DIR:-${RDLOOP_ROOT}/out}"
-WORKTREES_DIR="${RDLOOP_ROOT}/worktrees"
+WORKTREES_DIR="${RDLOOP_WORKTREES_DIR:-${RDLOOP_ROOT}/worktrees}"
 LIB_DIR="${RDLOOP_ROOT}/coordinator/lib"
 export COORDINATOR_LIB="$LIB_DIR"
 PROMPTS_DIR="${RDLOOP_ROOT}/prompts"
@@ -52,7 +52,7 @@ LAST_USER_INPUT_TS_CONSUMED=""
 get_pause_category() {
   local code="$1"
   case "$code" in
-    PAUSED_CODEX_MISSING|PAUSED_CRASH|PAUSED_NOT_GIT_REPO|PAUSED_TASK_ID_CONFLICT|PAUSED_CODER_FAILED|PAUSED_CODER_NO_OUTPUT|PAUSED_CODER_CCB_UNAVAILABLE)
+    PAUSED_CODEX_MISSING|PAUSED_CRASH|PAUSED_NOT_GIT_REPO|PAUSED_TASK_ID_CONFLICT|PAUSED_CODER_FAILED|PAUSED_CODER_NO_OUTPUT|PAUSED_CODER_CCB_UNAVAILABLE|PAUSED_CODER_NO_PROGRESS|PAUSED_UNSUPPORTED_PROVIDER)
       echo "PAUSED_INFRA" ;;
     PAUSED_CODER_AUTH_195|PAUSED_JUDGE_AUTH_195)
       echo "PAUSED_INFRA" ;;
@@ -856,6 +856,59 @@ setup_worktree() {
   echo "$wt"
 }
 
+# v5 git-context intent: coordinator bootstraps api_call git env via git_ops.sh
+ensure_api_call_git_env() {
+  local repo="$1" bref="$2"
+  local git_ops="${RDLOOP_ROOT}/tools/git_ops.sh"
+  if [ ! -f "$git_ops" ]; then
+    log_error "git_ops.sh not found: ${git_ops}"
+    return 1
+  fi
+  if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    log_error "repo_path is not a git repo for git_ops bootstrap: ${repo}"
+    return 1
+  fi
+
+  local created_at date_yyyymmdd
+  created_at=$(json_read "$TASK_JSON" "created_at" "")
+  date_yyyymmdd=$(python3 -c '
+import re,sys,datetime
+raw=(sys.argv[1] or "").strip()
+m=re.match(r"^(\d{4})-(\d{2})-(\d{2})", raw)
+if m:
+    print(m.group(1)+m.group(2)+m.group(3))
+else:
+    print(datetime.datetime.utcnow().strftime("%Y%m%d"))
+' "$created_at" 2>/dev/null || date -u +%Y%m%d)
+
+  local spec_file="${TASK_DIR}/.branch_init_spec_${TASK_ID}.json"
+  python3 -c '
+import json,sys
+spec={
+  "type":"BranchInitSpec",
+  "task_slug":sys.argv[1],
+  "date":sys.argv[2],
+  "repo_path":sys.argv[3],
+  "base_ref":sys.argv[4] or "main",
+  "workers":[
+    {"task_id":sys.argv[1], "executor_type":"api_call", "label":"content"}
+  ]
+}
+with open(sys.argv[5],"w",encoding="utf-8") as f:
+  json.dump(spec,f,ensure_ascii=True)
+' "$TASK_ID" "$date_yyyymmdd" "$repo" "$bref" "$spec_file" 2>/dev/null || return 1
+
+  local out="" rc=0
+  out=$(bash "$git_ops" create-branches "$spec_file" 2>&1) || rc=$?
+  rm -f "$spec_file" 2>/dev/null || true
+  if [ "$rc" -ne 0 ]; then
+    log_error "git_ops bootstrap failed (rc=${rc}): ${out}"
+    return "$rc"
+  fi
+  [ -n "$out" ] && log_info "git_ops bootstrap output: ${out}"
+  return 0
+}
+
 ##############################################################################
 # 8b. Artifacts copy (K8-4) — worktree artifacts/ → out/<task_id>/artifacts/
 ##############################################################################
@@ -1087,7 +1140,7 @@ run_attempt() {
         local solo_provider="claude"
         case "${coder_model}" in
           codex*|*codex*) solo_provider="codex" ;;
-          gemini*|*gemini*) solo_provider="gemini" ;;
+          gemini*|*gemini*) solo_provider="antigravity" ;;
           opencode*|*opencode*) solo_provider="opencode" ;;
           droid*|*droid*) solo_provider="droid" ;;
           cursor*|*cursor*) solo_provider="cursor" ;;
@@ -1105,8 +1158,10 @@ run_attempt() {
             cursor) judge_type="cursor" ;;
             antigravity) judge_type="antigravity" ;;
             *)
-              log_error "solo_agent + bridge requires a supported judge adapter provider. coder_model='${coder_model}' resolved provider='${solo_provider}'. Supported: claude, codex, cursor, antigravity."
-              exit 1
+              enter_paused "PAUSED_UNSUPPORTED_PROVIDER" \
+                "solo_agent + bridge unsupported provider: coder_model='${coder_model}' resolved provider='${solo_provider}' (supported: claude, codex, cursor, antigravity/gemini)" \
+                "[\"Use run_surface=visual_ccb for opencode/droid, or switch coder_model to claude/codex/cursor/gemini(antigravity) for bridge mode.\"]"
+              NORMAL_EXIT=1; exit 0
               ;;
           esac
         fi
@@ -1147,12 +1202,15 @@ run_attempt() {
   export CODER_MODEL="$coder_model"
   export JUDGE_MODEL="$judge_model"
   # Map display names to script suffix (call_coder_${suffix}.sh / call_judge_${suffix}.sh)
-  case "$coder_type" in cursor-agent|cursor_cli) coder_script_suffix="cursor";; codex-cli|codex_cli) coder_script_suffix="codex";; claude-bridge|claude_bridge) coder_script_suffix="claude_bridge";; antigravity-cli) coder_script_suffix="antigravity";; bridge) coder_script_suffix="bridge";; ccb) coder_script_suffix="ccb";; *) coder_script_suffix="$coder_type";; esac
-  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; claude-cli|claude_bridge) judge_script_suffix="claude";; antigravity-cli) judge_script_suffix="antigravity";; bridge) judge_script_suffix="bridge";; ccb) judge_script_suffix="ccb";; *) judge_script_suffix="$judge_type";; esac
+  case "$coder_type" in cursor-agent|cursor_cli) coder_script_suffix="cursor";; codex-cli|codex_cli) coder_script_suffix="codex";; claude-bridge|claude_bridge) coder_script_suffix="claude_bridge";; antigravity-cli|gemini-cli) coder_script_suffix="antigravity";; bridge) coder_script_suffix="bridge";; ccb) coder_script_suffix="ccb";; *) coder_script_suffix="$coder_type";; esac
+  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; claude-cli|claude_bridge) judge_script_suffix="claude";; antigravity-cli|gemini-cli) judge_script_suffix="antigravity";; bridge) judge_script_suffix="bridge";; ccb) judge_script_suffix="ccb";; *) judge_script_suffix="$judge_type";; esac
   # P16: collab_roles for semi-auto (ccb) — pass executor/reviewer to call_coder_ccb/call_judge_ccb
   local ccb_coder_provider ccb_judge_provider
   ccb_coder_provider=$(json_read "$TASK_JSON" "collab_roles.executor" "")
   ccb_judge_provider=$(json_read "$TASK_JSON" "collab_roles.reviewer" "")
+  # Provider alias normalization: Gemini runs on Antigravity stack in bridge, but CCB uses 'gemini'.
+  case "${ccb_coder_provider}" in antigravity|googleantigravity) ccb_coder_provider="gemini" ;; esac
+  case "${ccb_judge_provider}" in antigravity|googleantigravity) ccb_judge_provider="gemini" ;; esac
   if [ "$executor_type" = "solo_agent" ] && [ "$coder_script_suffix" = "ccb" ]; then
     if [ -z "$ccb_coder_provider" ]; then
       case "${coder_model}" in
@@ -1196,19 +1254,40 @@ run_attempt() {
     else
       # v5: check for pre-created worktree from git_ops.sh create-branches
       local pre_wt="${WORKTREES_DIR}/${TASK_ID}"
+      # Use first found worktree subdirectory
+      local found_wt=""
       if [ -d "$pre_wt" ]; then
-        # Use first found worktree subdirectory
-        local found_wt=""
         for d in "$pre_wt"/*/; do
           [ -d "$d" ] && { found_wt="$d"; break; }
         done
-        if [ -n "$found_wt" ]; then
-          wt="$found_wt"
-        else
-          wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+      fi
+      if [ -z "$found_wt" ]; then
+        log_info "Pre-created worktree missing for api_call; bootstrapping via git_ops.sh create-branches (task_id=${TASK_ID})"
+        if ensure_api_call_git_env "$repo_path_check" "$base_ref"; then
+          if [ -d "$pre_wt" ]; then
+            for d in "$pre_wt"/*/; do
+              [ -d "$d" ] && { found_wt="$d"; break; }
+            done
+          fi
         fi
+      fi
+      if [ -n "$found_wt" ]; then
+        wt="$found_wt"
       else
-        wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+        if [ -d "$pre_wt" ]; then
+          write_event "$att_num" "STATE_CHANGED" "PAUSED_NOT_GIT_REPO (pre-created worktree missing)"
+          enter_paused "PAUSED_NOT_GIT_REPO" \
+            "Pre-created worktree not found under '${pre_wt}', and bootstrap via git_ops.sh create-branches failed." \
+            "[\"Ensure repo_path is a valid git repo and run tools/git_ops.sh create-branches <branch_init_spec.json>; then use Run Next.\"]" \
+            "NEED_USER_INPUT" "" "true"
+        else
+          write_event "$att_num" "STATE_CHANGED" "PAUSED_NOT_GIT_REPO (pre-created worktree directory missing)"
+          enter_paused "PAUSED_NOT_GIT_REPO" \
+            "Pre-created worktree directory '${pre_wt}' is missing, and bootstrap via git_ops.sh create-branches failed." \
+            "[\"Ensure repo_path is a valid git repo and run tools/git_ops.sh create-branches <branch_init_spec.json>; then use Run Next.\"]" \
+            "NEED_USER_INPUT" "" "true"
+        fi
+        NORMAL_EXIT=1; exit 0
       fi
     fi
   else
@@ -1302,6 +1381,16 @@ run_attempt() {
     act_on_decision "$dj" "" "$att_num" "$max_att"
   fi
 
+  # rc=206: solo coder produced no observable output progress for too long
+  if [ "$coder_rc" = "206" ]; then
+    write_event "$att_num" "STATE_CHANGED" "PAUSED_CODER_NO_PROGRESS (solo bridge no-output stall)"
+    enter_paused "PAUSED_CODER_NO_PROGRESS" \
+      "Coder stalled with no output progress. Paused early instead of waiting full timeout." \
+      "[\"Check out/<task_id>/attempt_*/coder/stderr.log for the no-output threshold details, verify bridge/provider connectivity, then use Run Next to retry.\"]" \
+      "NEED_USER_INPUT" "" "true"
+    NORMAL_EXIT=1; exit 0
+  fi
+
   # Coder did not complete successfully (any other non-zero): do not run test or judge — no valid coder output to evaluate
   if [ "$coder_rc" != "0" ]; then
     log_info "Coder did not complete (rc=${coder_rc}); skipping test and judge"
@@ -1313,19 +1402,15 @@ run_attempt() {
     NORMAL_EXIT=1; exit 0
   fi
 
-  # Skip test and judge when run.log has no substantial coder output (do this before test so we never run test then pause without judge)
+  # Keep observability for tiny coder output, but do not pause/skip pipeline.
+  # Some valid implementations can produce compact logs.
   local coder_log="${att_dir}/coder/run.log"
   [ ! -f "$coder_log" ] && coder_log="${att_dir}/coder/stdout.log"
   local coder_log_size=0
   [ -f "$coder_log" ] && coder_log_size=$(wc -c < "$coder_log" 2>/dev/null || echo "0")
   if [ "$coder_log_size" -lt 600 ] 2>/dev/null; then
-    log_info "Coder run.log too small (${coder_log_size} bytes); skipping test and judge"
-    write_event "$att_num" "SKIP_TEST_JUDGE_NO_CODER_OUTPUT" "run.log size=${coder_log_size}"
-    enter_paused "PAUSED_CODER_NO_OUTPUT" \
-      "No substantial coder output (run.log too small). Test and judge were not run." \
-      "[\"Coder run.log has only ${coder_log_size} bytes (need ≥600). Check out/<task_id>/attempt_*/coder/run.log and ensure the coder adapter (cliapi gateway) is running and returning output; then use Run Next to retry.\"]" \
-      "NEED_USER_INPUT" "" "true"
-    NORMAL_EXIT=1; exit 0
+    log_info "Coder run.log is small (${coder_log_size} bytes); continuing to test/judge"
+    write_event "$att_num" "CODER_OUTPUT_SMALL_CONTINUE" "run.log size=${coder_log_size}"
   fi
 
   check_control_pause "AFTER_CODER"

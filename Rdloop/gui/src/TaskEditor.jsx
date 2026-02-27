@@ -16,7 +16,6 @@ function escapeHtml(str) {
 function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
   const [executorType, setExecutorType] = useState(initialSpec.executor_type || 'solo_agent');
   const [sessionMode, setSessionMode] = useState(initialSpec.session_mode || 'continuous');
-  const [runSurface, setRunSurface] = useState(initialSpec.run_surface || ((initialSpec.execution_mode === 'semi-auto') ? 'visual_ccb' : 'bridge'));
   const [taskId, setTaskId] = useState(initialSpec.task_id || '');
   const [goal, setGoal] = useState(initialSpec.goal || initialSpec.instruction || '');
   const [executorInstruction, setExecutorInstruction] = useState(initialSpec.executor_instruction || '');
@@ -38,7 +37,6 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
 
   const updateSessionModeConstraints = useCallback((execType) => {
     setExecutorType(execType);
-    if (execType === 'multi_agent') setRunSurface('visual_ccb');
     if (execType === 'api_call') {
       if (sessionMode === 'continuous') setSessionMode('iterative');
     } else if (execType === 'solo_agent' || execType === 'multi_agent') {
@@ -56,8 +54,7 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
       task_id: taskId,
       executor_type: executorType,
       session_mode: sessionMode,
-      ...(executorType === 'api_call' ? {} : { run_surface: runSurface }),
-      execution_mode: (executorType !== 'api_call' && runSurface === 'visual_ccb') ? 'semi-auto' : 'auto',
+      execution_mode: executorType === 'multi_agent' ? 'semi-auto' : 'auto',
       goal,
       acceptance: acceptance.split('\n').filter(Boolean),
       acceptance_criteria: acceptance.split('\n').filter(Boolean),
@@ -110,22 +107,6 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
             <option value="continuous" disabled={isContinuousDisabled}>Continuous — persistent agent session</option>
           </select>
         </div>
-        {(executorType === 'solo_agent' || executorType === 'multi_agent') && (
-          <div style={{ marginBottom: 12 }}>
-            <label className="form-label">Run Surface</label>
-            <select
-              id="modal-run-surface"
-              className="form-select"
-              value={runSurface}
-              onChange={(e) => setRunSurface(e.target.value)}
-            >
-              {executorType !== 'multi_agent' && (
-                <option value="bridge">Bridge / solo_bridge - non-visual</option>
-              )}
-              <option value="visual_ccb">Visual CCB - visible run</option>
-            </select>
-          </div>
-        )}
         <div style={{ marginBottom: 12 }}>
           <label className="form-label">Task ID</label>
           <input

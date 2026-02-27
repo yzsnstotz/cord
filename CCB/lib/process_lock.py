@@ -53,7 +53,11 @@ class ProviderLock:
         """
         self.provider = provider
         self.timeout = timeout
-        self.lock_dir = Path.home() / ".ccb" / "run"
+        run_dir_env = os.environ.get("CCB_RUN_DIR", "").strip()
+        if run_dir_env:
+            self.lock_dir = Path(run_dir_env).expanduser()
+        else:
+            self.lock_dir = Path.home() / ".ccb" / "run"
 
         # Use working directory hash for per-directory locking
         if cwd is None:

@@ -68,7 +68,7 @@ dispatch_to_agent() {
     session_flag="--session-file ${SESSION_FILE}"
   fi
   local cwd
-  cwd=$(python3 -c "import json; print(json.load(open('${SESSION_DIR}/../../../task.json')).get('repo_path','.'))" 2>/dev/null || echo ".")
+  cwd=$(python3 -c "import json; print(json.load(open('${SESSION_DIR}/../../task.json')).get('repo_path','.'))" 2>/dev/null || echo ".")
   [ -z "$cwd" ] && cwd="."
   [ -d "$cwd" ] || cwd="."
   local instruction_preview
@@ -94,6 +94,74 @@ dispatch_to_agent() {
         2>&1 | tee "$step_log" > "${SESSION_DIR}/_raw_output.txt"
       rc=${PIPESTATUS[0]}
       set -e
+      ;;
+    cursor)
+      local task_json model
+      task_json="${SESSION_DIR}/../../task.json"
+      model=$(python3 -c "
+import json
+try:
+  m=str(json.load(open('${task_json}')).get('coder_model','')).strip()
+  print(m)
+except:
+  print('')
+" 2>/dev/null || echo "")
+      set +e
+      if [ -n "$model" ]; then
+        cursor-agent --print --output-format text --force --trust --workspace "$cwd" --model "$model" "$(cat "$instruction_file")" \
+          2>&1 | tee "$step_log" > "${SESSION_DIR}/_raw_output.txt"
+      else
+        cursor-agent --print --output-format text --force --trust --workspace "$cwd" "$(cat "$instruction_file")" \
+          2>&1 | tee "$step_log" > "${SESSION_DIR}/_raw_output.txt"
+      fi
+      rc=${PIPESTATUS[0]}
+      set -e
+      ;;
+    antigravity|gemini)
+      local task_json ccb_root ccb_session_file ccb_run_dir
+      task_json="${SESSION_DIR}/../../task.json"
+      ccb_root=$(python3 -c "
+import json, os
+task='${task_json}'
+repo='.'
+try:
+  with open(task) as f:
+    repo=str(json.load(f).get('repo_path') or '.')
+except Exception:
+  pass
+repo=os.path.abspath(repo)
+p=repo
+while True:
+  if os.path.isdir(os.path.join(p,'.ccb')):
+    print(p); break
+  pp=os.path.dirname(p)
+  if pp==p:
+    print(repo); break
+  p=pp
+" 2>/dev/null || echo "$cwd")
+      ccb_session_file="${ccb_root}/.ccb/.gemini-session"
+      ccb_run_dir="${ccb_root}/.ccb/run"
+      mkdir -p "$ccb_run_dir" 2>/dev/null || true
+      if ! command -v gask >/dev/null 2>&1; then
+        rc=127
+        cat > "${SESSION_DIR}/_raw_output.txt" <<EOF
+[BRIDGE][gemini] gask command not found in PATH.
+EOF
+      else
+        set +e
+        CCB_GASKD_AUTOSTART=1 CCB_RUN_DIR="$ccb_run_dir" CCB_SESSION_FILE="$ccb_session_file" \
+          gask --output "${SESSION_DIR}/_raw_output.txt" --timeout 600 "$(cat "$instruction_file")" > "$step_log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+          cat > "${SESSION_DIR}/_raw_output.txt" <<EOF
+[BRIDGE][gemini] gask execution failed (rc=${rc}).
+The Gemini executor in solo bridge requires CCB daemon/session readiness.
+Check: ccb gemini / ccb-ping gemini / session file ${ccb_session_file}
+EOF
+        fi
+      fi
+      cat "${SESSION_DIR}/_raw_output.txt" | tee -a "$step_log" > /dev/null
       ;;
     *)
       echo "[BRIDGE] Unknown provider: ${PROVIDER}" >&2

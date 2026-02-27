@@ -18,6 +18,7 @@ from gaskd_protocol import extract_reply_for_req, is_done_text, wrap_gemini_prom
 from gaskd_session import compute_session_key, load_project_session
 from gemini_comm import GeminiLogReader
 from providers import GASKD_SPEC
+import terminal as terminal_module
 from terminal import get_backend_for_session
 
 
@@ -27,6 +28,47 @@ def _now_ms() -> int:
 
 def _write_log(line: str) -> None:
     write_log(log_path(GASKD_SPEC.log_file_name), line)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+
+def _pane_text(backend: Any, pane_id: str, *, lines: int = 120) -> str:
+    getter = getattr(backend, "get_text", None)
+    if not callable(getter):
+        return ""
+    try:
+        text = getter(pane_id, lines=lines)
+    except Exception:
+        return ""
+    return text if isinstance(text, str) else str(text or "")
+
+
+def _is_auth_overlay_active(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return "waiting for auth" in lowered and "press esc or ctrl+c to cancel" in lowered
+
+
+def _attempt_auth_overlay_recovery(backend: Any, pane_id: str) -> None:
+    send_key = getattr(backend, "send_key", None)
+    if not callable(send_key):
+        return
+    # Gemini auth overlay can trap the pasted prompt; dismiss and interrupt once.
+    for key in ("Escape", "C-c"):
+        try:
+            send_key(pane_id, key)
+        except Exception:
+            continue
+        time.sleep(0.2)
 
 
 def _is_cancel_text(text: str) -> bool:
@@ -116,6 +158,7 @@ class GeminiAdapter(BaseProviderAdapter):
         started_ms = _now_ms()
         req = task.request
         work_dir = Path(req.work_dir)
+        _write_log(f"[DEBUG] GeminiAdapter.handle_task v20260227-auth-recovery req_id={task.req_id}")
         _write_log(f"[INFO] start provider=gemini req_id={task.req_id} work_dir={req.work_dir}")
 
         session = load_project_session(work_dir)
@@ -150,6 +193,9 @@ class GeminiAdapter(BaseProviderAdapter):
                 session_key=session_key,
                 done_seen=False,
             )
+        _write_log(
+            f"[DEBUG] backend={type(backend).__name__} terminal_module={getattr(terminal_module, '__file__', '?')}"
+        )
 
         log_reader = GeminiLogReader(work_dir=Path(session.work_dir))
         if session.gemini_session_path:
@@ -158,14 +204,24 @@ class GeminiAdapter(BaseProviderAdapter):
             except Exception:
                 pass
         state = log_reader.capture_state()
+        try:
+            initial_msg_count = int(state.get("msg_count") or 0)
+        except Exception:
+            initial_msg_count = 0
 
         prompt = wrap_gemini_prompt(req.message, task.req_id)
         backend.send_text(pane_id, prompt)
+        prompt_sent = 1
+        request_started_at = time.time()
 
         deadline = None if float(req.timeout_s) < 0.0 else (time.time() + float(req.timeout_s))
         done_seen = False
         done_ms: Optional[int] = None
         latest_reply = ""
+        auth_wait_since: Optional[float] = None
+        auth_recovered = False
+        auth_grace_s = max(1.0, _env_float("CCB_GEMINI_AUTH_GRACE_S", 12.0))
+        auth_fail_s = max(auth_grace_s + 1.0, _env_float("CCB_GEMINI_AUTH_FAIL_S", 45.0))
 
         pane_check_interval = float(os.environ.get("CCB_GASKD_PANE_CHECK_INTERVAL", "2.0"))
         last_pane_check = time.time()
@@ -189,6 +245,62 @@ class GeminiAdapter(BaseProviderAdapter):
                     return ProviderResult(
                         exit_code=1,
                         reply="Gemini pane died during request",
+                        req_id=task.req_id,
+                        session_key=session_key,
+                        done_seen=False,
+                    )
+                pane_snapshot = _pane_text(backend, pane_id, lines=120)
+                if _is_auth_overlay_active(pane_snapshot):
+                    now = time.time()
+                    if auth_wait_since is None:
+                        auth_wait_since = now
+                        _write_log(f"[WARN] Gemini auth overlay detected req_id={task.req_id} pane={pane_id}")
+                    waited = now - auth_wait_since
+                    if waited >= auth_grace_s and not auth_recovered:
+                        _write_log(f"[WARN] Attempting auth overlay recovery req_id={task.req_id} pane={pane_id}")
+                        _attempt_auth_overlay_recovery(backend, pane_id)
+                        backend.send_text(pane_id, prompt)
+                        prompt_sent += 1
+                        auth_recovered = True
+                    elif waited >= auth_fail_s and auth_recovered:
+                        _write_log(f"[ERROR] Gemini auth overlay persisted after recovery req_id={task.req_id} pane={pane_id}")
+                        return ProviderResult(
+                            exit_code=1,
+                            reply="Gemini auth pending in provider pane; request not submitted. Re-authenticate Gemini CLI in that pane.",
+                            req_id=task.req_id,
+                            session_key=session_key,
+                            done_seen=False,
+                        )
+                else:
+                    auth_wait_since = None
+
+                # Fallback guard: if Gemini shows no session activity at all, recover once and fail fast.
+                try:
+                    current_msg_count = int(state.get("msg_count") or 0)
+                except Exception:
+                    current_msg_count = initial_msg_count
+                no_activity = current_msg_count <= initial_msg_count
+                elapsed = time.time() - request_started_at
+                if no_activity and elapsed >= auth_grace_s and not auth_recovered:
+                    _write_log(f"[WARN] Gemini no-activity recovery req_id={task.req_id} pane={pane_id}")
+                    _attempt_auth_overlay_recovery(backend, pane_id)
+                    backend.send_text(pane_id, prompt)
+                    prompt_sent += 1
+                    auth_recovered = True
+                elif no_activity and elapsed >= auth_fail_s and auth_recovered:
+                    _write_log(f"[ERROR] Gemini no-activity persisted after recovery req_id={task.req_id} pane={pane_id}")
+                    return ProviderResult(
+                        exit_code=1,
+                        reply="Gemini produced no session activity after retry; provider is likely stuck in auth. Re-authenticate Gemini CLI in that pane.",
+                        req_id=task.req_id,
+                        session_key=session_key,
+                        done_seen=False,
+                    )
+                elif not latest_reply and elapsed >= auth_fail_s and auth_recovered:
+                    _write_log(f"[ERROR] Gemini produced no reply after recovery req_id={task.req_id} pane={pane_id}")
+                    return ProviderResult(
+                        exit_code=1,
+                        reply="Gemini did not produce a reply after auth recovery; provider is likely stuck in auth. Re-authenticate Gemini CLI in that pane.",
                         req_id=task.req_id,
                         session_key=session_key,
                         done_seen=False,
@@ -268,5 +380,7 @@ class GeminiAdapter(BaseProviderAdapter):
             done_seen=done_seen,
             done_ms=done_ms,
         )
+        if prompt_sent > 1:
+            _write_log(f"[WARN] Gemini prompt re-sent req_id={task.req_id} count={prompt_sent}")
         _write_log(f"[INFO] done provider=gemini req_id={task.req_id} exit={result.exit_code}")
         return result

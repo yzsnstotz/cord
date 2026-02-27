@@ -67,6 +67,10 @@ def decide(response, iteration, max_iterations, approval_mode, auto_pass_thresho
     """
     self_eval = response.get("self_eval", "progress")
     confidence = response.get("confidence", 0.0)
+    next_action = str(response.get("next_action", "") or "").strip().lower()
+    files_modified = response.get("files_modified", [])
+    if not isinstance(files_modified, list):
+        files_modified = []
 
     # Normalise confidence to float
     if not isinstance(confidence, (int, float)):
@@ -84,6 +88,20 @@ def decide(response, iteration, max_iterations, approval_mode, auto_pass_thresho
         questions = response.get("questions_for_user", [])
         q_summary = " (%d questions)" % len(questions) if questions else ""
         return "PAUSED", "self_eval=need_user_input%s; waiting for human" % q_summary
+
+    # If the model says execution should continue, do not allow early review.
+    if next_action in {"execute", "fix_and_retry"}:
+        return (
+            "CONTINUE",
+            "next_action=%s; continue to execution before review" % next_action,
+        )
+
+    # Guard against text-only "goal_met" with no concrete file changes.
+    if self_eval == "goal_met" and not files_modified and next_action != "done":
+        return (
+            "CONTINUE",
+            "self_eval=goal_met but files_modified empty and next_action!=done; continue",
+        )
 
     # --- Rule 3: goal met + high confidence ----------------------------------
     if self_eval == "goal_met" and confidence >= auto_pass_threshold:

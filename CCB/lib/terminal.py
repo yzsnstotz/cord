@@ -585,7 +585,8 @@ class TmuxBackend(TerminalBackend):
         marker = (marker or "").strip()
         if not marker:
             return None
-        cp = self._tmux_run(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_title}"], capture=True)
+        status_timeout = max(0.5, _env_float("CCB_TMUX_STATUS_TIMEOUT_S", 1.5))
+        cp = self._tmux_run(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_title}"], capture=True, timeout=status_timeout)
         if cp.returncode != 0:
             return None
         for line in (cp.stdout or "").splitlines():
@@ -619,7 +620,8 @@ class TmuxBackend(TerminalBackend):
     def is_pane_alive(self, pane_id: str) -> bool:
         if not pane_id:
             return False
-        cp = self._tmux_run(["display-message", "-p", "-t", pane_id, "#{pane_dead}"], capture=True)
+        status_timeout = max(0.5, _env_float("CCB_TMUX_STATUS_TIMEOUT_S", 1.5))
+        cp = self._tmux_run(["display-message", "-p", "-t", pane_id, "#{pane_dead}"], capture=True, timeout=status_timeout)
         if cp.returncode != 0:
             return False
         return (cp.stdout or "").strip() == "0"
@@ -636,38 +638,49 @@ class TmuxBackend(TerminalBackend):
         sanitized = (text or "").replace("\r", "").strip()
         if not sanitized:
             return
+        send_timeout = max(1.0, _env_float("CCB_TMUX_SEND_TIMEOUT_S", 8.0))
 
         # Legacy: treat `pane_id` as a tmux session name for pure-tmux mode.
         if not self._looks_like_tmux_target(pane_id):
             session = pane_id
             if "\n" not in sanitized and len(sanitized) <= 200:
-                self._tmux_run(["send-keys", "-t", session, "-l", sanitized], check=True)
-                self._tmux_run(["send-keys", "-t", session, "Enter"], check=True)
+                self._tmux_run(["send-keys", "-t", session, "-l", sanitized], check=True, timeout=send_timeout)
+                self._tmux_run(["send-keys", "-t", session, "Enter"], check=True, timeout=send_timeout)
                 return
             buffer_name = f"ccb-tb-{os.getpid()}-{int(time.time() * 1000)}"
-            self._tmux_run(["load-buffer", "-b", buffer_name, "-"], check=True, input_bytes=sanitized.encode("utf-8"))
+            self._tmux_run(
+                ["load-buffer", "-b", buffer_name, "-"],
+                check=True,
+                input_bytes=sanitized.encode("utf-8"),
+                timeout=send_timeout,
+            )
             try:
-                self._tmux_run(["paste-buffer", "-t", session, "-b", buffer_name, "-p"], check=True)
+                self._tmux_run(["paste-buffer", "-t", session, "-b", buffer_name, "-p"], check=True, timeout=send_timeout)
                 enter_delay = _env_float("CCB_TMUX_ENTER_DELAY", 0.5)
                 if enter_delay:
                     time.sleep(enter_delay)
-                self._tmux_run(["send-keys", "-t", session, "Enter"], check=True)
+                self._tmux_run(["send-keys", "-t", session, "Enter"], check=True, timeout=send_timeout)
             finally:
-                self._tmux_run(["delete-buffer", "-b", buffer_name], check=False)
+                self._tmux_run(["delete-buffer", "-b", buffer_name], check=False, timeout=min(2.0, send_timeout))
             return
 
         # Pane-oriented: bracketed paste + unique tmux buffer + cleanup
         self._ensure_not_in_copy_mode(pane_id)
         buffer_name = f"ccb-tb-{os.getpid()}-{int(time.time() * 1000)}"
-        self._tmux_run(["load-buffer", "-b", buffer_name, "-"], check=True, input_bytes=sanitized.encode("utf-8"))
+        self._tmux_run(
+            ["load-buffer", "-b", buffer_name, "-"],
+            check=True,
+            input_bytes=sanitized.encode("utf-8"),
+            timeout=send_timeout,
+        )
         try:
-            self._tmux_run(["paste-buffer", "-p", "-t", pane_id, "-b", buffer_name], check=True)
+            self._tmux_run(["paste-buffer", "-p", "-t", pane_id, "-b", buffer_name], check=True, timeout=send_timeout)
             enter_delay = _env_float("CCB_TMUX_ENTER_DELAY", 0.5)
             if enter_delay:
                 time.sleep(enter_delay)
-            self._tmux_run(["send-keys", "-t", pane_id, "Enter"], check=True)
+            self._tmux_run(["send-keys", "-t", pane_id, "Enter"], check=True, timeout=send_timeout)
         finally:
-            self._tmux_run(["delete-buffer", "-b", buffer_name], check=False)
+            self._tmux_run(["delete-buffer", "-b", buffer_name], check=False, timeout=min(2.0, send_timeout))
 
     def send_key(self, pane_id: str, key: str) -> bool:
         key = (key or "").strip()
@@ -685,7 +698,8 @@ class TmuxBackend(TerminalBackend):
             return False
         if self._looks_like_tmux_target(pane_id):
             return self.is_pane_alive(pane_id)
-        cp = self._tmux_run(["has-session", "-t", pane_id], capture=True)
+        status_timeout = max(0.5, _env_float("CCB_TMUX_STATUS_TIMEOUT_S", 1.5))
+        cp = self._tmux_run(["has-session", "-t", pane_id], capture=True, timeout=status_timeout)
         return cp.returncode == 0
 
     def kill_pane(self, pane_id: str) -> None:

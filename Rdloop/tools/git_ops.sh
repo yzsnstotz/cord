@@ -11,6 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RDLOOP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKTREES_DIR="${RDLOOP_WORKTREES_DIR:-${RDLOOP_ROOT}/worktrees}"
 
 ##############################################################################
 # Utility
@@ -140,7 +141,7 @@ cmd_create_branches() {
     fi
 
     # Create worktree for this worker branch
-    local wt_dir="${RDLOOP_ROOT}/worktrees/${task_slug}/${worker_br##*/}"
+    local wt_dir="${WORKTREES_DIR}/${task_slug}/${worker_br##*/}"
     if [ -d "$wt_dir" ]; then
       log_info "Worktree already exists: ${wt_dir}"
     else

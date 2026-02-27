@@ -34,7 +34,10 @@ def _run_hook_async(
     work_dir: str = "",
 ) -> None:
     """Run the completion hook in a background thread."""
-    if not env_bool("CCB_COMPLETION_HOOK_ENABLED", True):
+    # Coordinator-owned orchestration only:
+    # disable provider-to-provider auto notifications by default.
+    # Can be explicitly re-enabled by setting CCB_COMPLETION_HOOK_ENABLED=1.
+    if not env_bool("CCB_COMPLETION_HOOK_ENABLED", False):
         return
 
     def _run():

@@ -77,7 +77,7 @@ if [ -n "$provider_arg" ]; then
   case "$provider_arg" in
     claude)  ccb_bin="lask"; ccb_provider="claude" ;;
     codex)   ccb_bin="cask"; ccb_provider="codex" ;;
-    gemini)  ccb_bin="gask"; ccb_provider="gemini" ;;
+    gemini|antigravity|googleantigravity)  ccb_bin="gask"; ccb_provider="gemini" ;;
     opencode) ccb_bin="oask"; ccb_provider="opencode" ;;
     droid)   ccb_bin="dask"; ccb_provider="droid" ;;
     *)       ccb_bin="cask"; ccb_provider="codex" ;;
@@ -115,12 +115,71 @@ else
 fi
 
 ccb_launcher_cmd=""
-if [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/bin/ccb" ]; then
+if [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/ccb" ]; then
+  ccb_launcher_cmd="${ccb_path_cfg}/ccb"
+elif [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/bin/ccb" ]; then
   ccb_launcher_cmd="${ccb_path_cfg}/bin/ccb"
 else
   found_ccb_launcher="$(command -v ccb 2>/dev/null || echo "")"
   [ -n "$found_ccb_launcher" ] && ccb_launcher_cmd="$found_ccb_launcher"
 fi
+
+bootstrap_ccb_provider() {
+  local provider="$1"
+  local launcher="$2"
+  local bootstrap_dir="$3"
+  local tmux_session=""
+  local out=""
+  local env_prefix=""
+
+  env_prefix="CCB_TERMINAL=\"tmux\""
+  if [ -n "${ccb_session_file:-}" ]; then
+    env_prefix="${env_prefix} CCB_SESSION_FILE=\"${ccb_session_file}\""
+  fi
+
+  if command -v tmux >/dev/null 2>&1; then
+    tmux_session="rdloop_ccb_${provider}_$$_$(date +%s)"
+    if tmux new-session -d -s "$tmux_session" -c "$bootstrap_dir" "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" \"$provider\"" >/dev/null 2>&1; then
+      echo "tmux bootstrap started (session=${tmux_session})"
+      return 0
+    fi
+  fi
+
+  if [ "$(uname -s)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
+    local launch_cmd apple_cmd
+    launch_cmd="cd \"$bootstrap_dir\" && ${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" \"$provider\""
+    apple_cmd="$(printf '%s' "$launch_cmd" | sed 's/\\/\\\\/g; s/\"/\\"/g')"
+    if osascript -e "tell application \"Terminal\" to do script \"${apple_cmd}\"" >/dev/null 2>&1; then
+      echo "terminal bootstrap started (Darwin/Terminal)"
+      return 0
+    fi
+  fi
+
+  out="$(cd "$bootstrap_dir" && eval "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" \"$provider\" </dev/null" 2>&1 | sed -n '1,30p' || true)"
+  [ -n "$out" ] && echo "$out" | tr '\n' ' ' | sed 's/  */ /g'
+  return 0
+}
+
+run_ping_with_timeout() {
+  local timeout_s="${RDLOOP_CCB_SINGLE_PING_TIMEOUT_SECONDS:-8}"
+  python3 - "$timeout_s" "$@" <<'PY'
+import subprocess, sys
+timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+cmd = sys.argv[2:]
+try:
+    cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    out = (cp.stdout or "") + (cp.stderr or "")
+    if out:
+        sys.stdout.write(out)
+    sys.exit(cp.returncode)
+except subprocess.TimeoutExpired as e:
+    out = (e.stdout or "") + (e.stderr or "")
+    if out:
+        sys.stdout.write(out)
+    sys.stdout.write(f"[rdloop] ccb-ping timed out after {timeout}s\n")
+    sys.exit(124)
+PY
+}
 
 # P18: Session file from task repo root. GUI ccb_work_dir is not used for task delivery.
 ccb_session_file=""
@@ -135,34 +194,52 @@ if [ -n "$session_root" ]; then
   esac
 fi
 
+restore_latest_stale_session() {
+  local session_file="$1"
+  [ -n "$session_file" ] || return 0
+  [ -f "$session_file" ] && return 0
+  local latest_stale=""
+  latest_stale="$(ls -1t "${session_file}.stale."* 2>/dev/null | head -n 1 || true)"
+  [ -n "$latest_stale" ] || return 0
+  cp "$latest_stale" "$session_file" 2>/dev/null || return 0
+  echo "[CODER][semi-auto/ccb] restored session file from stale backup: ${latest_stale}"
+}
+
 instruction=$(cat "$instruction_path" 2>/dev/null || echo "")
 full_prompt="${instruction}"
 
 {
   echo "[CODER][semi-auto/ccb] $(date -u +%Y-%m-%dT%H:%M:%SZ) attached to human tmux session"
   echo "[CODER][semi-auto/ccb] provider=${ccb_bin} timeout=${timeout_s}s project_path=${project_path:-<unset>} session_root=${session_root:-<unset>}"
+  if [ -n "$ccb_session_file" ]; then
+    restore_latest_stale_session "$ccb_session_file"
+  fi
   if [ -n "$ccb_session_file" ] && [ ! -f "$ccb_session_file" ]; then
     echo "[CODER][semi-auto/ccb] session file missing, attempting provider autostart/readiness bootstrap: ${ccb_session_file}"
   fi
 
   ccb_ping_ok=0
-  ping_retries=5
-  ping_interval=1
+  ping_retries="${RDLOOP_CCB_PING_RETRIES:-12}"
+  ping_interval="${RDLOOP_CCB_PING_INTERVAL_SECONDS:-2}"
+  [[ "$ping_retries" =~ ^[0-9]+$ ]] || ping_retries=12
+  [[ "$ping_interval" =~ ^[0-9]+$ ]] || ping_interval=2
+  [ "$ping_retries" -lt 1 ] && ping_retries=12
+  [ "$ping_interval" -lt 1 ] && ping_interval=2
   bootstrap_attempted=0
-  stale_session_reset_done=0
+  wezterm_stale_reset_done=0
   ccb_bootstrap_dir="${session_root:-$worktree_dir}"
   for (( attempt=1; attempt <= ping_retries; attempt++ )); do
     last_ping_diag=""
     ping_rc=1
     if [ -n "$ccb_session_file" ]; then
       if [ -n "$ccb_run_dir" ]; then
-        if last_ping_diag="$(CCB_RUN_DIR="$ccb_run_dir" CCB_SESSION_FILE="$ccb_session_file" "$ccb_ping_cmd" "$ccb_provider" --session-file "$ccb_session_file" --autostart 2>&1)"; then
+        if last_ping_diag="$(CCB_RUN_DIR="$ccb_run_dir" CCB_SESSION_FILE="$ccb_session_file" run_ping_with_timeout "$ccb_ping_cmd" "$ccb_provider" --session-file "$ccb_session_file" --autostart 2>&1)"; then
           ping_rc=0
         else
           ping_rc=$?
         fi
       else
-        if last_ping_diag="$(CCB_SESSION_FILE="$ccb_session_file" "$ccb_ping_cmd" "$ccb_provider" --session-file "$ccb_session_file" --autostart 2>&1)"; then
+        if last_ping_diag="$(CCB_SESSION_FILE="$ccb_session_file" run_ping_with_timeout "$ccb_ping_cmd" "$ccb_provider" --session-file "$ccb_session_file" --autostart 2>&1)"; then
           ping_rc=0
         else
           ping_rc=$?
@@ -170,25 +247,27 @@ full_prompt="${instruction}"
       fi
     else
       if [ -n "$ccb_run_dir" ]; then
-        if last_ping_diag="$(cd "$worktree_dir" && CCB_RUN_DIR="$ccb_run_dir" "$ccb_ping_cmd" "$ccb_provider" --autostart 2>&1)"; then
+        if last_ping_diag="$(cd "$worktree_dir" && CCB_RUN_DIR="$ccb_run_dir" run_ping_with_timeout "$ccb_ping_cmd" "$ccb_provider" --autostart 2>&1)"; then
           ping_rc=0
         else
           ping_rc=$?
         fi
       else
-        if last_ping_diag="$(cd "$worktree_dir" && "$ccb_ping_cmd" "$ccb_provider" --autostart 2>&1)"; then
+        if last_ping_diag="$(cd "$worktree_dir" && run_ping_with_timeout "$ccb_ping_cmd" "$ccb_provider" --autostart 2>&1)"; then
           ping_rc=0
         else
           ping_rc=$?
         fi
       fi
     fi
-    if echo "$last_ping_diag" | grep -Eqi "session unhealthy|has exited|no active .* session found"; then
-      if [ "$stale_session_reset_done" -ne 1 ] && [ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ]; then
-        stale_session_reset_done=1
+    # Keep session for tmux-style respawn recovery, but if the session backend is
+    # irrecoverably stale in WezTerm (CLI unavailable), rotate once to force rebind.
+    if echo "$last_ping_diag" | grep -Eqi "WezTerm CLI error|wezterm cli list failed|wezterm cli .*parse failed"; then
+      if [ "$wezterm_stale_reset_done" -ne 1 ] && [ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ]; then
+        wezterm_stale_reset_done=1
         stale_backup="${ccb_session_file}.stale.$(date +%s)"
         mv "$ccb_session_file" "$stale_backup" 2>/dev/null || true
-        echo "[CODER][semi-auto/ccb] detected stale session file; moved to ${stale_backup}"
+        echo "[CODER][semi-auto/ccb] rotated stale WezTerm session file; moved to ${stale_backup}"
       fi
     fi
     if [ "$ping_rc" -eq 0 ]; then
@@ -198,17 +277,9 @@ full_prompt="${instruction}"
     if [ "$bootstrap_attempted" -ne 1 ] && [ -n "$ccb_launcher_cmd" ]; then
       bootstrap_attempted=1
       echo "[CODER][semi-auto/ccb] ping failed; attempting provider bootstrap via ccb launcher: ${ccb_launcher_cmd} ${ccb_provider}"
-      bootstrap_out="$(cd "$ccb_bootstrap_dir" && "$ccb_launcher_cmd" "$ccb_provider" </dev/null 2>&1 | sed -n '1,8p' || true)"
+      bootstrap_out="$(bootstrap_ccb_provider "$ccb_provider" "$ccb_launcher_cmd" "$ccb_bootstrap_dir")"
       if [ -n "$bootstrap_out" ]; then
-        echo "[CODER][semi-auto/ccb] bootstrap output: $(echo "$bootstrap_out" | tr '\n' ' ' | sed 's/  */ /g')"
-        if echo "$bootstrap_out" | grep -Eqi "stdin is not a terminal"; then
-          if [ "$(uname -s)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
-            launch_cmd="cd \"$ccb_bootstrap_dir\" && \"$ccb_launcher_cmd\" \"$ccb_provider\""
-            apple_cmd="$(printf '%s' "$launch_cmd" | sed 's/\\/\\\\/g; s/\"/\\"/g')"
-            osascript -e "tell application \"Terminal\" to do script \"${apple_cmd}\"" >/dev/null 2>&1 || true
-            echo "[CODER][semi-auto/ccb] non-tty bootstrap detected; opened Terminal for interactive CCB launch in ${ccb_bootstrap_dir}"
-          fi
-        fi
+        echo "[CODER][semi-auto/ccb] bootstrap output: ${bootstrap_out}"
       fi
     fi
     if [ "$attempt" -lt "$ping_retries" ]; then
@@ -227,6 +298,8 @@ full_prompt="${instruction}"
     echo "127" > "${attempt_dir}/coder/rc.txt"
     exit 127
   fi
+
+  echo "[CODER][semi-auto/ccb] provider ping ready; dispatching request via ${ccb_bin_cmd}"
 
   if [ -n "$ccb_session_file" ]; then
     if [ -n "$ask_autostart_env_var" ]; then

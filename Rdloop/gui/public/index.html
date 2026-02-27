@@ -9,22 +9,27 @@
 <body>
   <div id="sidebar">
     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px 4px">
-      <h1 style="margin:0">rdloop</h1>
+      <h1 style="margin:0;cursor:pointer" onclick="switchView('tasks')" title="Go to Tasks">rdloop</h1>
       <button type="button" class="btn" id="btn-settings" style="padding:4px 8px;font-size:12px" title="Settings">⚙ Settings</button>
     </div>
     <div id="task-list"></div>
   </div>
   <div id="main">
-    <div id="top-nav" style="display:flex;border-bottom:1px solid #30363d;padding:0 12px;gap:4px;align-items:center">
+    <button type="button" class="sidebar-toggle" id="toggle-sidebar" title="Toggle Sidebar">
+      <svg viewBox="0 0 16 16"><path d="M5.22 14.78a.75.75 0 001.06 0l7.22-7.22v5.69a.75.75 0 001.5 0v-7.5a.75.75 0 00-.75-.75h-7.5a.75.75 0 000 1.5h5.69l-7.22 7.22a.75.75 0 000 1.06z"></path></svg>
+    </button>
+    <div id="top-nav">
       <button type="button" id="nav-tasks" class="nav-tab active">Tasks</button>
       <button type="button" id="nav-ccb" class="nav-tab">Agents</button>
+      <button type="button" id="nav-simulator" class="nav-tab">Coordinator Simulator</button>
     </div>
     <div id="content-wrap">
       <div id="content" class="empty-state">
         <h2>Select a task from the sidebar</h2>
         <p>Tasks are auto-refreshed every 2 seconds</p>
       </div>
-      <div id="ccb-panel" style="display:none;padding:16px;overflow-y:auto"></div>
+      <div id="ccb-panel" class="view-panel" style="display:none"></div>
+      <div id="simulator-panel" class="view-panel" style="display:none"></div>
     </div>
   </div>
   <script src="app.js"></script>

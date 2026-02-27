@@ -156,7 +156,7 @@ These four checks are validated by `coordinator/self_check.sh`:
 | PAUSED_NOT_GIT_REPO | PAUSED_INFRA | repo_path not a git repo |
 | PAUSED_TASK_ID_CONFLICT | PAUSED_INFRA | Duplicate task_id |
 | PAUSED_CODER_FAILED | PAUSED_INFRA | Coder step did not complete (rc≠0); test and judge skipped |
-| PAUSED_CODER_NO_OUTPUT | PAUSED_INFRA | Coder run.log too small; judge skipped (avoids judge on empty evidence) |
+| PAUSED_CODER_NO_PROGRESS | PAUSED_INFRA | Solo coder produced no output progress for threshold window; paused early |
 | PAUSED_JUDGE_INVALID | PAUSED_JUDGE | Judge output invalid after retries |
 | PAUSED_JUDGE_TIMEOUT | PAUSED_JUDGE | Judge timed out after retries |
 | PAUSED_ALLOWED_PATHS | PAUSED_POLICY | File outside allowed paths |

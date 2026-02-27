@@ -20,6 +20,9 @@ const RDLOOP_CONFIG_PATH = path.resolve(__dirname, '..', 'rdloop.config.json');
 const CLIAPI_PROVIDERS_PATH = path.resolve(__dirname, '..', 'config', 'cliapi_providers.json');
 const WORKTREES_DIR = path.resolve(__dirname, '..', 'worktrees');
 const RDLOOP_ROOT = path.resolve(__dirname, '..');
+const SIMULATOR_ROOT = path.join(RDLOOP_ROOT, 'Coordinator Simulator');
+const SIMULATOR_RUNS_DIR = path.join(SIMULATOR_ROOT, 'runs');
+const VALID_SIM_RUN_ID = /^sim_[A-Za-z0-9_-]+$/;
 
 // CCB GUI operations log: every start/stop/kill and key events for debugging
 const CCB_GUI_LOG_PATH = path.join(RDLOOP_ROOT, 'ccb-gui.log');
@@ -810,6 +813,15 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
   });
 });
 
+function isProcessRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // POST /api/task/:taskId/control — write control.json
 app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
@@ -827,7 +839,72 @@ app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
     created_at: new Date().toISOString()
   };
 
-  fs.writeFileSync(path.join(taskDir, 'control.json'), JSON.stringify(control, null, 2));
+  const controlPath = path.join(taskDir, 'control.json');
+  fs.writeFileSync(controlPath, JSON.stringify(control, null, 2));
+
+  // Aggressive PAUSE logic: if PAUSE requested, try to stop the live process group
+  if (control.action === 'PAUSE') {
+    const pidFile = path.join(taskDir, 'gui', 'runner.pid');
+    const lockDir = path.join(taskDir, '.lockdir');
+    
+    if (fs.existsSync(pidFile)) {
+      try {
+        const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+        if (pid && isProcessRunning(pid)) {
+          // Send SIGTERM to the process group (negative PID)
+          // The coordinator traps TERM/INT and should clean up its lock and write status.
+          try {
+            process.kill(-pid, 'SIGTERM');
+            appendToCcbGuiLog('pause_kill', { taskId, pid, signal: 'SIGTERM' });
+          } catch (e) {
+            // Fallback to single process if group kill fails
+            process.kill(pid, 'SIGTERM');
+          }
+          // We still return ok:true here; the UI will poll and see the state change to PAUSED (via trap)
+          return res.json({ ok: true, nonce: control.nonce, signalled: true });
+        }
+      } catch (err) {
+        console.error('Failed to signal live process for pause:', err);
+      }
+    }
+
+    // Ghost process cleanup: if process is already dead but lock remains
+    let cleanupNeeded = false;
+    if (fs.existsSync(lockDir)) {
+      if (fs.existsSync(pidFile)) {
+        const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+        if (pid && !isProcessRunning(pid)) {
+          cleanupNeeded = true;
+        }
+      } else {
+        const stat = fs.statSync(lockDir);
+        if (Date.now() - stat.mtimeMs > 300000) cleanupNeeded = true;
+      }
+    }
+
+    if (cleanupNeeded) {
+      try {
+        if (fs.existsSync(lockDir)) fs.rmSync(lockDir, { recursive: true, force: true });
+        const statusPath = path.join(taskDir, 'status.json');
+        if (fs.existsSync(statusPath)) {
+          const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+          if (status.state === 'RUNNING') {
+            status.state = 'PAUSED';
+            status.pause_flag = true;
+            status.pause_reason_code = 'PAUSED_USER';
+            status.message = 'Task was stuck (dead process); force paused by system cleanup.';
+            status.updated_at = new Date().toISOString();
+            fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
+          }
+        }
+        if (fs.existsSync(controlPath)) fs.unlinkSync(controlPath);
+        return res.json({ ok: true, nonce: control.nonce, cleaned_up: true });
+      } catch (err) {
+        console.error('Failed to cleanup ghost process:', err);
+      }
+    }
+  }
+
   res.json({ ok: true, nonce: control.nonce });
 });
 
@@ -836,6 +913,7 @@ app.post('/api/task/:taskId/run', requireWritable, validateTaskId, (req, res) =>
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
   const force = req.query.force === '1';
+  const requestedRunSurface = req.body && typeof req.body === 'object' ? req.body.run_surface : undefined;
 
   if (!fs.existsSync(taskDir)) {
     return res.status(404).json({ error: 'Task not found' });
@@ -845,6 +923,12 @@ app.post('/api/task/:taskId/run', requireWritable, validateTaskId, (req, res) =>
   const lockDir = path.join(taskDir, '.lockdir');
   if (!force && fs.existsSync(lockDir)) {
     return res.status(409).json({ error: 'Task is already running (lockdir exists)', hint: 'Use ?force=1 to force' });
+  }
+
+  const taskJsonPath = path.join(taskDir, 'task.json');
+  const overrideResult = applyRunSurfaceOverrideToTaskJson(taskJsonPath, requestedRunSurface);
+  if (!overrideResult.ok) {
+    return res.status(400).json({ error: overrideResult.error || 'Invalid run_surface' });
   }
 
   // Spawn coordinator
@@ -2918,7 +3002,13 @@ const VALID_SHARD_NAME = /^[a-z0-9_-]+$/;
 function getKnowledgeDir() {
   const projectPath = getProjectPath();
   if (!projectPath) return null;
-  return path.join(projectPath, '.context', 'knowledge');
+  return path.join(projectPath, '.knowledge');
+}
+
+function getKnowledgeDirFromReq(req) {
+  const raw = ((req.query && req.query.path) || (req.body && req.body.path) || '').toString().trim();
+  if (!raw) return getKnowledgeDir();
+  return path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(RDLOOP_ROOT, raw);
 }
 
 function readShardFile(shardPath) {
@@ -2950,14 +3040,15 @@ function updateShardMeta(knowledgeDir, shardName, shardData) {
 
 // GET /api/knowledge/shards — list all shards from _meta.json
 app.get('/api/knowledge/shards', (req, res) => {
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   const metaPath = path.join(kdir, '_meta.json');
   if (!fs.existsSync(metaPath)) {
     // Check for legacy knowledge_cache.json
+    const requestedPath = (req.query.path || '').toString().trim();
     const projectPath = getProjectPath();
-    const legacyPath = path.join(projectPath, '.context', 'knowledge_cache.json');
-    if (fs.existsSync(legacyPath)) {
+    const legacyPath = projectPath ? path.join(projectPath, '.context', 'knowledge_cache.json') : '';
+    if (!requestedPath && legacyPath && fs.existsSync(legacyPath)) {
       return res.json({ shards: {}, legacy: true, hint: 'Run migration to convert to shards' });
     }
     return res.json({ shards: {} });
@@ -2974,8 +3065,8 @@ app.get('/api/knowledge/shards', (req, res) => {
 app.get('/api/knowledge/shards/:shard', (req, res) => {
   const shard = req.params.shard;
   if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   const shardPath = path.join(kdir, shard + '.json');
   const data = readShardFile(shardPath);
   if (!data) return res.status(404).json({ error: 'Shard not found: ' + shard });
@@ -2986,8 +3077,8 @@ app.get('/api/knowledge/shards/:shard', (req, res) => {
 app.post('/api/knowledge/shards', requireWritable, (req, res) => {
   const { name, description } = req.body || {};
   if (!name || !VALID_SHARD_NAME.test(name)) return res.status(400).json({ error: 'Invalid shard name (lowercase alphanumeric, underscore, hyphen)' });
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   if (!fs.existsSync(kdir)) fs.mkdirSync(kdir, { recursive: true });
   const shardPath = path.join(kdir, name + '.json');
   if (fs.existsSync(shardPath)) return res.status(409).json({ error: 'Shard already exists' });
@@ -3004,8 +3095,8 @@ app.post('/api/knowledge/shards', requireWritable, (req, res) => {
 app.put('/api/knowledge/shards/:shard', requireWritable, (req, res) => {
   const shard = req.params.shard;
   if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   const shardPath = path.join(kdir, shard + '.json');
   const data = readShardFile(shardPath);
   if (!data) return res.status(404).json({ error: 'Shard not found' });
@@ -3022,8 +3113,8 @@ app.put('/api/knowledge/shards/:shard/entries/:key', requireWritable, (req, res)
   const key = decodeURIComponent(req.params.key);
   if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
   if (!key) return res.status(400).json({ error: 'Missing entry key' });
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   const shardPath = path.join(kdir, shard + '.json');
   let data = readShardFile(shardPath);
   if (!data) return res.status(404).json({ error: 'Shard not found' });
@@ -3040,8 +3131,8 @@ app.delete('/api/knowledge/shards/:shard/entries/:key', requireWritable, (req, r
   const shard = req.params.shard;
   const key = decodeURIComponent(req.params.key);
   if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   const shardPath = path.join(kdir, shard + '.json');
   let data = readShardFile(shardPath);
   if (!data) return res.status(404).json({ error: 'Shard not found' });
@@ -3056,8 +3147,8 @@ app.delete('/api/knowledge/shards/:shard/entries/:key', requireWritable, (req, r
 app.delete('/api/knowledge/shards/:shard', requireWritable, (req, res) => {
   const shard = req.params.shard;
   if (!VALID_SHARD_NAME.test(shard)) return res.status(400).json({ error: 'Invalid shard name' });
-  const kdir = getKnowledgeDir();
-  if (!kdir) return res.status(404).json({ error: 'project_path not configured' });
+  const kdir = getKnowledgeDirFromReq(req);
+  if (!kdir) return res.status(404).json({ error: 'knowledge path not configured' });
   const shardPath = path.join(kdir, shard + '.json');
   if (fs.existsSync(shardPath)) fs.unlinkSync(shardPath);
   // Remove from _meta.json
@@ -3104,6 +3195,12 @@ function getAgentRoot() {
   return validation.valid && validation.value ? validation.value : null;
 }
 
+function normalizeProviderAlias(value) {
+  const p = String(value || '').trim().toLowerCase();
+  if (p === 'antigravity' || p === 'googleantigravity') return 'gemini';
+  return p;
+}
+
 const ALLOWED_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
 
 // P08: Parse Role Assignment table from collab_context.md (| role | provider | scope |)
@@ -3120,7 +3217,7 @@ function parseRoleTable(content) {
     const cells = lines[i].split('|').map(c => c.trim()).filter(Boolean);
     if (cells.length >= 2) {
       const role = cells[0];
-      const provider = cells[1];
+      const provider = normalizeProviderAlias(cells[1]);
       const scope = cells[2] || '';
       const assignable = true;
       roles.push({ role, provider, scope, assignable });
@@ -3133,8 +3230,9 @@ function parseRoleTable(content) {
 function updateRoleTableProvider(content, updates) {
   const updateMap = {};
   (updates || []).forEach(u => {
-    if (u && u.role && ALLOWED_PROVIDERS.includes(u.provider)) {
-      updateMap[u.role] = u.provider;
+    const normalized = normalizeProviderAlias(u && u.provider);
+    if (u && u.role && ALLOWED_PROVIDERS.includes(normalized)) {
+      updateMap[u.role] = normalized;
     }
   });
   if (Object.keys(updateMap).length === 0) return content;
@@ -3206,7 +3304,7 @@ app.put('/api/agent/roles', requireWritable, (req, res) => {
     if (!Array.isArray(updates)) {
       return res.status(400).json({ error: 'Body must be an array of { role, provider }' });
     }
-    if (updates.some(u => u && u.role === 'PM' && u.provider !== undefined && !ALLOWED_PROVIDERS.includes(u.provider))) {
+    if (updates.some(u => u && u.role === 'PM' && u.provider !== undefined && !ALLOWED_PROVIDERS.includes(normalizeProviderAlias(u.provider)))) {
       return res.status(400).json({ error: 'PM provider must be one of: ' + ALLOWED_PROVIDERS.join(', ') });
     }
     const content = fs.readFileSync(collabPath, 'utf8');
@@ -3316,6 +3414,28 @@ app.get('/api/folder-children', (req, res) => {
   }
 });
 
+// List shard names from a given knowledge directory path (task-level knowledge path).
+// Example: /api/knowledge/shard-names?path=/repo/.knowledge
+app.get('/api/knowledge/shard-names', (req, res) => {
+  try {
+    const raw = (req.query.path || '').toString().trim();
+    if (!raw) return res.json({ names: [] });
+    const dirPath = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(RDLOOP_ROOT, raw);
+    if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+      return res.json({ names: [] });
+    }
+    const names = fs.readdirSync(dirPath)
+      .filter((f) => f.endsWith('.json'))
+      .filter((f) => f !== '_meta.json')
+      .map((f) => f.replace(/\.json$/, ''))
+      .filter((n) => VALID_SHARD_NAME.test(n))
+      .sort((a, b) => a.localeCompare(b));
+    res.json({ names });
+  } catch (err) {
+    res.status(500).json({ error: err.message, names: [] });
+  }
+});
+
 // Repo picker options for GUI New/Edit forms
 app.get('/api/repo-options', (req, res) => {
   try {
@@ -3418,9 +3538,9 @@ app.put('/api/config', requireWritable, (req, res) => {
         return res.status(400).json({ error: 'default_run_surface must be bridge or visual_ccb' });
       }
       cfg.default_run_surface = default_run_surface;
-      if (cfg.default_execution_mode !== undefined) delete cfg.default_execution_mode;
-      if (cfg._comment_execution_mode !== undefined) delete cfg._comment_execution_mode;
     }
+    if (cfg.default_execution_mode !== undefined) delete cfg.default_execution_mode;
+    if (cfg._comment_execution_mode !== undefined) delete cfg._comment_execution_mode;
     if (agentRootIn !== undefined) {
       const validation = validateAgentRoot(agentRootIn);
       if (!validation.valid) {
@@ -3565,8 +3685,8 @@ function validateTaskSpecData(spec) {
         : providerRaw.includes('opencode') ? 'opencode'
         : providerRaw.includes('droid') ? 'droid'
         : '';
-      if (providerResolved && !['claude', 'codex', 'cursor', 'antigravity'].includes(providerResolved)) {
-        errors.push('solo_agent bridge judge unsupported for provider: ' + providerResolved + ' (supported: claude, codex, cursor, antigravity)');
+      if (providerResolved && !['claude', 'codex', 'cursor', 'antigravity', 'gemini'].includes(providerResolved)) {
+        errors.push('solo_agent bridge judge unsupported for provider: ' + providerResolved + ' (supported: claude, codex, cursor, antigravity, gemini)');
       }
     }
   }
@@ -3576,7 +3696,8 @@ function validateTaskSpecData(spec) {
       errors.push('collab_roles: must be an object');
     } else {
       for (const [role, provider] of Object.entries(spec.collab_roles)) {
-        if (provider !== undefined && provider !== null && !COLLAB_PROVIDERS.includes(String(provider))) {
+        const normalizedProvider = normalizeProviderAlias(provider);
+        if (provider !== undefined && provider !== null && !COLLAB_PROVIDERS.includes(normalizedProvider)) {
           errors.push('collab_roles.' + role + ': must be one of ' + COLLAB_PROVIDERS.join(', '));
         }
       }
@@ -3858,6 +3979,7 @@ app.post('/api/task/:taskId/attempt/:n/solo-abort', requireWritable, (req, res) 
 // POST /api/task_specs/:taskId/run — new instance: unique task_id per run (spec_id + timestamp) so sidebar shows each run
 app.post('/api/task_specs/:taskId/run', requireWritable, (req, res) => {
   const specTaskId = req.params.taskId;
+  const requestedRunSurface = req.body && typeof req.body === 'object' ? req.body.run_surface : undefined;
   if (!validateTaskSpecId(specTaskId)) {
     return res.status(400).json({ error: 'Invalid task_id format' });
   }
@@ -3890,6 +4012,10 @@ app.post('/api/task_specs/:taskId/run', requireWritable, (req, res) => {
     atomicWriteJSON(taskJsonPath, taskPayload);
   } catch (err) {
     return res.status(500).json({ error: `Failed to write task.json: ${err.message}` });
+  }
+  const overrideResult = applyRunSurfaceOverrideToTaskJson(taskJsonPath, requestedRunSurface);
+  if (!overrideResult.ok) {
+    return res.status(400).json({ error: overrideResult.error || 'Invalid run_surface' });
   }
   const guiDir = path.join(taskDir, 'gui');
   fs.mkdirSync(guiDir, { recursive: true });
@@ -3956,6 +4082,51 @@ app.post('/api/task_specs/:taskId/copy', requireWritable, (req, res) => {
 const VALID_PROMPT_NAME = /^[A-Za-z0-9_.\-]+\.md$/;
 function validatePromptName(name) {
   return VALID_PROMPT_NAME.test(name) && !name.includes('..') && !name.includes('/') && !name.includes('\\');
+}
+
+function applyRunSurfaceOverrideToTaskJson(taskPath, requestedRunSurface) {
+  if (!requestedRunSurface) return { ok: true, applied: false };
+  if (!['bridge', 'visual_ccb'].includes(requestedRunSurface)) {
+    return { ok: false, error: 'run_surface must be bridge or visual_ccb' };
+  }
+  const task = readJSON(taskPath);
+  if (!task || typeof task !== 'object') {
+    return { ok: false, error: 'Failed to read task.json' };
+  }
+  const executorType = task.executor_type || '';
+  if (executorType === 'api_call') {
+    return { ok: true, applied: false };
+  }
+  if (executorType === 'multi_agent' && requestedRunSurface !== 'visual_ccb') {
+    return { ok: false, error: 'multi_agent only supports visual_ccb run surface' };
+  }
+
+  task.run_surface = requestedRunSurface;
+  task.execution_mode = requestedRunSurface === 'visual_ccb' ? 'semi-auto' : 'auto';
+
+  if (executorType === 'solo_agent') {
+    if (requestedRunSurface === 'visual_ccb') {
+      task.coder = 'ccb';
+      task.judge = 'ccb';
+    } else {
+      task.coder = 'solo';
+      const model = String(task.coder_model || '').toLowerCase();
+      if (model.includes('codex')) task.judge = 'codex';
+      else if (model.includes('cursor')) task.judge = 'cursor';
+      else if (model.includes('antigravity') || model.includes('gemini')) task.judge = 'antigravity';
+      else task.judge = 'claude';
+    }
+  } else if (executorType === 'multi_agent') {
+    task.coder = 'ccb';
+    task.judge = 'ccb';
+  }
+
+  try {
+    atomicWriteJSON(taskPath, task);
+  } catch (err) {
+    return { ok: false, error: `Failed to write task.json: ${err.message}` };
+  }
+  return { ok: true, applied: true };
 }
 
 // Atomic write for plain text files (D1/D2 — temp → fsync → rename)
@@ -4192,6 +4363,499 @@ app.get('/api/loop-stats', (req, res) => {
     res.json({ stats, total: stats.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+function ensureSimulatorRoots() {
+  if (!fs.existsSync(SIMULATOR_RUNS_DIR)) {
+    fs.mkdirSync(SIMULATOR_RUNS_DIR, { recursive: true });
+  }
+}
+
+function normalizeSimulatorProvider(raw, fallback) {
+  const p = String(raw || '').trim().toLowerCase();
+  if (p === 'googleantigravity' || p === 'antigravity') return 'gemini';
+  const allowed = ['codex', 'claude', 'gemini', 'opencode', 'droid', 'cursor'];
+  if (allowed.includes(p)) return p;
+  return fallback;
+}
+
+function simulatorModelForProvider(provider) {
+  switch (provider) {
+    case 'codex': return 'codex';
+    case 'claude': return 'claude-sonnet-4-5';
+    case 'gemini': return 'gemini-2.5-pro';
+    case 'opencode': return 'opencode';
+    case 'droid': return 'droid';
+    case 'cursor': return 'cursor';
+    default: return provider || 'codex';
+  }
+}
+
+function safeResolveUnder(baseDir, relPath) {
+  const absBase = path.resolve(baseDir);
+  const abs = path.resolve(absBase, relPath);
+  if (abs === absBase || abs.startsWith(absBase + path.sep)) return abs;
+  return null;
+}
+
+function readTextTail(filepath, maxBytes) {
+  try {
+    const st = fs.statSync(filepath);
+    const keep = Math.max(parseInt(maxBytes || 12000, 10), 1);
+    if (st.size <= keep) return fs.readFileSync(filepath, 'utf8');
+    const fd = fs.openSync(filepath, 'r');
+    try {
+      const buf = Buffer.alloc(keep);
+      fs.readSync(fd, buf, 0, keep, st.size - keep);
+      return buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
+function listSimulatorFiles(rootDir, opts = {}) {
+  const maxEntries = Number(opts.maxEntries || 800);
+  const maxDepth = Number(opts.maxDepth || 6);
+  const entries = [];
+  const walk = (dir, depth) => {
+    if (entries.length >= maxEntries || depth > maxDepth) return;
+    let children = [];
+    try { children = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    children.sort((a, b) => a.name.localeCompare(b.name));
+    for (const child of children) {
+      if (entries.length >= maxEntries) break;
+      if (child.isDirectory() && (child.name === '.git' || child.name === 'node_modules')) continue;
+      const abs = path.join(dir, child.name);
+      const rel = path.relative(rootDir, abs).split(path.sep).join('/');
+      try {
+        const st = fs.statSync(abs);
+        if (child.isDirectory()) {
+          entries.push({ path: rel + '/', type: 'dir', size: 0 });
+          walk(abs, depth + 1);
+        } else {
+          entries.push({ path: rel, type: 'file', size: st.size });
+        }
+      } catch {}
+    }
+  };
+  walk(rootDir, 0);
+  return entries;
+}
+
+function readSimulatorManifest(runDir) {
+  return readJSON(path.join(runDir, 'run.json'));
+}
+
+function simulatorRunStatus(manifest) {
+  if (!manifest) return { state: 'unknown', running: false };
+  const taskDir = manifest.task_id ? path.join(manifest.out_dir || '', manifest.task_id) : '';
+  const status = taskDir ? readJSON(path.join(taskDir, 'status.json')) : null;
+  const pid = Number(manifest.pid || 0);
+  const running = pid > 0 && isPidAlive(pid);
+  return {
+    state: status?.state || (running ? 'RUNNING' : 'UNKNOWN'),
+    running,
+    status
+  };
+}
+
+function summarizeSimulatorAttempt(runDir, attemptDir) {
+  const base = path.basename(attemptDir);
+  const numRaw = base.replace(/^attempt_/, '').replace(/^0+/, '');
+  const attempt = parseInt(numRaw || '0', 10) || 0;
+  const coderDir = path.join(attemptDir, 'coder');
+  const judgeDir = path.join(attemptDir, 'judge');
+  const soloDir = path.join(attemptDir, 'solo');
+  const evidence = readJSON(path.join(attemptDir, 'evidence.json'));
+  const env = readJSON(path.join(attemptDir, 'env.json'));
+  const metrics = readJSON(path.join(attemptDir, 'metrics.json'));
+  const verdict = readJSON(path.join(judgeDir, 'verdict.json'));
+  const coderPromptPath = path.join(coderDir, 'prompt.txt');
+  const coderRunLogPath = path.join(coderDir, 'run.log');
+  const judgeRunLogPath = path.join(judgeDir, 'run.log');
+  const soloRequestPath = path.join(soloDir, 'request.json');
+  const soloResponsePath = path.join(soloDir, 'response.json');
+  const coderRunLogTail = readTextTail(coderRunLogPath, 20000);
+  const dispatchLines = coderRunLogTail
+    .split('\n')
+    .filter(line => /dispatching request|provider ping ready|CODER/.test(line))
+    .slice(-20);
+  return {
+    attempt,
+    attempt_dir: path.relative(runDir, attemptDir).split(path.sep).join('/'),
+    worktree_path: evidence?.worktree_path || null,
+    coder_prompt: fs.existsSync(coderPromptPath) ? readTextTail(coderPromptPath, 30000) : '',
+    coder_run_log_tail: coderRunLogTail,
+    judge_run_log_tail: readTextTail(judgeRunLogPath, 20000),
+    solo_request: fs.existsSync(soloRequestPath) ? readTextTail(soloRequestPath, 12000) : '',
+    solo_response: fs.existsSync(soloResponsePath) ? readTextTail(soloResponsePath, 12000) : '',
+    coder_dispatch_lines: dispatchLines,
+    evidence: evidence ? {
+      task_code: evidence.task_code || null,
+      worktree_path: evidence.worktree_path || null,
+      git: evidence.git || null,
+      test: evidence.test || null,
+      commands: evidence.commands || null
+    } : null,
+    metrics: metrics || null,
+    env: env || null,
+    verdict: verdict || null,
+    files: {
+      prompt: fs.existsSync(coderPromptPath) ? path.relative(runDir, coderPromptPath).split(path.sep).join('/') : null,
+      coder_run_log: fs.existsSync(coderRunLogPath) ? path.relative(runDir, coderRunLogPath).split(path.sep).join('/') : null,
+      judge_run_log: fs.existsSync(judgeRunLogPath) ? path.relative(runDir, judgeRunLogPath).split(path.sep).join('/') : null,
+      evidence: fs.existsSync(path.join(attemptDir, 'evidence.json')) ? path.relative(runDir, path.join(attemptDir, 'evidence.json')).split(path.sep).join('/') : null
+    }
+  };
+}
+
+function buildSimulatorBehaviorSummary(taskJson, attempts, events) {
+  const out = [];
+  if (taskJson?.collab_roles && typeof taskJson.collab_roles === 'object') {
+    out.push({
+      type: 'ROLE_INJECTION',
+      detail: `executor=${taskJson.collab_roles.executor || ''}, reviewer=${taskJson.collab_roles.reviewer || ''}`
+    });
+  }
+  for (const a of attempts) {
+    if (a.worktree_path) {
+      out.push({ type: 'WORKTREE_ESTABLISHED', detail: `attempt=${a.attempt} path=${a.worktree_path}` });
+    }
+    if (a.files?.prompt) {
+      out.push({ type: 'INSTRUCTION_WRAPPED', detail: `attempt=${a.attempt} prompt=${a.files.prompt}` });
+    }
+    if (a.coder_dispatch_lines && a.coder_dispatch_lines.length > 0) {
+      out.push({ type: 'ADAPTER_DISPATCH', detail: `attempt=${a.attempt} ${a.coder_dispatch_lines[a.coder_dispatch_lines.length - 1]}` });
+    }
+    if (a.files?.evidence) {
+      out.push({ type: 'ATTEMPT_EVIDENCE_WRITTEN', detail: `attempt=${a.attempt} evidence=${a.files.evidence}` });
+    }
+  }
+  for (const ev of (events || []).slice(-60)) {
+    if (!ev || !ev.type) continue;
+    out.push({
+      type: `EVENT:${ev.type}`,
+      detail: `${ev.ts || ''} ${ev.summary || ''}`.trim()
+    });
+  }
+  return out.slice(-200);
+}
+
+app.get('/api/coordinator-simulator/config', (req, res) => {
+  ensureSimulatorRoots();
+  res.json({
+    root: SIMULATOR_ROOT,
+    runs_dir: SIMULATOR_RUNS_DIR
+  });
+});
+
+app.get('/api/coordinator-simulator/runs', (req, res) => {
+  try {
+    ensureSimulatorRoots();
+    const dirs = fs.readdirSync(SIMULATOR_RUNS_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory() && VALID_SIM_RUN_ID.test(d.name))
+      .map(d => d.name);
+    const runs = [];
+    for (const runId of dirs) {
+      const runDir = path.join(SIMULATOR_RUNS_DIR, runId);
+      const manifest = readSimulatorManifest(runDir);
+      if (!manifest) continue;
+      const rs = simulatorRunStatus(manifest);
+      runs.push({
+        run_id: runId,
+        created_at: manifest.created_at || '',
+        communication: manifest.communication || '',
+        coder_provider: manifest.coder_provider || '',
+        judge_provider: manifest.judge_provider || '',
+        task_id: manifest.task_id || '',
+        pid: manifest.pid || null,
+        state: rs.state,
+        running: rs.running
+      });
+    }
+    runs.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    res.json({ runs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/coordinator-simulator/runs/:runId', (req, res) => {
+  try {
+    const runId = String(req.params.runId || '');
+    if (!VALID_SIM_RUN_ID.test(runId)) return res.status(400).json({ error: 'Invalid run_id' });
+    const runDir = path.join(SIMULATOR_RUNS_DIR, runId);
+    if (!fs.existsSync(runDir)) return res.status(404).json({ error: 'Run not found' });
+    const manifest = readSimulatorManifest(runDir);
+    if (!manifest) return res.status(500).json({ error: 'run.json missing' });
+    const taskDir = manifest.task_id ? path.join(manifest.out_dir || '', manifest.task_id) : '';
+    const taskJson = taskDir ? readJSON(path.join(taskDir, 'task.json')) : null;
+    const status = taskDir ? readJSON(path.join(taskDir, 'status.json')) : null;
+    const events = taskDir ? readEvents(path.join(taskDir, 'events.jsonl')) : [];
+    const attempts = [];
+    if (taskDir && fs.existsSync(taskDir)) {
+      const names = fs.readdirSync(taskDir)
+        .filter(n => /^attempt_\d+$/.test(n))
+        .sort();
+      for (const n of names) {
+        attempts.push(summarizeSimulatorAttempt(runDir, path.join(taskDir, n)));
+      }
+    }
+    const behavior_summary = buildSimulatorBehaviorSummary(taskJson, attempts, events);
+    const runState = simulatorRunStatus(manifest);
+    const file_tree = listSimulatorFiles(runDir, { maxEntries: 1200, maxDepth: 7 });
+    const coordinator_log_tail = manifest.log_path ? readTextTail(manifest.log_path, 40000) : '';
+    res.json({
+      run: {
+        run_id: runId,
+        created_at: manifest.created_at || '',
+        communication: manifest.communication || '',
+        coder_provider: manifest.coder_provider || '',
+        judge_provider: manifest.judge_provider || '',
+        session_mode: manifest.session_mode || '',
+        instruction: manifest.instruction || '',
+        pid: manifest.pid || null,
+        running: runState.running,
+        sandbox_root: manifest.run_dir || runDir,
+        out_dir: manifest.out_dir || '',
+        worktrees_dir: manifest.worktrees_dir || '',
+        repo_dir: manifest.repo_dir || ''
+      },
+      task: taskJson || null,
+      status: status || null,
+      events: events || [],
+      attempts,
+      behavior_summary,
+      coordinator_log_tail,
+      file_tree
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/coordinator-simulator/runs/:runId/file', (req, res) => {
+  try {
+    const runId = String(req.params.runId || '');
+    if (!VALID_SIM_RUN_ID.test(runId)) return res.status(400).json({ error: 'Invalid run_id' });
+    const runDir = path.join(SIMULATOR_RUNS_DIR, runId);
+    if (!fs.existsSync(runDir)) return res.status(404).json({ error: 'Run not found' });
+    const relPath = String(req.query.path || '').trim();
+    if (!relPath) return res.status(400).json({ error: 'path is required' });
+    if (relPath.includes('..')) return res.status(400).json({ error: 'Invalid path' });
+    const abs = safeResolveUnder(runDir, relPath);
+    if (!abs) return res.status(400).json({ error: 'Invalid path' });
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return res.status(404).json({ error: 'File not found' });
+    const maxBytes = 500000;
+    const st = fs.statSync(abs);
+    let content = '';
+    let truncated = false;
+    if (st.size > maxBytes) {
+      content = readTextTail(abs, maxBytes);
+      truncated = true;
+    } else {
+      content = fs.readFileSync(abs, 'utf8');
+    }
+    res.json({
+      path: relPath,
+      size: st.size,
+      truncated,
+      content
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/coordinator-simulator/runs/:runId/stop', requireWritable, (req, res) => {
+  try {
+    const runId = String(req.params.runId || '');
+    if (!VALID_SIM_RUN_ID.test(runId)) return res.status(400).json({ error: 'Invalid run_id' });
+    const runDir = path.join(SIMULATOR_RUNS_DIR, runId);
+    if (!fs.existsSync(runDir)) return res.status(404).json({ error: 'Run not found' });
+    const runJsonPath = path.join(runDir, 'run.json');
+    const manifest = readJSON(runJsonPath);
+    if (!manifest) return res.status(500).json({ error: 'run.json missing' });
+    const pid = Number(manifest.pid || 0);
+    if (!pid || !isPidAlive(pid)) {
+      return res.json({ ok: true, stopped: false, message: 'process not running' });
+    }
+    let signalled = false;
+    try {
+      process.kill(-pid, 'SIGTERM');
+      signalled = true;
+    } catch {
+      try {
+        process.kill(pid, 'SIGTERM');
+        signalled = true;
+      } catch {}
+    }
+    const updated = {
+      ...manifest,
+      stopped_at: new Date().toISOString()
+    };
+    atomicWriteJSON(runJsonPath, updated);
+    res.json({ ok: true, stopped: signalled, pid });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/coordinator-simulator/runs/:runId', requireWritable, (req, res) => {
+  try {
+    const runId = String(req.params.runId || '');
+    if (!VALID_SIM_RUN_ID.test(runId)) return res.status(400).json({ error: 'Invalid run_id' });
+    const runDir = path.join(SIMULATOR_RUNS_DIR, runId);
+    if (!fs.existsSync(runDir)) return res.status(404).json({ error: 'Run not found' });
+    const manifest = readSimulatorManifest(runDir);
+    const pid = Number(manifest?.pid || 0);
+    if (pid > 0 && isPidAlive(pid)) {
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch {
+        try { process.kill(pid, 'SIGTERM'); } catch {}
+      }
+    }
+    fs.rmSync(runDir, { recursive: true, force: true });
+    res.json({ ok: true, run_id: runId, removed: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/coordinator-simulator/run', requireWritable, (req, res) => {
+  try {
+    ensureSimulatorRoots();
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const instruction = String(body.instruction || '').trim();
+    if (!instruction) {
+      return res.status(400).json({ error: 'instruction is required' });
+    }
+    const communication = String(body.communication || 'bridge').trim().toLowerCase() === 'ccb' ? 'ccb' : 'bridge';
+    const coderProvider = normalizeSimulatorProvider(body.coder_provider, 'codex');
+    const judgeProvider = normalizeSimulatorProvider(body.judge_provider, coderProvider);
+    const sessionModeRaw = String(body.session_mode || 'continuous').trim().toLowerCase();
+    const session_mode = ['fresh', 'iterative', 'continuous'].includes(sessionModeRaw) ? sessionModeRaw : 'continuous';
+    const max_attempts = Math.min(Math.max(parseInt(body.max_attempts, 10) || 1, 1), 6);
+    const coder_timeout_seconds = Math.min(Math.max(parseInt(body.coder_timeout_seconds, 10) || 180, 15), 3600);
+    const judge_timeout_seconds = Math.min(Math.max(parseInt(body.judge_timeout_seconds, 10) || 120, 15), 3600);
+    const test_timeout_seconds = Math.min(Math.max(parseInt(body.test_timeout_seconds, 10) || 60, 5), 1200);
+    const test_cmd = String(body.test_cmd || 'true').trim().slice(0, 500) || 'true';
+    const base_ref = String(body.base_ref || 'main').trim().slice(0, 120) || 'main';
+
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_');
+    const suffix = crypto.randomBytes(3).toString('hex');
+    const runId = `sim_${stamp}_${suffix}`;
+    const runDir = path.join(SIMULATOR_RUNS_DIR, runId);
+    const sandboxDir = path.join(runDir, 'sandbox');
+    const repoDir = path.join(sandboxDir, 'repo');
+    const outDir = path.join(sandboxDir, 'out');
+    const worktreesDir = path.join(sandboxDir, 'worktrees');
+    const runtimeDir = path.join(runDir, 'runtime');
+    fs.mkdirSync(repoDir, { recursive: true });
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.mkdirSync(worktreesDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+
+    const taskId = `coord_sim_${stamp.replace(/[^0-9_]/g, '')}_${suffix}`;
+    const taskSpecPath = path.join(sandboxDir, 'task_spec.json');
+
+    const taskSpec = {
+      schema_version: 'v1',
+      task_id: taskId,
+      task_type: 'engineering_impl',
+      execution_mode: communication === 'ccb' ? 'semi-auto' : 'auto',
+      channel_type: communication,
+      run_surface: communication === 'ccb' ? 'visual_ccb' : 'bridge',
+      repo_path: repoDir,
+      base_ref,
+      goal: instruction,
+      acceptance: 'Use this run to expose coordinator behavior and generated artifacts.',
+      test_cmd,
+      max_attempts,
+      coder_timeout_seconds,
+      judge_timeout_seconds,
+      test_timeout_seconds,
+      attempt_context_mode: 'fresh_each',
+      constraints: [],
+      allowed_paths: [],
+      forbidden_globs: ['**/.env', '**/secrets*', '**/*.pem'],
+      coder: communication === 'ccb' ? 'ccb' : 'solo',
+      judge: communication === 'ccb' ? 'ccb' : 'codex',
+      coder_model: simulatorModelForProvider(coderProvider),
+      judge_model: simulatorModelForProvider(judgeProvider),
+      executor_instruction: instruction,
+      executor_type: 'solo_agent',
+      session_mode,
+      workflow_mode: 'solo',
+      knowledge_enabled: false,
+      knowledge_project_path: '',
+      collab_roles: {
+        executor: coderProvider,
+        reviewer: judgeProvider
+      },
+      agent_config: {
+        max_attempts: 10,
+        auto_pass_threshold: 0.85,
+        knowledge_shards: [],
+        provider: coderProvider
+      }
+    };
+    atomicWriteJSON(taskSpecPath, taskSpec);
+    fs.writeFileSync(path.join(repoDir, 'README.md'), `# Coordinator Simulator Sandbox\n\nRun ID: ${runId}\nTask ID: ${taskId}\n`, 'utf8');
+
+    const coordinatorLogPath = path.join(runtimeDir, 'coordinator.log');
+    const runJsonPath = path.join(runDir, 'run.json');
+    const manifest = {
+      run_id: runId,
+      created_at: now.toISOString(),
+      communication,
+      coder_provider: coderProvider,
+      judge_provider: judgeProvider,
+      session_mode,
+      instruction,
+      run_dir: runDir,
+      sandbox_dir: sandboxDir,
+      repo_dir: repoDir,
+      out_dir: outDir,
+      worktrees_dir: worktreesDir,
+      task_id: taskId,
+      task_spec_path: taskSpecPath,
+      log_path: coordinatorLogPath
+    };
+    atomicWriteJSON(runJsonPath, manifest);
+
+    const logFd = fs.openSync(coordinatorLogPath, 'a');
+    const env = {
+      ...getCoordinatorEnv(),
+      RDLOOP_OUT_DIR: outDir,
+      RDLOOP_WORKTREES_DIR: worktreesDir
+    };
+    const child = spawn('bash', [COORDINATOR, taskSpecPath], {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      cwd: RDLOOP_ROOT,
+      env
+    });
+    fs.closeSync(logFd);
+    child.unref();
+    const withPid = { ...manifest, pid: child.pid };
+    atomicWriteJSON(runJsonPath, withPid);
+
+    res.json({
+      ok: true,
+      run_id: runId,
+      task_id: taskId,
+      pid: child.pid,
+      sandbox_root: runDir
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

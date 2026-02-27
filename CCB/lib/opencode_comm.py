@@ -1610,6 +1610,8 @@ class OpenCodeCommunicator:
                 if not pane_alive:
                     if self.terminal == "wezterm":
                         err = getattr(self.backend, "last_list_error", None)
+                        if callable(err):
+                            err = err()
                         if err:
                             return False, f"WezTerm CLI error: {err}"
                     return False, f"{self.terminal} session {self.pane_id} not found"

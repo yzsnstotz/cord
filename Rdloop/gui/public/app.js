@@ -15,6 +15,36 @@ let activeTab = sessionStorage.getItem('rdloop_activeTab') || 'coordinator';
 // B1-4: AutoScroll persisted in localStorage
 let autoScroll = localStorage.getItem('rdloop_autoScroll') !== 'false';
 
+// Sidebar toggle state
+let sidebarCollapsed = localStorage.getItem('rdloop_sidebarCollapsed') === 'true';
+
+function updateSidebarUI() {
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('toggle-sidebar');
+  if (sidebar) {
+    sidebar.classList.toggle('collapsed', sidebarCollapsed);
+  }
+  if (toggle) {
+    toggle.style.left = sidebarCollapsed ? '10px' : '310px';
+    const svg = toggle.querySelector('svg');
+    if (svg) {
+      svg.style.transform = sidebarCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const toggleBtn = document.getElementById('toggle-sidebar');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () => {
+      sidebarCollapsed = !sidebarCollapsed;
+      localStorage.setItem('rdloop_sidebarCollapsed', sidebarCollapsed);
+      updateSidebarUI();
+    });
+  }
+  updateSidebarUI();
+});
+
 // B1-2: etag per logName for If-None-Match
 let liveLogEtag = {};
 
@@ -35,7 +65,8 @@ function escapeHtml(str) {
 }
 
 function providerDisplayName(provider) {
-  return String(provider || '').toLowerCase() === 'gemini' ? 'Gemini' : String(provider || '');
+  const p = String(provider || '').toLowerCase();
+  return (p === 'gemini' || p === 'antigravity' || p === 'googleantigravity') ? 'Gemini' : String(provider || '');
 }
 
 // Decode JSON-style Unicode escapes (\uXXXX) so coder_output and evidence display correctly
@@ -57,6 +88,22 @@ function badge(state) {
 async function api(path, opts) {
   const res = await fetch(`/api${path}`, opts);
   return res.json();
+}
+
+function setButtonLoading(btn, isLoading) {
+  if (!btn) return;
+  if (isLoading) {
+    btn.dataset.originalText = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner"></span>';
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+  } else {
+    if (btn.dataset.originalText) {
+      btn.innerHTML = btn.dataset.originalText;
+    }
+    btn.disabled = false;
+    btn.classList.remove('btn-loading');
+  }
 }
 
 // K7-1: READ_ONLY from /api/health; disable write buttons and show banner
@@ -87,10 +134,17 @@ function updateReadOnlyBanner() {
   document.querySelectorAll('.write-action').forEach(b => { b.disabled = readOnlyMode; });
 }
 
-// P10: Settings panel — agent_root, default_run_surface, coder/judge defaults; save all at once
+// P10: Settings panel — agent_root + run-surface default + coder/judge defaults
 let settingsConfigSnapshot = null;
+let useDefaultRunSurface = localStorage.getItem('rdloop_use_default_run_surface') === 'true';
 
 const ALLOWED_ROLE_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
+
+function normalizeRoleProvider(provider) {
+  const p = String(provider || '').trim().toLowerCase();
+  if (p === 'antigravity' || p === 'googleantigravity') return 'gemini';
+  return p;
+}
 
 async function openSettingsPanel() {
   const old = document.getElementById('settings-modal');
@@ -116,7 +170,7 @@ async function openSettingsPanel() {
   settingsConfigSnapshot = { ...cfg };
   const agentRoot = (cfg.agent_root && cfg.agent_root.length) ? cfg.agent_root : '';
   const ccbPath = (cfg.ccb_path && cfg.ccb_path.length) ? cfg.ccb_path : '';
-  const runSurface = cfg.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
+  const defaultRunSurface = cfg.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
   const coderSel = buildAdapterSelector('settings-coder', cfg.default_coder || '', cfg.default_coder_model || '');
   const judgeSel = buildAdapterSelector('settings-judge', cfg.default_judge || '', cfg.default_judge_model || '');
 
@@ -154,12 +208,11 @@ async function openSettingsPanel() {
         </div>
 
         <div style="margin-bottom:12px">
-          <label class="form-label">Default run surface (solo/multi-agent)</label>
-          <select id="settings-run-surface" class="form-select" style="width:auto;margin-top:6px" onchange="onSettingsRunSurfaceChange()">
-            <option value="bridge" ${runSurface === 'bridge' ? 'selected' : ''}>Bridge / solo_bridge — non-visual</option>
-            <option value="visual_ccb" ${runSurface === 'visual_ccb' ? 'selected' : ''}>Visual CCB — run in visible CCB session</option>
+          <label class="form-label">Default run surface (used only when "Use default" is checked at Run)</label>
+          <select id="settings-run-surface" class="form-select" style="width:auto;margin-top:6px">
+            <option value="bridge" ${defaultRunSurface === 'bridge' ? 'selected' : ''}>Non-visible (bridge / solo_bridge)</option>
+            <option value="visual_ccb" ${defaultRunSurface === 'visual_ccb' ? 'selected' : ''}>Visible (CCB session)</option>
           </select>
-          <div id="settings-ccb-hint" style="display:none;margin-top:8px;padding:8px;background:#3d2e00;border:1px solid #9e6a00;border-radius:6px;font-size:12px;color:#d4a012"></div>
         </div>
 
         <div style="margin-bottom:12px">
@@ -177,29 +230,6 @@ async function openSettingsPanel() {
             <span>使用 WezTerm 打开所有 CI 窗口</span>
           </label>
           <div style="font-size:12px;margin-top:4px;color:#8b949e">${cfg.wezterm_available ? '勾选后，点击任意 provider 的「打开终端」将改为在 WezTerm 中打开并传入当前配置的全部 providers。' : '需安装 WezTerm：brew install wezterm'}</div>
-        </div>
-
-        <div style="margin-bottom:12px">
-          <details>
-            <summary class="form-label" style="cursor:pointer">Knowledge Agent</summary>
-            <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-              <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
-                <input type="checkbox" id="settings-knowledge-enabled" ${cfg.knowledge_enabled ? 'checked' : ''}>
-                <span>Enable knowledge agent</span>
-              </label>
-              <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Provider</label>
-                <select id="settings-knowledge-provider" class="form-select" style="width:auto">
-                  ${['codex','gemini','claude','opencode'].map(p => '<option value="'+p+'" '+(cfg.knowledge_provider===p?'selected':'')+'>'+providerDisplayName(p)+'</option>').join('')}
-                </select>
-              </div>
-              <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Project path</label>
-                <input type="text" id="settings-knowledge-project" class="form-input" value="${escapeHtml(cfg.knowledge_project_path || cfg.ccb_work_dir || '')}" placeholder="/path/to/project" style="width:100%">
-              </div>
-              <button type="button" class="btn" onclick="openKnowledgeViewer()" style="font-size:12px">View Knowledge</button>
-            </div>
-          </details>
         </div>
 
         <div style="margin-bottom:12px" id="settings-roles-section">
@@ -242,7 +272,6 @@ async function openSettingsPanel() {
   if (agentRootEl) {
     agentRootEl.addEventListener('blur', validateSettingsAgentRoot);
   }
-  onSettingsRunSurfaceChange();
   refreshModelSelector('settings-coder').catch(() => {});
   refreshModelSelector('settings-judge').catch(() => {});
 }
@@ -358,9 +387,8 @@ async function submitSettings() {
     if (agentRootEl) agentRootEl.value = s.agent_root || '';
     const ccbPathEl = document.getElementById('settings-ccb-path');
     if (ccbPathEl) ccbPathEl.value = s.ccb_path || '';
-    const runSurface = s.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
     const runSurfaceEl = document.getElementById('settings-run-surface');
-    if (runSurfaceEl) runSurfaceEl.value = runSurface;
+    if (runSurfaceEl) runSurfaceEl.value = s.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
     const ch = inferChannelFromAdapter(s.default_coder);
     const channelEl = document.getElementById('adapter-settings-channel-type');
     if (channelEl) channelEl.value = ch;
@@ -402,9 +430,6 @@ async function submitSettings() {
     default_coder_model: payloadCoderModel,
     default_judge_model: payloadJudgeModel,
     use_wezterm_for_all,
-    knowledge_enabled: document.getElementById('settings-knowledge-enabled')?.checked || false,
-    knowledge_provider: document.getElementById('settings-knowledge-provider')?.value || 'codex',
-    knowledge_project_path: (document.getElementById('settings-knowledge-project')?.value || '').trim()
   };
 
   try {
@@ -460,19 +485,38 @@ async function hideTask(taskId, e) {
 // P07/P12: CCB status and banner — v3.3: guide to CCB session panel
 let ccbStatus = { cask: { status: 'unavailable' }, gask: { status: 'unavailable' } };
 let configForBanner = { project_path: null };
+let ccbBannerDismissed = false;
+
+function dismissCcbBanner() {
+  ccbBannerDismissed = true;
+  const el = document.getElementById('ccb-warn-banner');
+  if (el) el.remove();
+}
 
 function switchView(view) {
+  const isTasks = view === 'tasks';
   const isCcb = view === 'ccb';
-  document.getElementById('content').style.display = isCcb ? 'none' : 'block';
+  const isSimulator = view === 'simulator';
+  document.getElementById('content').style.display = isTasks ? 'block' : 'none';
   document.getElementById('ccb-panel').style.display = isCcb ? 'block' : 'none';
-  document.getElementById('nav-tasks').classList.toggle('active', !isCcb);
+  document.getElementById('simulator-panel').style.display = isSimulator ? 'block' : 'none';
+  document.getElementById('nav-tasks').classList.toggle('active', isTasks);
   document.getElementById('nav-ccb').classList.toggle('active', isCcb);
+  document.getElementById('nav-simulator').classList.toggle('active', isSimulator);
   if (isCcb) {
     renderCcbPanel();
     startCcbPanelPolling();
-  } else {
-    stopCcbPanelPolling();
+    stopSimulatorPanelPolling();
+    return;
   }
+  if (isSimulator) {
+    renderSimulatorPanel();
+    startSimulatorPanelPolling();
+    stopCcbPanelPolling();
+    return;
+  }
+  stopCcbPanelPolling();
+  stopSimulatorPanelPolling();
 }
 
 let ccbPanelPollTimer = null;
@@ -488,6 +532,26 @@ function startCcbPanelPolling() {
 }
 function stopCcbPanelPolling() {
   if (ccbPanelPollTimer) { clearTimeout(ccbPanelPollTimer); ccbPanelPollTimer = null; }
+}
+
+let simulatorPanelPollTimer = null;
+let simulatorDetailHovering = false;
+let simulatorDetailPendingRefresh = false;
+function startSimulatorPanelPolling() {
+  stopSimulatorPanelPolling();
+  function tick() {
+    if (document.getElementById('simulator-panel')?.style.display === 'block') {
+      refreshSimulatorPanelContent();
+      simulatorPanelPollTimer = setTimeout(tick, 3000);
+    }
+  }
+  tick();
+}
+function stopSimulatorPanelPolling() {
+  if (simulatorPanelPollTimer) {
+    clearTimeout(simulatorPanelPollTimer);
+    simulatorPanelPollTimer = null;
+  }
 }
 
 async function refreshCcbPanelContent() {
@@ -535,9 +599,9 @@ function updateCcbProviderRows(providers, tmuxOk) {
       if (actionsDiv) {
         let primaryBtn = '';
         let secondaryBtn = '';
-        primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'])" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
+        primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'], event)" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
         if (!(isOff || (!isOn && !isRunning))) {
-          secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'])" title="Stop ${escapeHtml(providerDisplayName(p.provider))}">Stop</button>`;
+          secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'], false, event)" title="Stop ${escapeHtml(providerDisplayName(p.provider))}">Stop</button>`;
         }
         actionsDiv.innerHTML = primaryBtn + secondaryBtn;
       }
@@ -613,9 +677,9 @@ async function renderCcbPanel() {
     // Primary action: Start if off, Open if running
     let primaryBtn = '';
     let secondaryBtn = '';
-    primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'])" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
+    primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'], event)" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
     if (!(isOff || (!isOn && !isRunning))) {
-      secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'])" title="Stop ${escapeHtml(providerDisplayName(p.provider))}">Stop</button>`;
+      secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'], false, event)" title="Stop ${escapeHtml(providerDisplayName(p.provider))}">Stop</button>`;
     }
 
     return `
@@ -653,11 +717,11 @@ async function renderCcbPanel() {
     <div class="ccb-cards-grid">${providerCards}</div>
 
     <div class="ccb-global-actions">
-      <button type="button" class="btn btn-primary write-action" onclick="ccbStartAll()" ${!tmuxOk ? 'disabled' : ''}>Start All</button>
-      <button type="button" class="btn btn-danger write-action" onclick="ccbStopAll()">Stop All</button>
-      ${ccbInstance.running ? `<button type="button" class="btn btn-danger write-action" onclick="ccbKillInstance()" title="Kill the currently active CCB process (PID ${escapeHtml(String(ccbInstance.pid))})">Kill CCB</button>` : ''}
-      ${weztermAvailable ? `<button type="button" class="btn write-action" onclick="ccbOpenWezTermWithConfig()" title="Open all agents in WezTerm">WezTerm</button>` : ''}
-      <button type="button" class="btn write-action" onclick="ccbAgentStatus()" title="Run ccb-agent-status.sh (askd, legacy daemons, provider ping)">Agent status</button>
+      <button type="button" class="btn btn-primary write-action" onclick="ccbStartAll(event)" ${!tmuxOk ? 'disabled' : ''}>Start All</button>
+      <button type="button" class="btn btn-danger write-action" onclick="ccbStopAll(event)">Stop All</button>
+      ${ccbInstance.running ? `<button type="button" class="btn btn-danger write-action" onclick="ccbKillInstance(event)" title="Kill the currently active CCB process (PID ${escapeHtml(String(ccbInstance.pid))})">Kill CCB</button>` : ''}
+      ${weztermAvailable ? `<button type="button" class="btn write-action" onclick="ccbOpenWezTermWithConfig(event)" title="Open all agents in WezTerm">WezTerm</button>` : ''}
+      <button type="button" class="btn write-action" onclick="ccbAgentStatus(event)" title="Run ccb-agent-status.sh (askd, legacy daemons, provider ping)">Agent status</button>
       <span class="ccb-process-info">CCB: ${ccbProcessHtml}</span>
     </div>
 
@@ -701,50 +765,56 @@ async function renderCcbPanel() {
   if (logEl) logEl.textContent = (logRes.log || '').trim() || '(no log)';
 }
 
-async function ccbStartProviders(providers) {
-  const cfg = await api('/config').catch(() => ({}));
-  const notice = document.getElementById('ccb-panel-notice');
-
-  // If use_wezterm_for_all is enabled, route through WezTerm instead of tmux
-  if (cfg.use_wezterm_for_all) {
-    await ccbOpenWezTermAndRun(providers);
-    return;
-  }
-
-  if (notice) { notice.textContent = 'Starting ' + providers.map(providerDisplayName).join(', ') + '... (waiting for session)'; notice.style.color = '#8b949e'; }
+async function ccbStartProviders(providers, e) {
+  const btn = e ? e.currentTarget : null;
+  setButtonLoading(btn, true);
   try {
-    const res = await fetch('/api/ccb/session/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providers })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      if (notice) notice.textContent = '';
-      alert(data.error || data.hint || 'Start failed');
+    const cfg = await api('/config').catch(() => ({}));
+    const notice = document.getElementById('ccb-panel-notice');
+
+    // If use_wezterm_for_all is enabled, route through WezTerm instead of tmux
+    if (cfg.use_wezterm_for_all) {
+      await ccbOpenWezTermAndRun(providers);
       return;
     }
-    const ids = (data.session_ids || []).join(', ') || providers.map(providerDisplayName).join(', ');
-    if (notice) {
-      notice.textContent = 'Started: ' + ids + (data.hint ? '. ' + data.hint : '');
-      notice.style.color = '#3fb950';
-      setTimeout(() => { if (notice) notice.textContent = ''; }, 5000);
+
+    if (notice) { notice.textContent = 'Starting ' + providers.map(providerDisplayName).join(', ') + '... (waiting for session)'; notice.style.color = '#8b949e'; }
+    try {
+      const res = await fetch('/api/ccb/session/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providers })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (notice) notice.textContent = '';
+        alert(data.error || data.hint || 'Start failed');
+        return;
+      }
+      const ids = (data.session_ids || []).join(', ') || providers.map(providerDisplayName).join(', ');
+      if (notice) {
+        notice.textContent = 'Started: ' + ids + (data.hint ? '. ' + data.hint : '');
+        notice.style.color = '#3fb950';
+        setTimeout(() => { if (notice) notice.textContent = ''; }, 5000);
+      }
+      // Auto-open terminal if configured
+      const hasAttachableSession = Array.isArray(data.session_ids) && data.session_ids.length > 0;
+      // Avoid duplicate windows: fresh start already opens a terminal window from backend.
+      // Auto-attach only when reusing an existing session.
+      if (hasAttachableSession && data.reused === true) {
+        const providerToOpen = (providers && providers.length > 0) ? providers[0] : 'codex';
+        setTimeout(() => {
+          ccbAttachProvider(providerToOpen);
+        }, 1500);
+      }
+      // Poll status so cards update
+      [2000, 4000, 6000, 8000, 12000, 16000].forEach(ms => setTimeout(refreshCcbPanelContent, ms));
+    } catch (e) {
+      if (notice) notice.textContent = '';
+      alert(e?.message || 'Start failed');
     }
-    // Auto-open terminal if configured
-    const hasAttachableSession = Array.isArray(data.session_ids) && data.session_ids.length > 0;
-    // Avoid duplicate windows: fresh start already opens a terminal window from backend.
-    // Auto-attach only when reusing an existing session.
-    if (hasAttachableSession && data.reused === true) {
-      const providerToOpen = (providers && providers.length > 0) ? providers[0] : 'codex';
-      setTimeout(() => {
-        ccbAttachProvider(providerToOpen);
-      }, 1500);
-    }
-    // Poll status so cards update
-    [2000, 4000, 6000, 8000, 12000, 16000].forEach(ms => setTimeout(refreshCcbPanelContent, ms));
-  } catch (e) {
-    if (notice) notice.textContent = '';
-    alert(e?.message || 'Start failed');
+  } finally {
+    setButtonLoading(btn, false);
   }
 }
 
@@ -912,12 +982,14 @@ async function ccbAttachSession(sessionName) {
   }
 }
 
-async function ccbStopProviders(providers, skipRunningCheck) {
+async function ccbStopProviders(providers, skipRunningCheck, e) {
+  const btn = e ? e.currentTarget : null;
   if (!skipRunningCheck) {
     const tasksRes = await api('/tasks?limit=100').catch(() => ({ items: [] }));
     const runningSemi = (tasksRes.items || []).filter(t => t.state === 'RUNNING' && t.execution_mode === 'semi-auto');
     if (runningSemi.length > 0 && !confirm(runningSemi.length + ' semi-auto task(s) running. Stopping will pause them. Continue?')) return;
   }
+  setButtonLoading(btn, true);
   try {
     await fetch('/api/ccb/session/stop', {
       method: 'POST',
@@ -927,24 +999,28 @@ async function ccbStopProviders(providers, skipRunningCheck) {
     setTimeout(refreshCcbPanelContent, 1000);
   } catch (e) {
     alert(e?.message || 'Stop failed');
+  } finally {
+    setButtonLoading(btn, false);
   }
 }
 
-async function ccbStopAll() {
+async function ccbStopAll(e) {
   const tasksRes = await api('/tasks?limit=100').catch(() => ({ items: [] }));
   const runningSemi = (tasksRes.items || []).filter(t => t.state === 'RUNNING' && t.execution_mode === 'semi-auto');
   const msg = runningSemi.length > 0
     ? runningSemi.length + ' semi-auto task(s) running. Stopping CCB will pause them. Continue?'
     : 'Stop all CCB sessions?';
   if (!confirm(msg)) return;
-  await ccbStopProviders([], true);
+  await ccbStopProviders([], true, e);
 }
 
 /** Kill the currently active CCB process (lock-holder). */
-async function ccbKillInstance() {
+async function ccbKillInstance(e) {
+  const btn = e ? e.currentTarget : null;
   if (!confirm('Kill the currently active CCB process? This will terminate the CCB daemon (tmux/WezTerm session may remain until closed).')) return;
   const notice = document.getElementById('ccb-panel-notice');
   if (notice) { notice.textContent = 'Killing CCB...'; notice.style.color = '#8b949e'; }
+  setButtonLoading(btn, true);
   try {
     const res = await fetch('/api/ccb/session/kill-instance', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
     const data = await res.json().catch(() => ({}));
@@ -962,6 +1038,8 @@ async function ccbKillInstance() {
   } catch (e) {
     if (notice) notice.textContent = '';
     alert(e?.message || 'Kill failed');
+  } finally {
+    setButtonLoading(btn, false);
   }
 }
 
@@ -997,10 +1075,10 @@ async function ccbAgentStatus() {
 }
 
 // Start all configured providers (or default set)
-async function ccbStartAll() {
+async function ccbStartAll(e) {
   const cfg = await api('/ccb/config').catch(() => ({ providers: [] }));
   const providers = (cfg.providers && cfg.providers.length) ? cfg.providers : ['codex', 'gemini', 'opencode', 'claude'];
-  await ccbStartProviders(providers);
+  await ccbStartProviders(providers, e);
 }
 
 async function saveCcbConfig() {
@@ -1040,16 +1118,17 @@ function renderCcbBanner(items, status, config, sessionStatus) {
   if (!hasSemiAuto || !ccbUnavailable) {
     const el = document.getElementById('ccb-warn-banner');
     if (el) el.remove();
+    if (!hasSemiAuto) ccbBannerDismissed = false;
     return;
   }
+  if (ccbBannerDismissed) return;
   if (document.getElementById('ccb-warn-banner')) return;
   const banner = document.createElement('div');
   banner.id = 'ccb-warn-banner';
   banner.style.cssText = 'padding:10px 16px;background:#d2992233;border-bottom:1px solid #d29922;color:#d29922;font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:12px';
   banner.innerHTML = `
-    <span>CCB not running — semi-auto tasks need active agent sessions.</span>
-    <button type="button" class="btn btn-primary" style="padding:4px 12px" onclick="switchView('ccb'); document.getElementById('ccb-warn-banner')?.remove();">Go to Agents</button>
-    <button type="button" class="btn" style="padding:2px 8px" onclick="document.getElementById('ccb-warn-banner')?.remove()">Dismiss</button>
+    <span>CCB/providers currently offline. Run/Resume will auto-bootstrap provider sessions when needed.</span>
+    <button type="button" class="btn" style="padding:2px 8px" onclick="dismissCcbBanner()">Dismiss</button>
   `;
   document.body.prepend(banner);
 }
@@ -1090,8 +1169,8 @@ async function loadTasks() {
         <div style="min-width:0;flex:1">
           <div class="task-id">${escapeHtml(t.task_id)}${t.execution_mode === 'semi-auto' ? ' <span style="font-size:10px;color:#8b949e" title="semi-auto">⟳</span>' : ''}</div>
           <div class="task-meta">
-            ${badge(t.state)}
-            attempt ${escapeHtml(String(t.current_attempt || 0))} · ${escapeHtml(t.last_decision || '-')}
+            <span class="task-state-tag">${escapeHtml(t.state)}</span>
+            <span style="font-size:11px;color:#8b949e">att ${escapeHtml(String(t.current_attempt || 0))} · ${escapeHtml(t.last_decision || '-')}</span>
           </div>
         </div>
         <button type="button" class="btn write-action" style="flex-shrink:0;padding:2px 6px;font-size:12px;line-height:1;opacity:0.7" onclick="hideTask('${escapeHtml(t.task_id)}', event)" title="Hide from list">×</button>
@@ -1225,6 +1304,21 @@ function updateTaskMeta(data) {
 
   const metaMsg = document.getElementById('meta-message');
   if (metaMsg) metaMsg.textContent = s.message || '-';
+
+  const questionsContainer = document.getElementById('questions-for-user-container');
+  if (questionsContainer) {
+    if (s.state !== 'RUNNING' && Array.isArray(s.questions_for_user) && s.questions_for_user.length > 0) {
+      questionsContainer.innerHTML = `
+        <div class="questions-banner">
+          <strong>Questions for user:</strong>
+          <ul>
+            ${s.questions_for_user.map(q => `<li>${escapeHtml(q)}</li>`).join('')}
+          </ul>
+        </div>`;
+    } else {
+      questionsContainer.innerHTML = '';
+    }
+  }
 }
 
 // Select and load task (full render only on task change)
@@ -1258,48 +1352,11 @@ async function selectTask(taskId) {
   loadTasks(); // refresh active state in sidebar
 }
 
-// P14: Guide card when PAUSED due to CCB unavailable
-let ccbGuidePollTimer = null;
-function startCcbGuidePolling() {
-  if (ccbGuidePollTimer) return;
-  function tick() {
-    const card = document.getElementById('ccb-guide-card');
-    if (!card || card.closest('#content')?.style.display === 'none') {
-      if (ccbGuidePollTimer) { clearTimeout(ccbGuidePollTimer); ccbGuidePollTimer = null; }
-      return;
-    }
-    api('/ccb/session-status').then(r => {
-      const providers = r.providers || [];
-      const anyOk = providers.some(p => p.status === 'ok');
-      const btn = document.getElementById('ccb-guide-continue-btn');
-      if (btn) btn.disabled = !anyOk;
-    }).catch(() => {});
-    ccbGuidePollTimer = setTimeout(tick, 5000);
-  }
-  tick();
-}
-
 // Full task render — called once per task switch
 function renderTask(data) {
   const { task, status, final_summary, attempts, timeline } = data;
   const s = status || {};
   const content = document.getElementById('content');
-
-  if (s.state === 'PAUSED' && s.pause_reason_code === 'PAUSED_CODER_CCB_UNAVAILABLE') {
-    content.innerHTML = `
-    <div id="ccb-guide-card" style="background:#161b22;border:1px solid #d29922;border-radius:12px;padding:24px;max-width:560px">
-      <h2 style="margin-top:0;color:#d29922">Agents Not Running</h2>
-      <p style="margin-bottom:16px">This task requires CCB (semi-auto mode). No agents are online, task is paused.</p>
-      <p style="margin-bottom:16px;font-size:13px;color:#8b949e">Go to the Agents panel to start providers, then return here to continue.</p>
-      <div style="display:flex;gap:12px;flex-wrap:wrap">
-        <button type="button" class="btn btn-primary" onclick="switchView('ccb')">Go to Agents</button>
-        <button type="button" class="btn btn-primary" id="ccb-guide-continue-btn" disabled onclick="switchView('tasks'); doRunNext();">Resume Task</button>
-      </div>
-    </div>`;
-    content.className = '';
-    startCcbGuidePolling();
-    return;
-  }
 
   content.innerHTML = `
     <h2 id="task-heading">${escapeHtml(s.task_id || currentTaskId)} <span id="task-heading-badge">${badge(s.state)}</span></h2>
@@ -1323,22 +1380,28 @@ function renderTask(data) {
       </div>
     </div>
 
-    ${Array.isArray(s.questions_for_user) && s.questions_for_user.length > 0 ? `
-      <div style="background:#d2992233;border:1px solid #d29922;border-radius:8px;padding:12px;margin-bottom:16px">
-        <strong>Questions for user:</strong>
-        <ul style="margin-top:8px;padding-left:20px">
-          ${s.questions_for_user.map(q => `<li>${escapeHtml(q)}</li>`).join('')}
-        </ul>
-      </div>
-    ` : ''}
+    <div id="questions-for-user-container">
+      ${s.state !== 'RUNNING' && Array.isArray(s.questions_for_user) && s.questions_for_user.length > 0 ? `
+        <div class="questions-banner">
+          <strong>Questions for user:</strong>
+          <ul>
+            ${s.questions_for_user.map(q => `<li>${escapeHtml(q)}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
+    </div>
 
     <div class="controls">
-      <button class="btn btn-danger write-action" ${(s.state !== 'RUNNING') ? 'disabled' : ''} onclick="doControl('PAUSE')" title="Takes effect at next checkpoint when coordinator is running">Pause</button>
-      <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doResume()" title="Resume and start coordinator">Resume</button>
-      <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doRunNext()" title="Set RUN_NEXT and start coordinator (when PAUSED)">Run Next</button>
-      <button class="btn btn-warn write-action" onclick="doForceRun()" title="Start coordinator ignoring lock (only if task is stuck)">Force Run</button>
+      <button class="btn btn-danger write-action" ${(s.state !== 'RUNNING') ? 'disabled' : ''} onclick="doControl('PAUSE', null, event)" title="Takes effect at next checkpoint when coordinator is running">Pause</button>
+      <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doResume(event)" title="Resume and start coordinator">Resume</button>
+      <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doRunNext(event)" title="Set RUN_NEXT and start coordinator (when PAUSED)">Run Next</button>
+      <button class="btn btn-warn write-action" onclick="doForceRun(event)" title="Start coordinator ignoring lock (only if task is stuck)">Force Run</button>
       ${(s.state === 'PAUSED') ? `<button class="btn btn-primary write-action" onclick="openAdjustParamsModal()" title="Edit instance params (goal, repo_path, max_attempts) then run">Adjust params &amp; Run</button>` : ''}
       <button class="btn write-action" onclick="openUserInputModal()" title="E5/E5-2: Insert user input (written to user_input.jsonl; coordinator consumes on next run)">Insert user input</button>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#8b949e;margin-left:6px">
+        <input type="checkbox" class="run-surface-default-toggle" ${useDefaultRunSurface ? 'checked' : ''} onchange="setUseDefaultRunSurface(this.checked)">
+        Use default run surface (no popup)
+      </label>
     </div>
     <div id="controls-help" style="font-size:11px;color:#8b949e;margin-top:6px;margin-bottom:8px">
       <strong>Resume</strong>: 将状态设为 RUNNING 并启动 coordinator（一键恢复并运行）。 &nbsp;
@@ -1508,55 +1571,190 @@ async function loadAttempt(taskId, n) {
 }
 
 // Control actions — B1-1: use refreshCurrentTaskMeta instead of selectTask to preserve tab
-async function doControl(action, payload) {
+async function doControl(action, payload, e) {
   if (!currentTaskId) return;
-  await api(`/task/${currentTaskId}/control`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, payload: payload || {} })
+  const btn = e ? e.currentTarget : null;
+  setButtonLoading(btn, true);
+  try {
+    const res = await api(`/task/${currentTaskId}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, payload: payload || {} })
+    });
+    if (res && res.cleaned_up) {
+      alert('Task was stuck (ghost process); lock cleaned up and status reset to PAUSED.');
+    } else if (res && res.signalled) {
+      alert('Pause signal sent to active process group. Task should pause shortly.');
+    }
+    // B1-1: only refresh meta, do NOT trigger full re-render / tab reset
+    setTimeout(refreshCurrentTaskMeta, 500);
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+function resolveExecutorTypeFromSpec(spec) {
+  if (!spec || typeof spec !== 'object') return '';
+  if (spec.executor_type) return spec.executor_type;
+  return workflowModeToExecutorType(spec.workflow_mode);
+}
+
+function setUseDefaultRunSurface(checked) {
+  useDefaultRunSurface = checked === true;
+  localStorage.setItem('rdloop_use_default_run_surface', useDefaultRunSurface ? 'true' : 'false');
+  document.querySelectorAll('.run-surface-default-toggle').forEach(el => {
+    el.checked = useDefaultRunSurface;
   });
-  // B1-1: only refresh meta, do NOT trigger full re-render / tab reset
-  setTimeout(refreshCurrentTaskMeta, 500);
+}
+
+async function getConfiguredDefaultRunSurface() {
+  try {
+    const cfg = await api('/config');
+    return cfg.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
+  } catch {
+    return 'bridge';
+  }
+}
+
+function inferRunSurfaceFromSpec(spec) {
+  if (!spec || typeof spec !== 'object') return 'bridge';
+  if (spec.run_surface === 'visual_ccb') return 'visual_ccb';
+  return spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge';
+}
+
+function openRunSurfaceModal(defaultSurface, titleText) {
+  return new Promise((resolve) => {
+    const old = document.getElementById('run-surface-modal');
+    if (old) old.remove();
+    const initial = defaultSurface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
+    const title = titleText || 'Choose run mode';
+    const modalHtml = `
+      <div id="run-surface-modal" class="modal-overlay" onclick="if(event.target===this){ this.remove(); window.__resolveRunSurface && window.__resolveRunSurface(null); window.__resolveRunSurface=null; }">
+        <div class="modal-box" style="max-width:520px">
+          <h3 style="margin-top:0">${escapeHtml(title)}</h3>
+          <div style="font-size:12px;color:#8b949e;margin-bottom:10px">Select run mode for this start only.</div>
+          <label style="display:block;padding:8px 10px;border:1px solid #30363d;border-radius:6px;margin-bottom:8px;cursor:pointer">
+            <input type="radio" name="run-surface-choice" value="bridge" ${initial === 'bridge' ? 'checked' : ''} style="margin-right:8px">
+            Non-visible (bridge / solo_bridge)
+          </label>
+          <label style="display:block;padding:8px 10px;border:1px solid #30363d;border-radius:6px;cursor:pointer">
+            <input type="radio" name="run-surface-choice" value="visual_ccb" ${initial === 'visual_ccb' ? 'checked' : ''} style="margin-right:8px">
+            Visible (CCB session)
+          </label>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+            <button class="btn" onclick="const m=document.getElementById('run-surface-modal'); if(m)m.remove(); window.__resolveRunSurface && window.__resolveRunSurface(null); window.__resolveRunSurface=null;">Cancel</button>
+            <button class="btn btn-primary write-action" onclick="const c=document.querySelector('input[name=run-surface-choice]:checked'); const v=c?c.value:'bridge'; const m=document.getElementById('run-surface-modal'); if(m)m.remove(); window.__resolveRunSurface && window.__resolveRunSurface(v); window.__resolveRunSurface=null;">Run</button>
+          </div>
+        </div>
+      </div>`;
+    window.__resolveRunSurface = (value) => resolve(value);
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    updateReadOnlyBanner();
+  });
+}
+
+async function pickRunSurfaceForStart(spec, titleText) {
+  const executorType = resolveExecutorTypeFromSpec(spec);
+  if (!executorType || executorType === 'api_call') {
+    return { cancelled: false, runSurface: undefined };
+  }
+  if (executorType === 'multi_agent') {
+    return { cancelled: false, runSurface: 'visual_ccb' };
+  }
+  const configuredDefault = await getConfiguredDefaultRunSurface();
+  if (useDefaultRunSurface) {
+    return { cancelled: false, runSurface: configuredDefault };
+  }
+  const selected = await openRunSurfaceModal(configuredDefault || inferRunSurfaceFromSpec(spec), titleText);
+  if (!selected) return { cancelled: true, runSurface: undefined };
+  return { cancelled: false, runSurface: selected };
 }
 
 // Run Next: set RUN_NEXT (so --continue will advance from PAUSED) then start coordinator
-async function doRunNext() {
+async function doRunNext(e) {
   if (!currentTaskId) return;
-  await doControl('RUN_NEXT');
-  const result = await api(`/task/${currentTaskId}/run`, { method: 'POST' }).catch(e => ({ error: e?.message || String(e) }));
-  if (result && result.error) {
-    if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
-      alert('Task is already running. Pause first if you want to stop it.');
+  const btn = e ? e.currentTarget : null;
+  setButtonLoading(btn, true);
+  try {
+    const runData = await api(`/task/${encodeURIComponent(currentTaskId)}`).catch(() => ({}));
+    const picked = await pickRunSurfaceForStart(runData.task || {}, `Run Task: ${currentTaskId}`);
+    if (picked.cancelled) return;
+    await api(`/task/${currentTaskId}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'RUN_NEXT', payload: {} })
+    });
+    const result = await api(`/task/${currentTaskId}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+    }).catch(e => ({ error: e?.message || String(e) }));
+    if (result && result.error) {
+      if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
+        alert('Task is already running. Pause first if you want to stop it.');
+        return;
+      }
+      alert(result.error);
       return;
     }
-    alert(result.error);
-    return;
+    setTimeout(refreshCurrentTaskMeta, 1000);
+  } finally {
+    setButtonLoading(btn, false);
   }
-  setTimeout(refreshCurrentTaskMeta, 1000);
 }
 
 // Resume: set RESUME then start coordinator (one click = resume + run)
-async function doResume() {
+async function doResume(e) {
   if (!currentTaskId) return;
-  await doControl('RESUME');
-  const result = await api(`/task/${currentTaskId}/run`, { method: 'POST' }).catch(e => ({ error: e?.message || String(e) }));
-  if (result && result.error) {
-    if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
-      alert('Task is already running.');
+  const btn = e ? e.currentTarget : null;
+  setButtonLoading(btn, true);
+  try {
+    const runData = await api(`/task/${encodeURIComponent(currentTaskId)}`).catch(() => ({}));
+    const picked = await pickRunSurfaceForStart(runData.task || {}, `Resume Task: ${currentTaskId}`);
+    if (picked.cancelled) return;
+    await api(`/task/${currentTaskId}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'RESUME', payload: {} })
+    });
+    const result = await api(`/task/${currentTaskId}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+    }).catch(e => ({ error: e?.message || String(e) }));
+    if (result && result.error) {
+      if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
+        alert('Task is already running.');
+        return;
+      }
+      alert(result.error);
       return;
     }
-    alert(result.error);
-    return;
+    setTimeout(refreshCurrentTaskMeta, 1000);
+  } finally {
+    setButtonLoading(btn, false);
   }
-  setTimeout(refreshCurrentTaskMeta, 1000);
 }
 
 // Force Run: start coordinator ignoring lock (use only when task is stuck)
-async function doForceRun() {
+async function doForceRun(e) {
   if (!currentTaskId) return;
+  const btn = e ? e.currentTarget : null;
   if (!confirm('Force Run ignores the running lock. Use only if the task is stuck. Continue?')) return;
-  await api(`/task/${currentTaskId}/run?force=1`, { method: 'POST' });
-  setTimeout(refreshCurrentTaskMeta, 1000);
+  setButtonLoading(btn, true);
+  try {
+    const runData = await api(`/task/${encodeURIComponent(currentTaskId)}`).catch(() => ({}));
+    const picked = await pickRunSurfaceForStart(runData.task || {}, `Force Run Task: ${currentTaskId}`);
+    if (picked.cancelled) return;
+    await api(`/task/${currentTaskId}/run?force=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+    });
+    setTimeout(refreshCurrentTaskMeta, 1000);
+  } finally {
+    setButtonLoading(btn, false);
+  }
 }
 
 async function saveInstruction(n) {
@@ -1788,6 +1986,10 @@ async function showSpecDetail(taskId) {
       </div>
       <div style="margin-bottom:16px">
         <button class="btn btn-primary" onclick="runTaskFromSpec('${escapeHtml(taskId)}')">Run task</button>
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#8b949e;margin-left:10px">
+          <input type="checkbox" class="run-surface-default-toggle" ${useDefaultRunSurface ? 'checked' : ''} onchange="setUseDefaultRunSurface(this.checked)">
+          Use default run surface (no popup)
+        </label>
         <span id="spec-run-msg" style="margin-left:8px;font-size:12px;color:#8b949e"></span>
       </div>
       <div style="margin-bottom:8px"><strong>Full JSON</strong></div>
@@ -1802,7 +2004,18 @@ async function runTaskFromSpec(taskId) {
   const msgEl = document.getElementById('spec-run-msg');
   if (msgEl) msgEl.textContent = 'Starting...';
   try {
-    const result = await fetch(`/api/task_specs/${encodeURIComponent(taskId)}/run`, { method: 'POST' });
+    const detail = await api(`/task_specs/${encodeURIComponent(taskId)}`);
+    const spec = detail?.spec || {};
+    const picked = await pickRunSurfaceForStart(spec, `Run Spec: ${taskId}`);
+    if (picked.cancelled) {
+      if (msgEl) msgEl.textContent = 'Cancelled.';
+      return;
+    }
+    const result = await fetch(`/api/task_specs/${encodeURIComponent(taskId)}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+    });
     const data = await result.json();
     if (!result.ok) {
       if (msgEl) msgEl.textContent = data.error || 'Failed';
@@ -2037,8 +2250,7 @@ function onChannelTypeChange() {
 
 function onRunSurfaceChange() {
   const wrap = document.getElementById('collab-config-wrap');
-  const mode = document.getElementById('modal-run-surface')?.value || 'bridge';
-  if (wrap) wrap.style.display = (_currentExecutorType === 'multi_agent' && mode === 'visual_ccb') ? 'block' : 'none';
+  if (wrap) wrap.style.display = (_currentExecutorType === 'multi_agent') ? 'block' : 'none';
 }
 
 async function validateRepoPath() {
@@ -2139,8 +2351,74 @@ async function refreshBaseRefOptions(preferredRef) {
 
 async function onRepoSelectionChanged() {
   await validateRepoPath();
+  applyDefaultKnowledgePath();
+  await refreshKnowledgeShardSelector();
   await refreshBaseRefOptions();
   if (typeof syncFormToJson === 'function') syncFormToJson();
+}
+
+function normalizeKnowledgePath(repoPath) {
+  const raw = (repoPath || '').trim();
+  if (!raw) return '';
+  return raw.endsWith('/') ? (raw + '.knowledge') : (raw + '/.knowledge');
+}
+
+function getSelectedKnowledgeShards() {
+  return [...document.querySelectorAll('#modal-knowledge-shards-list input[type="checkbox"]:checked')]
+    .map((el) => (el.value || '').trim())
+    .filter(Boolean);
+}
+
+function setKnowledgeShardSelection(checked) {
+  const listEl = document.getElementById('modal-knowledge-shards-list');
+  if (!listEl) return;
+  listEl.querySelectorAll('input[type="checkbox"]').forEach((el) => {
+    el.checked = !!checked;
+  });
+  if (typeof syncFormToJson === 'function') syncFormToJson();
+}
+
+function selectAllKnowledgeShards() {
+  setKnowledgeShardSelection(true);
+}
+
+function clearKnowledgeShards() {
+  setKnowledgeShardSelection(false);
+}
+
+async function refreshKnowledgeShardSelector(selectedNames) {
+  const listEl = document.getElementById('modal-knowledge-shards-list');
+  if (!listEl) return;
+  const selected = Array.isArray(selectedNames) ? selectedNames : getSelectedKnowledgeShards();
+  const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+  if (!kp) {
+    listEl.innerHTML = '<div style="font-size:11px;color:#8b949e">Set knowledge base path to load shards.</div>';
+    return;
+  }
+  listEl.innerHTML = '<div style="font-size:11px;color:#8b949e">Loading shards...</div>';
+  try {
+    const data = await api('/knowledge/shard-names?path=' + encodeURIComponent(kp));
+    const names = Array.isArray(data.names) ? data.names : [];
+    if (!names.length) {
+      listEl.innerHTML = '<div style="font-size:11px;color:#8b949e">No shard files found (*.json).</div>';
+      return;
+    }
+    listEl.innerHTML = names.map((name) => {
+      const checked = selected.includes(name) ? 'checked' : '';
+      return `<label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;margin-bottom:6px;cursor:pointer;font-size:12px"><input type="checkbox" value="${escapeHtml(name)}" ${checked} onchange="syncFormToJson()">${escapeHtml(name)}</label>`;
+    }).join('');
+  } catch (_) {
+    listEl.innerHTML = '<div style="font-size:11px;color:#f85149">Failed to load shards.</div>';
+  }
+}
+
+function applyDefaultKnowledgePath() {
+  const pathEl = document.getElementById('modal-knowledge-project');
+  const repoEl = document.getElementById('modal-repo-path');
+  if (!pathEl || !repoEl) return;
+  if (pathEl.dataset.userEdited === 'true') return;
+  pathEl.value = normalizeKnowledgePath(repoEl.value || '');
+  refreshKnowledgeShardSelector().catch(() => {});
 }
 
 async function createSelectedFolder() {
@@ -2344,6 +2622,7 @@ async function initRepoGitSelectors(repoPath, baseRef) {
   await refreshRepoOptions(repoPath || '');
   await refreshBaseRefOptions(baseRef || 'main');
   await validateRepoPath();
+  applyDefaultKnowledgePath();
 }
 
 let _formToJsonTimer = null;
@@ -2380,13 +2659,11 @@ function syncFormToJson() {
       coderModel = document.getElementById('adapter-coder')?.value || 'codex';
       judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
     }
-    const runSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
     const spec = {
       schema_version: 'v1',
       task_id: taskId || 'my_task',
       task_type: taskType || undefined,
-      run_surface: runSurface,
-      execution_mode: runSurface === 'visual_ccb' ? 'semi-auto' : 'auto',
+      execution_mode: 'auto',
       channel_type: channelType,
       repo_path: repoPath || undefined,
       base_ref: baseRef || 'main',
@@ -2421,9 +2698,21 @@ function syncFormToJson() {
         provider: soloProvider || 'claude'
       };
     }
-    if (_currentExecutorType === 'multi_agent' && runSurface === 'visual_ccb') {
+    if (_currentExecutorType === 'multi_agent') {
       const roles = collectCollabRolesFromForm();
       if (roles) spec.collab_roles = roles;
+    }
+    const knowledgeEnabled = document.getElementById('modal-knowledge-enabled')?.checked === true;
+    if (knowledgeEnabled) {
+      spec.knowledge_enabled = true;
+      const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+      const rp = (document.getElementById('modal-repo-path')?.value || '').trim();
+      spec.knowledge_project_path = kp || normalizeKnowledgePath(rp);
+      spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
+      spec.agent_config = {
+        ...(spec.agent_config || {}),
+        knowledge_shards: getSelectedKnowledgeShards()
+      };
     }
     jsonEl.value = JSON.stringify(spec, null, 2);
   }, 400);
@@ -2442,6 +2731,12 @@ function syncJsonToForm() {
     set('modal-instruction', spec.goal || spec.instruction);
     set('modal-solo-provider', spec.agent_config?.provider || spec.coder_model || '');
     set('modal-solo-executor-instruction', spec.executor_instruction || '');
+    if (document.getElementById('modal-knowledge-enabled')) document.getElementById('modal-knowledge-enabled').checked = spec.knowledge_enabled !== false;
+    set('modal-knowledge-provider', spec.knowledge_provider || spec.agent_config?.provider || 'codex');
+    set('modal-knowledge-project', spec.knowledge_project_path || normalizeKnowledgePath(spec.repo_path || ''));
+    const knPathEl = document.getElementById('modal-knowledge-project');
+    if (knPathEl) knPathEl.dataset.userEdited = spec.knowledge_project_path ? 'true' : 'false';
+    refreshKnowledgeShardSelector(Array.isArray(spec.agent_config?.knowledge_shards) ? spec.agent_config.knowledge_shards : []).catch(() => {});
     document.getElementById('modal-acceptance') && (document.getElementById('modal-acceptance').value = Array.isArray(spec.acceptance) ? spec.acceptance.join('\n') : (spec.acceptance || ''));
     set('modal-test-cmd', spec.test_cmd);
     set('modal-max-attempts', spec.max_attempts !== undefined ? spec.max_attempts : 3);
@@ -2452,8 +2747,6 @@ function syncJsonToForm() {
     set('modal-base-ref', spec.base_ref || 'main');
     document.getElementById('modal-allowed-paths') && (document.getElementById('modal-allowed-paths').value = Array.isArray(spec.allowed_paths) ? spec.allowed_paths.join('\n') : '');
     document.getElementById('modal-forbidden-globs') && (document.getElementById('modal-forbidden-globs').value = Array.isArray(spec.forbidden_globs) ? spec.forbidden_globs.join('\n') : '');
-    const runSurface = spec.run_surface || (spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge');
-    document.getElementById('modal-run-surface') && (document.getElementById('modal-run-surface').value = runSurface);
     if (spec.channel_type) document.getElementById('adapter-channel-type') && (document.getElementById('adapter-channel-type').value = spec.channel_type);
     if (spec.executor_type) {
       setExecutorType(spec.executor_type);
@@ -2479,31 +2772,6 @@ function syncJsonToForm() {
     if (spec.collab_roles) applyCollabRolesToForm(spec.collab_roles);
     initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
   } catch (_) { /* invalid JSON, ignore */ }
-}
-
-async function onSettingsRunSurfaceChange() {
-  const mode = document.getElementById('settings-run-surface')?.value || 'bridge';
-  const ccbHint = document.getElementById('settings-ccb-hint');
-  if (mode === 'visual_ccb' && ccbHint) {
-    try {
-      const st = await api('/ccb/session-status');
-      const online = (st.providers || []).some(p => p.status === 'ok');
-      ccbHint.style.display = 'block';
-      if (!online) {
-        ccbHint.textContent = 'CCB 未检测到在线 session。请在 CCB 面板启动 agent session。';
-      } else {
-        ccbHint.textContent = 'CCB session 已就绪。';
-        ccbHint.style.background = '#1a2f1a';
-        ccbHint.style.borderColor = '#2ea043';
-        ccbHint.style.color = '#3fb950';
-      }
-    } catch (_) {
-      ccbHint.textContent = '无法获取 CCB 状态。请设置 ccb_path 后重试。';
-      ccbHint.style.display = 'block';
-    }
-  } else if (ccbHint) {
-    ccbHint.style.display = 'none';
-  }
 }
 
 function onSettingsChannelChange() {
@@ -2634,24 +2902,12 @@ function setExecutorType(type) {
   showIf('collab-config-wrap', type === 'multi_agent');
   showIf('section-repo-git', type !== 'api_call' || true);
   showIf('section-loop-config', type === 'solo_agent');
-  showIf('section-knowledge', type !== 'api_call');
+  showIf('section-knowledge', true);
   showIf('section-observation', type === 'solo_agent');
   showIf('section-acceptance', type !== 'solo_agent');
   showIf('rubric-thresholds-container', type === 'api_call');
   showIf('section-channel-type', false);
-  showIf('section-run-surface', type !== 'api_call');
   showIf('section-attempt-context', type === 'api_call');
-  const rsEl = document.getElementById('modal-run-surface');
-  if (rsEl) {
-    const bridgeOpt = rsEl.querySelector('option[value="bridge"]');
-    if (bridgeOpt) {
-      bridgeOpt.disabled = type === 'multi_agent';
-      bridgeOpt.hidden = type === 'multi_agent';
-    }
-    if (type === 'multi_agent') {
-      rsEl.value = 'visual_ccb';
-    }
-  }
   onRunSurfaceChange();
 }
 
@@ -2721,7 +2977,7 @@ function normalizeCollabRolesMap(collabRoles) {
   if (!collabRoles || typeof collabRoles !== 'object' || Array.isArray(collabRoles)) return out;
   Object.entries(collabRoles).forEach(([role, provider]) => {
     const key = normalizeCollabRoleKey(role);
-    const p = String(provider || '').trim().toLowerCase();
+    const p = normalizeRoleProvider(provider);
     if (key && ALLOWED_ROLE_PROVIDERS.includes(p)) out[key] = p;
   });
   return out;
@@ -2732,7 +2988,7 @@ function collabRoleDefaultsFromApi(roleRows) {
   if (!Array.isArray(roleRows)) return out;
   roleRows.forEach(row => {
     const key = normalizeCollabRoleKey(row?.role);
-    const provider = String(row?.provider || '').trim().toLowerCase();
+    const provider = normalizeRoleProvider(row?.provider);
     if (key && ALLOWED_ROLE_PROVIDERS.includes(provider)) out[key] = provider;
   });
   return out;
@@ -2762,7 +3018,6 @@ async function openNewSpecModal() {
   let defaultJudge = null;
   let defaultCoderModel = null;
   let defaultJudgeModel = null;
-  let defaultRunSurface = 'bridge';
   let collabRoleDefaults = {};
   try {
     const cfg = await api('/config');
@@ -2770,7 +3025,6 @@ async function openNewSpecModal() {
     defaultJudge = cfg.default_judge || null;
     defaultCoderModel = cfg.default_coder_model || null;
     defaultJudgeModel = cfg.default_judge_model || null;
-    defaultRunSurface = cfg.default_run_surface || 'bridge';
   } catch {}
   try {
     const roles = await api('/agent/roles');
@@ -2894,14 +3148,6 @@ async function openNewSpecModal() {
           </select>
         </div>
 
-        <div id="section-run-surface" style="margin-bottom:12px;display:none">
-          <label class="form-label">Run surface</label>
-          <select id="modal-run-surface" class="form-select" style="width:auto" onchange="onRunSurfaceChange(); syncFormToJson()">
-            <option value="bridge" ${defaultRunSurface === 'bridge' ? 'selected' : ''}>Bridge / solo_bridge — non-visual</option>
-            <option value="visual_ccb" ${defaultRunSurface === 'visual_ccb' ? 'selected' : ''}>Visual CCB — run in visible CCB session</option>
-          </select>
-        </div>
-
         <div id="collab-config-wrap" style="margin-bottom:12px;display:none;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <details open>
             <summary class="form-label" style="cursor:pointer">协作配置 (visual CCB)</summary>
@@ -3007,16 +3253,28 @@ async function openNewSpecModal() {
             <summary class="form-label" style="cursor:pointer">Knowledge Settings</summary>
             <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
               <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
-                <input type="checkbox" id="modal-knowledge-enabled" checked>
+                <input type="checkbox" id="modal-knowledge-enabled" checked oninput="syncFormToJson()">
                 <span>Enable knowledge read/write</span>
               </label>
               <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Project path</label>
-                <input type="text" id="modal-knowledge-project" class="form-input" placeholder="/path/to/project">
+                <label class="form-label" style="font-size:11px">Provider</label>
+                <select id="modal-knowledge-provider" class="form-select" style="width:auto" onchange="syncFormToJson()">
+                  ${['codex','gemini','claude','opencode','droid'].map(p => '<option value="'+p+'">'+providerDisplayName(p)+'</option>').join('')}
+                </select>
+              </div>
+              <div style="margin-bottom:8px">
+                <label class="form-label" style="font-size:11px">Knowledge base path</label>
+                <input type="text" id="modal-knowledge-project" class="form-input" placeholder="/path/to/repo/.knowledge" oninput="this.dataset.userEdited='true'; refreshKnowledgeShardSelector().catch(()=>{}); syncFormToJson()">
               </div>
               <div>
-                <label class="form-label" style="font-size:11px">Relevant shards (comma-separated)</label>
-                <input type="text" id="modal-knowledge-shards" class="form-input" placeholder="auth, api, frontend">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                  <label class="form-label" style="font-size:11px;margin:0">Relevant shards</label>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="selectAllKnowledgeShards()">Select all</button>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="clearKnowledgeShards()">Clear all</button>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="refreshKnowledgeShardSelector().catch(()=>{})">Refresh</button>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="openKnowledgeViewerFromTaskModal()">View / Edit</button>
+                </div>
+                <div id="modal-knowledge-shards-list" style="min-height:28px;padding:6px;border:1px solid #30363d;border-radius:4px;background:#0b111a"></div>
               </div>
             </div>
           </details>
@@ -3095,7 +3353,7 @@ async function openNewSpecModal() {
 
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn" onclick="closeModal()">Cancel</button>
-          <button class="btn btn-primary write-action" onclick="saveNewSpec()">Save</button>
+          <button class="btn btn-primary write-action" onclick="saveNewSpec(event)">Save</button>
         </div>
       </div>
     </div>
@@ -3109,6 +3367,11 @@ async function openNewSpecModal() {
 
   // Apply default executor type (v5)
   setExecutorType('api_call');
+  const knProviderEl = document.getElementById('modal-knowledge-provider');
+  if (knProviderEl && !knProviderEl.value) knProviderEl.value = 'codex';
+  const knPathEl = document.getElementById('modal-knowledge-project');
+  if (knPathEl) knPathEl.dataset.userEdited = 'false';
+  applyDefaultKnowledgePath();
   const soloProviderEl = document.getElementById('modal-solo-provider');
   if (soloProviderEl) {
     const desired = (defaultCoderModel || defaultCoder || 'claude').trim();
@@ -3164,6 +3427,16 @@ function applyTemplate() {
   if (inst) inst.value = tpl.goal || tpl.instruction || '';
   const soloProvider = document.getElementById('modal-solo-provider');
   if (soloProvider) soloProvider.value = tpl.agent_config?.provider || tpl.coder_model || 'claude';
+  const knEnabled = document.getElementById('modal-knowledge-enabled');
+  if (knEnabled) knEnabled.checked = tpl.knowledge_enabled !== false;
+  const knProvider = document.getElementById('modal-knowledge-provider');
+  if (knProvider) knProvider.value = tpl.knowledge_provider || tpl.agent_config?.provider || 'codex';
+  const knPath = document.getElementById('modal-knowledge-project');
+  if (knPath) {
+    knPath.value = tpl.knowledge_project_path || normalizeKnowledgePath(tpl.repo_path || '');
+    knPath.dataset.userEdited = tpl.knowledge_project_path ? 'true' : 'false';
+  }
+  refreshKnowledgeShardSelector(Array.isArray(tpl.agent_config?.knowledge_shards) ? tpl.agent_config.knowledge_shards : []).catch(() => {});
   const soloInst = document.getElementById('modal-solo-executor-instruction');
   if (soloInst) soloInst.value = tpl.executor_instruction || tpl.goal || tpl.instruction || '';
   const acc = document.getElementById('modal-acceptance');
@@ -3178,14 +3451,15 @@ function applyTemplate() {
 }
 
 // A2-2: Save new spec
-async function saveNewSpec() {
-  const taskId = (document.getElementById('modal-task-id').value || '').trim();
-  const jsonStr = (document.getElementById('modal-spec-json').value || '').trim();
+async function saveNewSpec(e) {
+  const btn = e ? e.currentTarget : null;
+  const taskId = (document.getElementById('modal-task-id')?.value || '').trim();
+  const jsonStr = (document.getElementById('modal-spec-json')?.value || '').trim();
   const errEl = document.getElementById('modal-json-error');
-  errEl.textContent = '';
+  if (errEl) errEl.textContent = '';
 
   if (!taskId || !/^[A-Za-z0-9_-]+$/.test(taskId)) {
-    errEl.textContent = 'Invalid task_id: alphanumeric, underscore, hyphen only';
+    if (errEl) errEl.textContent = 'Invalid task_id: alphanumeric, underscore, hyphen only';
     return;
   }
   const buildFromForm = !jsonStr || jsonStr.trim() === '';
@@ -3193,208 +3467,211 @@ async function saveNewSpec() {
     const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
     const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
     if (!instruction && !soloExecutorInstruction) {
-      errEl.textContent = 'instruction / goal is required (or solo executor instructions)';
+      if (errEl) errEl.textContent = 'instruction / goal is required (or solo executor instructions)';
       return;
     }
   }
 
-  // E3: JSON syntax validation
-  let spec;
-  if (jsonStr) {
-    try {
-      spec = JSON.parse(jsonStr);
-    } catch (e) {
-      errEl.textContent = 'JSON syntax error: ' + e.message;
-      return;
-    }
-  } else {
-    // Build from form fields
-    const taskType = document.getElementById('modal-task-type')?.value || undefined;
-    const channelType = document.getElementById('adapter-channel-type')?.value || 'coding-agent-cli';
-    let coder = document.getElementById('adapter-coder')?.value || 'mock';
-    let judge = document.getElementById('adapter-judge')?.value || 'mock';
-    let coderModel = document.getElementById('adapter-coder-model')?.value?.trim();
-    let judgeModel = document.getElementById('adapter-judge-model')?.value?.trim();
-    if (channelType === 'ccb') {
-      coder = 'ccb';
-      judge = 'ccb';
-      coderModel = document.getElementById('adapter-coder')?.value || 'codex';
-      judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
-    }
-    const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
-    const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-    const goal = instruction || soloExecutorInstruction || '';
-    const acceptanceLines = (document.getElementById('modal-acceptance')?.value || '').split(/\n/).map(s => s.trim()).filter(Boolean);
-    const acceptance = acceptanceLines.length ? acceptanceLines : [];
-    const testCmd = (document.getElementById('modal-test-cmd')?.value || 'true').trim();
-    const maxAttempts = Math.min(10, Math.max(1, parseInt(document.getElementById('modal-max-attempts')?.value || '3', 10) || 3));
-    const apRaw = (document.getElementById('modal-allowed-paths')?.value || '').trim();
-    const allowedPaths = apRaw ? apRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
-    const fgRaw = (document.getElementById('modal-forbidden-globs')?.value || '').trim();
-    const forbiddenGlobs = fgRaw ? fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : ['**/.env', '**/secrets*', '**/*.pem'];
-    const coderTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-coder-timeout')?.value || '600', 10) || 600));
-    const judgeTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-judge-timeout')?.value || '300', 10) || 300));
-    const constraintsRaw = (document.getElementById('modal-constraints')?.value || '').trim();
-    const constraints = constraintsRaw ? constraintsRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
-    const runSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
-    spec = {
-      schema_version: 'v1',
-      task_id: taskId,
-      task_type: taskType || undefined,
-      run_surface: runSurface,
-      execution_mode: runSurface === 'visual_ccb' ? 'semi-auto' : 'auto',
-      channel_type: channelType,
-      repo_path: document.getElementById('modal-repo-path')?.value?.trim() || undefined,
-      base_ref: document.getElementById('modal-base-ref')?.value?.trim() || 'main',
-      coder,
-      judge,
-      ...(coderModel ? { coder_model: coderModel } : {}),
-      ...(judgeModel ? { judge_model: judgeModel } : {}),
-      goal: goal || '',
-      acceptance: acceptance,
-      test_cmd: testCmd || 'true',
-      max_attempts: maxAttempts,
-      attempt_context_mode: document.getElementById('modal-attempt-context-mode')?.value || 'fresh_each',
-      constraints: constraints,
-      allowed_paths: allowedPaths,
-      forbidden_globs: forbiddenGlobs,
-      coder_timeout_seconds: coderTimeout,
-      judge_timeout_seconds: judgeTimeout,
-      created_at: new Date().toISOString()
-    };
-    if (soloExecutorInstruction) spec.executor_instruction = soloExecutorInstruction;
-    // A4: read thresholds
-    if (taskType) {
-      const thresholds = readThresholdsFromUI(taskType);
-      if (thresholds) spec.rubric_thresholds = thresholds;
-    }
-  }
+  // Ensure executor type is captured if it was changed
+  const execTypeEl = document.getElementById('modal-executor-type');
+  if (execTypeEl) _currentExecutorType = execTypeEl.value;
+  const sessionModeEl = document.getElementById('modal-session-mode');
+  if (sessionModeEl) _currentSessionMode = sessionModeEl.value;
 
-  // Override task_id, adapter, and model from form controls if JSON was provided
-  spec.task_id = taskId;
-  const channelTypeVal = document.getElementById('adapter-channel-type')?.value;
-  if (channelTypeVal) spec.channel_type = channelTypeVal;
-  let coderVal = document.getElementById('adapter-coder')?.value;
-  let judgeVal = document.getElementById('adapter-judge')?.value;
-  let coderModelVal = document.getElementById('adapter-coder-model')?.value;
-  let judgeModelVal = document.getElementById('adapter-judge-model')?.value;
-  if (channelTypeVal === 'ccb') {
-    spec.coder = 'ccb';
-    spec.judge = 'ccb';
-    spec.coder_model = coderVal || 'codex';
-    spec.judge_model = judgeVal || 'codex';
-  } else {
-    if (coderVal) spec.coder = coderVal;
-    if (judgeVal) spec.judge = judgeVal;
-    if (coderModelVal) spec.coder_model = coderModelVal; else if (spec.coder_model !== undefined) delete spec.coder_model;
-    if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
-  }
-  const taskTypeVal = document.getElementById('modal-task-type')?.value;
-  if (taskTypeVal) spec.task_type = taskTypeVal;
-  const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
-  if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
-  const runSurfaceVal = document.getElementById('modal-run-surface')?.value;
-  if (runSurfaceVal) {
-    spec.run_surface = runSurfaceVal;
-    spec.execution_mode = runSurfaceVal === 'visual_ccb' ? 'semi-auto' : 'auto';
-  }
-  if (_currentExecutorType === 'multi_agent' && runSurfaceVal === 'visual_ccb') {
-    const roles = collectCollabRolesFromForm();
-    if (roles) spec.collab_roles = roles;
-  }
-  // Repo & Git from form
-  const rp = document.getElementById('modal-repo-path')?.value?.trim();
-  if (rp !== undefined && rp !== '') spec.repo_path = rp;
-  const br = document.getElementById('modal-base-ref')?.value?.trim();
-  if (br !== undefined && br !== '') spec.base_ref = br;
-  const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
-  if (instructionVal) spec.goal = instructionVal;
-  const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-  if (soloExecutorInstructionVal) spec.executor_instruction = soloExecutorInstructionVal;
-  const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
-  if (acceptanceVal) spec.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
-  const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
-  if (testCmdVal !== undefined && testCmdVal !== '') spec.test_cmd = testCmdVal;
-  const maxAttemptsVal = document.getElementById('modal-max-attempts')?.value;
-  if (maxAttemptsVal !== undefined && maxAttemptsVal !== '') spec.max_attempts = Math.min(10, Math.max(1, parseInt(maxAttemptsVal, 10) || 3));
-  const coderTimeoutVal = document.getElementById('modal-coder-timeout')?.value;
-  if (coderTimeoutVal !== undefined && coderTimeoutVal !== '') spec.coder_timeout_seconds = Math.min(3600, Math.max(60, parseInt(coderTimeoutVal, 10) || 600));
-  const judgeTimeoutVal = document.getElementById('modal-judge-timeout')?.value;
-  if (judgeTimeoutVal !== undefined && judgeTimeoutVal !== '') spec.judge_timeout_seconds = Math.min(3600, Math.max(60, parseInt(judgeTimeoutVal, 10) || 300));
-  const constraintsVal = (document.getElementById('modal-constraints')?.value || '').trim();
-  if (constraintsVal) spec.constraints = constraintsVal.split(/\n/).map(s => s.trim()).filter(Boolean);
-  const apRaw = document.getElementById('modal-allowed-paths')?.value?.trim();
-  if (apRaw) {
-    if (apRaw.startsWith('[')) { try { spec.allowed_paths = JSON.parse(apRaw); } catch {} }
-    else { spec.allowed_paths = apRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
-  }
-  const fgRaw = document.getElementById('modal-forbidden-globs')?.value?.trim();
-  if (fgRaw) {
-    if (fgRaw.startsWith('[')) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
-    else { spec.forbidden_globs = fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
-  }
-  // A4: merge thresholds (api_call only)
-  if (spec.task_type && _currentExecutorType === 'api_call') {
-    const thresholds = readThresholdsFromUI(spec.task_type);
-    if (thresholds) spec.rubric_thresholds = thresholds;
-  }
+  setButtonLoading(btn, true);
+  try {
+    // E3: JSON syntax validation
+    let spec;
+    if (jsonStr) {
+      try {
+        spec = JSON.parse(jsonStr);
+      } catch (e) {
+        if (errEl) errEl.textContent = 'JSON syntax error: ' + e.message;
+        setButtonLoading(btn, false);
+        return;
+      }
+    } else {
+      // Build from form fields
+      const taskType = document.getElementById('modal-task-type')?.value || undefined;
+      const channelType = document.getElementById('adapter-channel-type')?.value || 'coding-agent-cli';
+      let coder = document.getElementById('adapter-coder')?.value || 'mock';
+      let judge = document.getElementById('adapter-judge')?.value || 'mock';
+      let coderModel = document.getElementById('adapter-coder-model')?.value?.trim();
+      let judgeModel = document.getElementById('adapter-judge-model')?.value?.trim();
+      if (channelType === 'ccb') {
+        coder = 'ccb';
+        judge = 'ccb';
+        coderModel = document.getElementById('adapter-coder')?.value || 'codex';
+        judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
+      }
+      const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
+      const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+      const goal = instruction || soloExecutorInstruction || '';
+      const acceptanceLines = (document.getElementById('modal-acceptance')?.value || '').split(/\n/).map(s => s.trim()).filter(Boolean);
+      const acceptance = acceptanceLines.length ? acceptanceLines : [];
+      const testCmd = (document.getElementById('modal-test-cmd')?.value || 'true').trim();
+      const maxAttempts = Math.min(10, Math.max(1, parseInt(document.getElementById('modal-max-attempts')?.value || '3', 10) || 3));
+      const apRaw = (document.getElementById('modal-allowed-paths')?.value || '').trim();
+      const allowedPaths = apRaw ? apRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
+      const fgRaw = (document.getElementById('modal-forbidden-globs')?.value || '').trim();
+      const forbiddenGlobs = fgRaw ? fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : ['**/.env', '**/secrets*', '**/*.pem'];
+      const coderTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-coder-timeout')?.value || '600', 10) || 600));
+      const judgeTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-judge-timeout')?.value || '300', 10) || 300));
+      const constraintsRaw = (document.getElementById('modal-constraints')?.value || '').trim();
+      const constraints = constraintsRaw ? constraintsRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
+      spec = {
+        schema_version: 'v1',
+        task_id: taskId,
+        task_type: taskType || undefined,
+        execution_mode: 'auto',
+        channel_type: channelType,
+        repo_path: document.getElementById('modal-repo-path')?.value?.trim() || undefined,
+        base_ref: document.getElementById('modal-base-ref')?.value?.trim() || 'main',
+        coder,
+        judge,
+        ...(coderModel ? { coder_model: coderModel } : {}),
+        ...(judgeModel ? { judge_model: judgeModel } : {}),
+        goal: goal || '',
+        acceptance: acceptance,
+        test_cmd: testCmd || 'true',
+        max_attempts: maxAttempts,
+        attempt_context_mode: document.getElementById('modal-attempt-context-mode')?.value || 'fresh_each',
+        constraints: constraints,
+        allowed_paths: allowedPaths,
+        forbidden_globs: forbiddenGlobs,
+        coder_timeout_seconds: coderTimeout,
+        judge_timeout_seconds: judgeTimeout,
+        created_at: new Date().toISOString()
+      };
+      if (soloExecutorInstruction) spec.executor_instruction = soloExecutorInstruction;
+      // A4: read thresholds
+      if (taskType) {
+        const thresholds = readThresholdsFromUI(taskType);
+        if (thresholds) spec.rubric_thresholds = thresholds;
+      }
+    }
 
-  // v5.0: executor_type + session_mode (replaces workflow_mode)
-  spec.executor_type = _currentExecutorType;
-  spec.session_mode = _currentSessionMode || document.getElementById('modal-session-mode')?.value || 'fresh';
-  // Legacy compat: keep workflow_mode for backward compat
-  spec.workflow_mode = _currentWorkflowMode;
-  if (_currentExecutorType === 'api_call') {
-    if (spec.run_surface !== undefined) delete spec.run_surface;
-    spec.execution_mode = 'auto';
-  } else if (_currentExecutorType === 'solo_agent') {
-    const soloRunSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
-    spec.run_surface = soloRunSurface;
-    spec.execution_mode = soloRunSurface === 'visual_ccb' ? 'semi-auto' : 'auto';
-    if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
-    const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
-    spec.coder_model = soloProvider;
-    spec.judge_model = soloProvider;
-    if (soloRunSurface === 'visual_ccb') {
+    // Override task_id, adapter, and model from form controls if JSON was provided
+    spec.task_id = taskId;
+    const channelTypeVal = document.getElementById('adapter-channel-type')?.value;
+    if (channelTypeVal) spec.channel_type = channelTypeVal;
+    let coderVal = document.getElementById('adapter-coder')?.value;
+    let judgeVal = document.getElementById('adapter-judge')?.value;
+    let coderModelVal = document.getElementById('adapter-coder-model')?.value;
+    let judgeModelVal = document.getElementById('adapter-judge-model')?.value;
+    if (channelTypeVal === 'ccb') {
       spec.coder = 'ccb';
       spec.judge = 'ccb';
+      spec.coder_model = coderVal || 'codex';
+      spec.judge_model = judgeVal || 'codex';
     } else {
+      if (coderVal) spec.coder = coderVal;
+      if (judgeVal) spec.judge = judgeVal;
+      if (coderModelVal) spec.coder_model = coderModelVal; else if (spec.coder_model !== undefined) delete spec.coder_model;
+      if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
+    }
+    const taskTypeVal = document.getElementById('modal-task-type')?.value;
+    if (taskTypeVal) spec.task_type = taskTypeVal;
+    const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
+    if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
+    if (_currentExecutorType === 'multi_agent') {
+      const roles = collectCollabRolesFromForm();
+      if (roles) spec.collab_roles = roles;
+    }
+    // Repo & Git from form
+    const rp = document.getElementById('modal-repo-path')?.value?.trim();
+    if (rp !== undefined && rp !== '') spec.repo_path = rp;
+    const br = document.getElementById('modal-base-ref')?.value?.trim();
+    if (br !== undefined && br !== '') spec.base_ref = br;
+    const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
+    if (instructionVal) spec.goal = instructionVal;
+    const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+    if (soloExecutorInstructionVal) spec.executor_instruction = soloExecutorInstructionVal;
+    const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
+    if (acceptanceVal) spec.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
+    const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
+    if (testCmdVal !== undefined && testCmdVal !== '') spec.test_cmd = testCmdVal;
+    const maxAttemptsVal = document.getElementById('modal-max-attempts')?.value;
+    if (maxAttemptsVal !== undefined && maxAttemptsVal !== '') spec.max_attempts = Math.min(10, Math.max(1, parseInt(maxAttemptsVal, 10) || 3));
+    const coderTimeoutVal = document.getElementById('modal-coder-timeout')?.value;
+    if (coderTimeoutVal !== undefined && coderTimeoutVal !== '') spec.coder_timeout_seconds = Math.min(3600, Math.max(60, parseInt(coderTimeoutVal, 10) || 600));
+    const judgeTimeoutVal = document.getElementById('modal-judge-timeout')?.value;
+    if (judgeTimeoutVal !== undefined && judgeTimeoutVal !== '') spec.judge_timeout_seconds = Math.min(3600, Math.max(60, parseInt(judgeTimeoutVal, 10) || 300));
+    const constraintsVal = (document.getElementById('modal-constraints')?.value || '').trim();
+    if (constraintsVal) spec.constraints = constraintsVal.split(/\n/).map(s => s.trim()).filter(Boolean);
+    const apRaw = document.getElementById('modal-allowed-paths')?.value?.trim();
+    if (apRaw) {
+      if (apRaw.startsWith('[')) { try { spec.allowed_paths = JSON.parse(apRaw); } catch {} }
+      else { spec.allowed_paths = apRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
+    }
+    const fgRaw = document.getElementById('modal-forbidden-globs')?.value?.trim();
+    if (fgRaw) {
+      if (fgRaw.startsWith('[')) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
+      else { spec.forbidden_globs = fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
+    }
+    // A4: merge thresholds (api_call only)
+    if (spec.task_type && _currentExecutorType === 'api_call') {
+      const thresholds = readThresholdsFromUI(spec.task_type);
+      if (thresholds) spec.rubric_thresholds = thresholds;
+    }
+
+    // v5.0: executor_type + session_mode (replaces workflow_mode)
+    spec.executor_type = _currentExecutorType;
+    spec.session_mode = _currentSessionMode || document.getElementById('modal-session-mode')?.value || 'fresh';
+    // Legacy compat: keep workflow_mode for backward compat
+    spec.workflow_mode = _currentWorkflowMode;
+    if (_currentExecutorType === 'api_call') {
+      spec.execution_mode = 'auto';
+    } else if (_currentExecutorType === 'solo_agent') {
+      if (spec.run_surface !== undefined) delete spec.run_surface;
+      spec.execution_mode = 'auto';
+      const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+      if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
+      const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
+      spec.coder_model = soloProvider;
+      spec.judge_model = soloProvider;
       spec.coder = 'solo';
       spec.judge = 'solo';
+      spec.agent_config = {
+        max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
+        auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
+        knowledge_shards: getSelectedKnowledgeShards(),
+        provider: soloProvider
+      };
+      const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
+      if (testCmdSolo) spec.test_cmd = testCmdSolo;
+    } else if (_currentExecutorType === 'multi_agent') {
+      spec.run_surface = 'visual_ccb';
+      spec.execution_mode = 'semi-auto';
+      spec.coder = 'ccb';
+      spec.judge = 'ccb';
+      const roles = collectCollabRolesFromForm();
+      if (roles) spec.collab_roles = roles;
     }
-    spec.agent_config = {
-      max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
-      auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
-      knowledge_shards: (document.getElementById('modal-knowledge-shards')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
-      provider: soloProvider
-    };
-    const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
-    if (testCmdSolo) spec.test_cmd = testCmdSolo;
-  } else if (_currentExecutorType === 'multi_agent') {
-    spec.run_surface = 'visual_ccb';
-    spec.execution_mode = 'semi-auto';
-    spec.coder = 'ccb';
-    spec.judge = 'ccb';
-    const roles = collectCollabRolesFromForm();
-    if (roles) spec.collab_roles = roles;
-  }
-  if (_currentExecutorType !== 'api_call') {
-    if (spec.rubric_thresholds !== undefined) delete spec.rubric_thresholds;
-    if (spec.scoring_mode !== undefined) delete spec.scoring_mode;
-  }
-  if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
-    delete spec.collab_roles;
-  }
-  // Knowledge settings for solo + multi_agent
-  if (_currentExecutorType !== 'api_call') {
+    if (_currentExecutorType !== 'api_call') {
+      if (spec.rubric_thresholds !== undefined) delete spec.rubric_thresholds;
+      if (spec.scoring_mode !== undefined) delete spec.scoring_mode;
+    }
+    if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
+      delete spec.collab_roles;
+    }
     const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
     if (knEnabled) {
       spec.knowledge_enabled = true;
-      spec.knowledge_project_path = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+      const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+      const rp2 = (document.getElementById('modal-repo-path')?.value || '').trim();
+      spec.knowledge_project_path = kp || normalizeKnowledgePath(rp2);
+      spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
+      spec.agent_config = {
+        ...(spec.agent_config || {}),
+        knowledge_shards: getSelectedKnowledgeShards()
+      };
+    } else {
+      if (spec.knowledge_enabled !== undefined) delete spec.knowledge_enabled;
+      if (spec.knowledge_project_path !== undefined) delete spec.knowledge_project_path;
+      if (spec.knowledge_provider !== undefined) delete spec.knowledge_provider;
     }
-  }
 
-  try {
     const res = await fetch('/api/task_specs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3406,12 +3683,15 @@ async function saveNewSpec() {
       if (Array.isArray(result.errors) && result.errors.length) {
         errEl.innerHTML = escapeHtml(result.error || 'Validation failed') + '<br>' + result.errors.map(e => '• ' + escapeHtml(e)).join('<br>');
       }
+      setButtonLoading(btn, false);
       return;
     }
     closeModal();
     loadTaskSpecs();
   } catch (e) {
     errEl.textContent = 'Save failed: ' + (e.message || String(e));
+  } finally {
+    setButtonLoading(btn, false);
   }
 }
 
@@ -3429,9 +3709,11 @@ async function openEditSpecModal(taskId) {
   const editChannel = spec.channel_type || inferChannelFromAdapter(spec.coder);
   const coderAdapterForSelector = editChannel === 'ccb' ? (spec.coder_model || 'codex') : spec.coder;
   const judgeAdapterForSelector = editChannel === 'ccb' ? (spec.judge_model || 'codex') : spec.judge;
-  const editRunSurface = spec.run_surface || (spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge');
   const editExecutorType = spec.executor_type || workflowModeToExecutorType(spec.workflow_mode);
   const editSessionMode = spec.session_mode || defaultSessionModeForExecutor(editExecutorType);
+  _currentExecutorType = editExecutorType;
+  _currentSessionMode = editSessionMode;
+  _currentWorkflowMode = spec.workflow_mode || 'auto';
   let collabRoleDefaults = {};
   try {
     const roles = await api('/agent/roles');
@@ -3496,14 +3778,6 @@ async function openEditSpecModal(taskId) {
           <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch. iterative: n+1 gets previous coder output as context.">
             <option value="fresh_each" ${(spec.attempt_context_mode || 'fresh_each') === 'fresh_each' ? 'selected' : ''}>fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
             <option value="iterative" ${(spec.attempt_context_mode || '') === 'iterative' ? 'selected' : ''}>iterative — next attempt builds on previous coder output (convergent, e.g. requirements, code)</option>
-          </select>
-        </div>
-
-        <div id="section-run-surface" style="margin-bottom:12px">
-          <label class="form-label">Run surface</label>
-          <select id="modal-run-surface" class="form-select" style="width:auto" onchange="onRunSurfaceChange()">
-            <option value="bridge" ${editRunSurface === 'bridge' ? 'selected' : ''}>Bridge / solo_bridge — non-visual</option>
-            <option value="visual_ccb" ${editRunSurface === 'visual_ccb' ? 'selected' : ''}>Visual CCB — run in visible CCB session</option>
           </select>
         </div>
 
@@ -3594,16 +3868,28 @@ async function openEditSpecModal(taskId) {
             <summary class="form-label" style="cursor:pointer">Knowledge Settings</summary>
             <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
               <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
-                <input type="checkbox" id="modal-knowledge-enabled" ${spec.knowledge_enabled ? 'checked' : ''}>
+                <input type="checkbox" id="modal-knowledge-enabled" ${spec.knowledge_enabled ? 'checked' : ''} oninput="syncFormToJson()">
                 <span>Enable knowledge read/write</span>
               </label>
               <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Project path</label>
-                <input type="text" id="modal-knowledge-project" class="form-input" value="${escapeHtml(spec.knowledge_project_path || '')}" placeholder="/path/to/project">
+                <label class="form-label" style="font-size:11px">Provider</label>
+                <select id="modal-knowledge-provider" class="form-select" style="width:auto" onchange="syncFormToJson()">
+                  ${['codex','gemini','claude','opencode','droid'].map(p => '<option value="'+p+'" '+(((spec.knowledge_provider || spec.agent_config?.provider || 'codex')===p)?'selected':'')+'>'+providerDisplayName(p)+'</option>').join('')}
+                </select>
+              </div>
+              <div style="margin-bottom:8px">
+                <label class="form-label" style="font-size:11px">Knowledge base path</label>
+                <input type="text" id="modal-knowledge-project" class="form-input" value="${escapeHtml(spec.knowledge_project_path || normalizeKnowledgePath(spec.repo_path || ''))}" placeholder="/path/to/repo/.knowledge" oninput="this.dataset.userEdited='true'; refreshKnowledgeShardSelector().catch(()=>{}); syncFormToJson()">
               </div>
               <div>
-                <label class="form-label" style="font-size:11px">Relevant shards (comma-separated)</label>
-                <input type="text" id="modal-knowledge-shards" class="form-input" value="${escapeHtml(Array.isArray(spec.agent_config?.knowledge_shards) ? spec.agent_config.knowledge_shards.join(', ') : '')}" placeholder="auth, api, frontend">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                  <label class="form-label" style="font-size:11px;margin:0">Relevant shards</label>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="selectAllKnowledgeShards()">Select all</button>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="clearKnowledgeShards()">Clear all</button>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="refreshKnowledgeShardSelector().catch(()=>{})">Refresh</button>
+                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="openKnowledgeViewerFromTaskModal()">View / Edit</button>
+                </div>
+                <div id="modal-knowledge-shards-list" data-selected="${escapeHtml(Array.isArray(spec.agent_config?.knowledge_shards) ? spec.agent_config.knowledge_shards.join(',') : '')}" style="min-height:28px;padding:6px;border:1px solid #30363d;border-radius:4px;background:#0b111a"></div>
               </div>
             </div>
           </details>
@@ -3701,6 +3987,11 @@ async function openEditSpecModal(taskId) {
   onChannelTypeChange();
   refreshModelSelector('coder').catch(() => {});
   refreshModelSelector('judge').catch(() => {});
+  const knPathEl = document.getElementById('modal-knowledge-project');
+  if (knPathEl) knPathEl.dataset.userEdited = spec.knowledge_project_path ? 'true' : 'false';
+  const ksListEl = document.getElementById('modal-knowledge-shards-list');
+  const preselected = (ksListEl?.dataset?.selected || '').split(',').map(s => s.trim()).filter(Boolean);
+  refreshKnowledgeShardSelector(preselected).catch(() => {});
   initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
 }
 
@@ -3741,12 +4032,7 @@ async function saveEditSpec(taskId) {
   if (taskTypeVal) spec.task_type = taskTypeVal;
   const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
   if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
-  const runSurfaceVal = document.getElementById('modal-run-surface')?.value;
-  if (runSurfaceVal) {
-    spec.run_surface = runSurfaceVal;
-    spec.execution_mode = runSurfaceVal === 'visual_ccb' ? 'semi-auto' : 'auto';
-  }
-  if (_currentExecutorType === 'multi_agent' && runSurfaceVal === 'visual_ccb') {
+  if (_currentExecutorType === 'multi_agent') {
     const roles = collectCollabRolesFromForm();
     if (roles) spec.collab_roles = roles;
   } else if (spec.collab_roles !== undefined) delete spec.collab_roles;
@@ -3797,24 +4083,18 @@ async function saveEditSpec(taskId) {
     if (spec.run_surface !== undefined) delete spec.run_surface;
     spec.execution_mode = 'auto';
   } else if (_currentExecutorType === 'solo_agent') {
-    const soloRunSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
-    spec.run_surface = soloRunSurface;
-    spec.execution_mode = soloRunSurface === 'visual_ccb' ? 'semi-auto' : 'auto';
+    if (spec.run_surface !== undefined) delete spec.run_surface;
+    spec.execution_mode = 'auto';
     if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
     const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
     spec.coder_model = soloProvider;
     spec.judge_model = soloProvider;
-    if (soloRunSurface === 'visual_ccb') {
-      spec.coder = 'ccb';
-      spec.judge = 'ccb';
-    } else {
-      spec.coder = 'solo';
-      spec.judge = 'solo';
-    }
+    spec.coder = 'solo';
+    spec.judge = 'solo';
     spec.agent_config = {
       max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
       auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
-      knowledge_shards: (document.getElementById('modal-knowledge-shards')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
+      knowledge_shards: getSelectedKnowledgeShards(),
       provider: soloProvider
     };
     const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
@@ -3834,15 +4114,21 @@ async function saveEditSpec(taskId) {
   if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
     delete spec.collab_roles;
   }
-  if (_currentExecutorType !== 'api_call') {
-    const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
-    if (knEnabled) {
-      spec.knowledge_enabled = true;
-      spec.knowledge_project_path = (document.getElementById('modal-knowledge-project')?.value || '').trim();
-    } else if (spec.knowledge_enabled !== undefined) {
-      delete spec.knowledge_enabled;
-      if (spec.knowledge_project_path !== undefined) delete spec.knowledge_project_path;
-    }
+  const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
+  if (knEnabled) {
+    spec.knowledge_enabled = true;
+    const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+    const rp2 = (document.getElementById('modal-repo-path')?.value || '').trim();
+    spec.knowledge_project_path = kp || normalizeKnowledgePath(rp2);
+    spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
+    spec.agent_config = {
+      ...(spec.agent_config || {}),
+      knowledge_shards: getSelectedKnowledgeShards()
+    };
+  } else if (spec.knowledge_enabled !== undefined) {
+    delete spec.knowledge_enabled;
+    if (spec.knowledge_project_path !== undefined) delete spec.knowledge_project_path;
+    if (spec.knowledge_provider !== undefined) delete spec.knowledge_provider;
   }
   if (spec.executor_type === 'solo_agent' && soloExecutorInstructionVal && !instructionVal) {
     spec.goal = soloExecutorInstructionVal;
@@ -4064,13 +4350,17 @@ setInterval(refreshCurrentTaskMeta, 5000);
 (function () {
   const list = document.getElementById('task-list');
   if (!list) return;
-  list.addEventListener('click', function (e) {
-    if (e.target.closest('button.write-action')) return;
-    const row = e.target.closest('.task-item');
-    if (!row) return;
-    const taskId = row.dataset.taskId;
-    if (taskId) selectTask(taskId);
-  });
+      list.addEventListener('click', function (e) {
+        if (e.target.closest('button.write-action')) return;
+        const row = e.target.closest('.task-item');
+        if (!row) return;
+        const taskId = row.dataset.taskId;
+        if (taskId) {
+          switchView('tasks');
+          selectTask(taskId);
+        }
+      });
+  
 })();
 
 // ── Solo Progress Panel ──────────────────────────────────────────────────────
@@ -4144,14 +4434,27 @@ async function proceedSoloStep(taskId, attemptNum) {
 
 // ── Knowledge Viewer Modal ───────────────────────────────────────────────────
 let currentKnowledgeShard = null;
+let currentKnowledgePath = '';
 
-async function openKnowledgeViewer() {
+function knowledgePathQuery() {
+  return currentKnowledgePath ? ('?path=' + encodeURIComponent(currentKnowledgePath)) : '';
+}
+
+function openKnowledgeViewerFromTaskModal() {
+  const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+  openKnowledgeViewer(kp).catch(() => {});
+}
+
+async function openKnowledgeViewer(pathOverride) {
+  currentKnowledgePath = (pathOverride || '').trim();
+  currentKnowledgeShard = null;
   const old = document.getElementById('knowledge-modal');
   if (old) old.remove();
   const modalHtml = `
     <div id="knowledge-modal" class="modal-overlay" onclick="if(event.target===this)closeKnowledgeViewer()">
       <div class="modal-box" style="max-width:900px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
         <h3 style="margin-top:0;flex-shrink:0">Knowledge Viewer</h3>
+        <div style="font-size:12px;color:#8b949e;margin-top:-6px;margin-bottom:8px">Path: <code>${escapeHtml(currentKnowledgePath || '(default project knowledge path)')}</code></div>
         <div style="display:flex;flex:1;gap:12px;overflow:hidden;min-height:0">
           <div id="knowledge-shard-list" style="width:180px;flex-shrink:0;overflow-y:auto;border-right:1px solid #30363d;padding-right:12px">
             <div style="color:#8b949e;font-size:12px">Loading shards...</div>
@@ -4178,7 +4481,7 @@ async function loadKnowledgeShardList() {
   const wrap = document.getElementById('knowledge-shard-list');
   if (!wrap) return;
   try {
-    const data = await api('/knowledge/shards');
+    const data = await api('/knowledge/shards' + knowledgePathQuery());
     const shards = data.shards || {};
     const names = Object.keys(shards).sort();
     if (names.length === 0 && data.legacy) {
@@ -4206,7 +4509,7 @@ async function selectKnowledgeShard(name) {
   if (!panel) return;
   panel.innerHTML = '<div style="color:#8b949e;font-size:12px">Loading...</div>';
   try {
-    const data = await api('/knowledge/shards/' + encodeURIComponent(name));
+    const data = await api('/knowledge/shards/' + encodeURIComponent(name) + knowledgePathQuery());
     const entries = data.entries || {};
     const keys = Object.keys(entries).sort();
     let html = '<div style="margin-bottom:8px;display:flex;align-items:center;justify-content:space-between"><strong>'+escapeHtml(name)+'</strong> <span style="font-size:11px;color:#8b949e">'+escapeHtml(data.description||'')+'</span></div>';
@@ -4239,7 +4542,7 @@ async function createKnowledgeShard() {
   if (!name || !/^[a-z0-9_-]+$/.test(name)) { if (name) alert('Invalid name'); return; }
   const desc = prompt('Description (optional):') || '';
   try {
-    await fetch('/api/knowledge/shards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, description: desc }) });
+    await fetch('/api/knowledge/shards' + knowledgePathQuery(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, description: desc, path: currentKnowledgePath }) });
     await loadKnowledgeShardList();
     selectKnowledgeShard(name);
   } catch (e) { alert(e?.message || 'Failed'); }
@@ -4248,7 +4551,7 @@ async function createKnowledgeShard() {
 async function deleteKnowledgeShard(name) {
   if (!confirm('Delete shard "'+name+'" and all its entries?')) return;
   try {
-    await fetch('/api/knowledge/shards/' + encodeURIComponent(name), { method: 'DELETE' });
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(name) + knowledgePathQuery(), { method: 'DELETE' });
     currentKnowledgeShard = null;
     await loadKnowledgeShardList();
     document.getElementById('knowledge-entry-panel').innerHTML = '<div style="color:#8b949e;font-size:12px">Select a shard.</div>';
@@ -4261,16 +4564,16 @@ async function addKnowledgeEntry(shardName) {
   const type = prompt('Type (file or task):', 'file') || 'file';
   const summary = prompt('Summary:') || '';
   try {
-    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), {
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key) + knowledgePathQuery(), {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, summary, written_by: 'manual', last_modified_at: new Date().toISOString() })
+      body: JSON.stringify({ type, summary, written_by: 'manual', last_modified_at: new Date().toISOString(), path: currentKnowledgePath })
     });
     selectKnowledgeShard(shardName);
   } catch (e) { alert(e?.message || 'Failed'); }
 }
 
 async function editKnowledgeEntry(shardName, key) {
-  const data = await api('/knowledge/shards/' + encodeURIComponent(shardName));
+  const data = await api('/knowledge/shards/' + encodeURIComponent(shardName) + knowledgePathQuery());
   const entry = (data.entries || {})[key];
   if (!entry) { alert('Entry not found'); return; }
   const summary = prompt('Edit summary:', entry.summary || '');
@@ -4278,8 +4581,8 @@ async function editKnowledgeEntry(shardName, key) {
   entry.summary = summary;
   entry.last_modified_at = new Date().toISOString();
   try {
-    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry)
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key) + knowledgePathQuery(), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...entry, path: currentKnowledgePath })
     });
     selectKnowledgeShard(shardName);
   } catch (e) { alert(e?.message || 'Failed'); }
@@ -4288,7 +4591,7 @@ async function editKnowledgeEntry(shardName, key) {
 async function deleteKnowledgeEntry(shardName, key) {
   if (!confirm('Delete entry "'+key+'"?')) return;
   try {
-    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key), { method: 'DELETE' });
+    await fetch('/api/knowledge/shards/' + encodeURIComponent(shardName) + '/entries/' + encodeURIComponent(key) + knowledgePathQuery(), { method: 'DELETE' });
     selectKnowledgeShard(shardName);
   } catch (e) { alert(e?.message || 'Failed'); }
 }
@@ -4379,6 +4682,418 @@ async function renderLoopStatsPanel() {
   }
 }
 
+let simulatorSelectedRunId = null;
+let simulatorSelectedFilePath = '';
+let simulatorRunCache = [];
+let simulatorDetailOpenStateByRun = {};
+
+function captureSimulatorDetailOpenState() {
+  const root = document.getElementById('sim-run-detail');
+  if (!root || !simulatorSelectedRunId) return;
+  const state = {};
+  root.querySelectorAll('details[data-sim-key]').forEach(el => {
+    const key = el.dataset.simKey;
+    if (!key) return;
+    state[key] = !!el.open;
+  });
+  simulatorDetailOpenStateByRun[simulatorSelectedRunId] = state;
+}
+
+function simulatorDetailOpenAttr(state, key, defaultOpen) {
+  const has = Object.prototype.hasOwnProperty.call(state || {}, key);
+  const isOpen = has ? !!state[key] : !!defaultOpen;
+  return isOpen ? 'open' : '';
+}
+
+function bindSimulatorDetailInteractions() {
+  const root = document.getElementById('sim-run-detail');
+  if (!root || root.dataset.simBound === '1') return;
+  root.dataset.simBound = '1';
+  root.addEventListener('mouseenter', () => {
+    simulatorDetailHovering = true;
+  });
+  root.addEventListener('mouseleave', () => {
+    simulatorDetailHovering = false;
+    if (simulatorDetailPendingRefresh) {
+      simulatorDetailPendingRefresh = false;
+      refreshSimulatorPanelContent(true);
+    }
+  });
+  root.addEventListener('toggle', () => {
+    captureSimulatorDetailOpenState();
+  }, true);
+}
+
+function getSimulatorFormData() {
+  return {
+    instruction: (document.getElementById('sim-instruction')?.value || '').trim(),
+    communication: (document.getElementById('sim-communication')?.value || 'bridge').trim(),
+    coder_provider: (document.getElementById('sim-coder-provider')?.value || 'codex').trim(),
+    judge_provider: (document.getElementById('sim-judge-provider')?.value || 'codex').trim(),
+    session_mode: (document.getElementById('sim-session-mode')?.value || 'continuous').trim(),
+    max_attempts: parseInt(document.getElementById('sim-max-attempts')?.value || '1', 10) || 1,
+    coder_timeout_seconds: parseInt(document.getElementById('sim-coder-timeout')?.value || '180', 10) || 180,
+    judge_timeout_seconds: parseInt(document.getElementById('sim-judge-timeout')?.value || '120', 10) || 120,
+    test_timeout_seconds: parseInt(document.getElementById('sim-test-timeout')?.value || '60', 10) || 60,
+    test_cmd: (document.getElementById('sim-test-cmd')?.value || 'true').trim() || 'true'
+  };
+}
+
+function simulatorSetMessage(msg, color) {
+  const notice = document.getElementById('sim-run-notice');
+  if (!notice) return;
+  notice.textContent = msg || '';
+  notice.style.color = color || '#8b949e';
+}
+
+async function renderSimulatorPanel() {
+  const wrap = document.getElementById('simulator-panel');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="sim-panel-header">
+      <h2 style="margin:0">Coordinator Simulator</h2>
+      <span class="sim-panel-note">Runs in isolated folder: <code>Rdloop/Coordinator Simulator/</code></span>
+    </div>
+
+    <div id="sim-run-notice" style="font-size:12px;color:#8b949e;margin-bottom:8px"></div>
+
+    <div class="sim-form">
+      <div class="sim-form-row sim-span-2">
+        <label class="form-label">Instruction</label>
+        <textarea id="sim-instruction" class="code-editor" style="min-height:90px" placeholder="Describe the instruction to send into the real coordinator..."></textarea>
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Communication</label>
+        <select id="sim-communication" class="form-select">
+          <option value="bridge" selected>Bridge</option>
+          <option value="ccb">CCB</option>
+        </select>
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Session Mode</label>
+        <select id="sim-session-mode" class="form-select">
+          <option value="continuous" selected>continuous</option>
+          <option value="iterative">iterative</option>
+          <option value="fresh">fresh</option>
+        </select>
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Coder Adapter</label>
+        <select id="sim-coder-provider" class="form-select">
+          <option value="codex" selected>codex</option>
+          <option value="claude">claude</option>
+          <option value="gemini">gemini</option>
+          <option value="opencode">opencode</option>
+          <option value="droid">droid</option>
+          <option value="cursor">cursor</option>
+        </select>
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Judge Adapter</label>
+        <select id="sim-judge-provider" class="form-select">
+          <option value="codex" selected>codex</option>
+          <option value="claude">claude</option>
+          <option value="gemini">gemini</option>
+          <option value="opencode">opencode</option>
+          <option value="droid">droid</option>
+          <option value="cursor">cursor</option>
+        </select>
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Max Attempts</label>
+        <input id="sim-max-attempts" class="form-input" type="number" min="1" max="6" value="1">
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Coder Timeout (s)</label>
+        <input id="sim-coder-timeout" class="form-input" type="number" min="15" max="3600" value="180">
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Judge Timeout (s)</label>
+        <input id="sim-judge-timeout" class="form-input" type="number" min="15" max="3600" value="120">
+      </div>
+      <div class="sim-form-row">
+        <label class="form-label">Test Timeout (s)</label>
+        <input id="sim-test-timeout" class="form-input" type="number" min="5" max="1200" value="60">
+      </div>
+      <div class="sim-form-row sim-span-2">
+        <label class="form-label">test_cmd</label>
+        <input id="sim-test-cmd" class="form-input" type="text" value="true">
+      </div>
+      <div class="sim-form-row sim-span-2" style="display:flex;gap:8px">
+        <button type="button" class="btn btn-primary write-action" onclick="startCoordinatorSimulation(event)">Run Simulator</button>
+        <button type="button" class="btn write-action" onclick="refreshSimulatorPanelContent(true)">Refresh</button>
+      </div>
+    </div>
+
+    <div class="sim-body">
+      <div id="sim-runs-list" class="sim-card"><div style="color:#8b949e;font-size:12px">Loading runs...</div></div>
+      <div id="sim-run-detail" class="sim-card"><div style="color:#8b949e;font-size:12px">Select a run.</div></div>
+    </div>
+  `;
+  updateReadOnlyBanner();
+  bindSimulatorDetailInteractions();
+  await refreshSimulatorPanelContent(true);
+}
+
+async function startCoordinatorSimulation(event) {
+  const btn = event?.currentTarget;
+  setButtonLoading(btn, true);
+  const payload = getSimulatorFormData();
+  if (!payload.instruction) {
+    simulatorSetMessage('Instruction is required.', '#f85149');
+    setButtonLoading(btn, false);
+    return;
+  }
+  simulatorSetMessage('Launching coordinator simulator run...', '#8b949e');
+  try {
+    const res = await fetch('/api/coordinator-simulator/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      simulatorSetMessage(data.error || 'Failed to start simulator run.', '#f85149');
+      return;
+    }
+    simulatorSelectedRunId = data.run_id;
+    simulatorSelectedFilePath = '';
+    simulatorSetMessage(`Started ${data.run_id} (task_id=${data.task_id}, pid=${data.pid}).`, '#3fb950');
+    await refreshSimulatorPanelContent(true);
+  } catch (e) {
+    simulatorSetMessage('Request failed: ' + (e?.message || String(e)), '#f85149');
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+function renderSimulatorRunsList(runs) {
+  const listWrap = document.getElementById('sim-runs-list');
+  if (!listWrap) return;
+  if (!Array.isArray(runs) || runs.length === 0) {
+    listWrap.innerHTML = '<h3 style="margin-top:0">Runs</h3><div style="color:#8b949e;font-size:12px">No simulator runs yet.</div>';
+    return;
+  }
+  const html = runs.map(r => {
+    const active = r.run_id === simulatorSelectedRunId;
+    const state = r.state || 'UNKNOWN';
+    const badgeCls = state === 'RUNNING' ? 'badge-running' : (state === 'PAUSED' ? 'badge-paused' : (state === 'READY_FOR_REVIEW' ? 'badge-ready' : 'badge-failed'));
+    const runIdArg = JSON.stringify(String(r.run_id || ''));
+    return `
+      <div class="sim-run-item ${active ? 'active' : ''}" onclick="selectSimulatorRun('${escapeHtml(r.run_id)}')">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+          <strong style="font-size:12px">${escapeHtml(r.run_id)}</strong>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="badge ${badgeCls}">${escapeHtml(state)}</span>
+            <button type="button" class="btn btn-danger sim-run-delete write-action" title="Delete run"
+              onclick='deleteSimulatorRun(${runIdArg}, event)'>Delete</button>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#8b949e;margin-top:4px">${escapeHtml(r.communication || '')} · coder=${escapeHtml(r.coder_provider || '')} · judge=${escapeHtml(r.judge_provider || '')}</div>
+        <div style="font-size:11px;color:#8b949e;margin-top:2px">${escapeHtml((r.created_at || '').replace('T', ' ').replace('Z', ''))}</div>
+      </div>`;
+  }).join('');
+  listWrap.innerHTML = `<h3 style="margin-top:0">Runs</h3>${html}`;
+}
+
+function renderSimulatorFileTree(fileTree) {
+  const rows = (Array.isArray(fileTree) ? fileTree : []).slice(0, 400).map(f => {
+    const isDir = f.type === 'dir';
+    const clickable = !isDir;
+    const selected = !isDir && simulatorSelectedFilePath === String(f.path) ? ' sim-file-selected' : '';
+    const size = isDir ? '' : ` (${escapeHtml(String(f.size || 0))} bytes)`;
+    const open = clickable
+      ? `<button type="button" class="btn" style="padding:2px 8px;font-size:11px" onclick='openSimulatorFile(${JSON.stringify(String(f.path))})'>Open</button>`
+      : '';
+    return `<tr class="${selected}">
+      <td style="padding:4px;border-bottom:1px solid #21262d;font-family:monospace;font-size:11px">${escapeHtml(String(f.path))}${size}</td>
+      <td style="padding:4px;border-bottom:1px solid #21262d;width:70px">${open}</td>
+    </tr>`;
+  }).join('');
+  const viewerDefault = simulatorSelectedFilePath
+    ? 'Loading selected file...'
+    : 'Select a file from the list to view contents.';
+  return `
+    <div class="sim-file-split">
+      <pre id="sim-file-viewer" class="sim-file-viewer">${escapeHtml(viewerDefault)}</pre>
+      <div class="sim-file-list">
+        ${rows
+          ? `<table style="width:100%;border-collapse:collapse;font-size:12px"><tbody>${rows}</tbody></table>`
+          : '<div style="color:#8b949e;font-size:12px">No files yet.</div>'}
+      </div>
+    </div>`;
+}
+
+function renderSimulatorAttempts(attempts, detailOpenState) {
+  if (!Array.isArray(attempts) || attempts.length === 0) {
+    return '<div style="color:#8b949e;font-size:12px">No attempts yet.</div>';
+  }
+  return attempts.map(a => {
+    const dispatch = (a.coder_dispatch_lines || []).map(line => `<div>${escapeHtml(line)}</div>`).join('');
+    const attemptKey = `attempt-${a.attempt || 0}`;
+    const attemptOpen = simulatorDetailOpenAttr(detailOpenState, attemptKey, false);
+    return `
+      <details class="sim-attempt" data-sim-key="${escapeHtml(attemptKey)}" ${attemptOpen}>
+        <summary>Attempt ${escapeHtml(String(a.attempt || 0))}</summary>
+        <div style="font-size:12px;color:#8b949e;margin-top:6px">worktree: <code>${escapeHtml(a.worktree_path || '(not created yet)')}</code></div>
+        ${a.files?.prompt ? `<div style="margin-top:6px"><button type="button" class="btn" style="padding:2px 8px;font-size:11px" onclick="openSimulatorFile('${escapeHtml(a.files.prompt)}')">Open prompt.txt</button></div>` : ''}
+        ${a.files?.evidence ? `<div style="margin-top:6px"><button type="button" class="btn" style="padding:2px 8px;font-size:11px" onclick="openSimulatorFile('${escapeHtml(a.files.evidence)}')">Open evidence.json</button></div>` : ''}
+        ${dispatch ? `<div style="margin-top:8px"><strong>Adapter dispatch</strong><div style="font-size:11px;margin-top:4px">${dispatch}</div></div>` : ''}
+        ${a.coder_prompt ? `<div style="margin-top:8px"><strong>Prompt Handoff</strong><pre>${escapeHtml(a.coder_prompt)}</pre></div>` : ''}
+        ${a.solo_request ? `<div style="margin-top:8px"><strong>Bridge Request</strong><pre>${escapeHtml(a.solo_request)}</pre></div>` : ''}
+        ${a.coder_run_log_tail ? `<div style="margin-top:8px"><strong>Coder Log (tail)</strong><pre>${escapeHtml(a.coder_run_log_tail)}</pre></div>` : ''}
+        ${a.judge_run_log_tail ? `<div style="margin-top:8px"><strong>Judge Log (tail)</strong><pre>${escapeHtml(a.judge_run_log_tail)}</pre></div>` : ''}
+      </details>`;
+  }).join('');
+}
+
+async function openSimulatorFile(relPath) {
+  if (!simulatorSelectedRunId || !relPath) return;
+  simulatorSelectedFilePath = relPath;
+  const panel = document.getElementById('sim-file-viewer');
+  if (panel) panel.textContent = 'Loading...';
+  try {
+    const data = await api(`/coordinator-simulator/runs/${encodeURIComponent(simulatorSelectedRunId)}/file?path=${encodeURIComponent(relPath)}`);
+    const content = data.content || '';
+    const meta = `${relPath} (${data.size || 0} bytes${data.truncated ? ', truncated tail' : ''})`;
+    if (panel) panel.textContent = `${meta}\n\n${content}`;
+  } catch (e) {
+    if (panel) panel.textContent = 'Failed to load file: ' + (e?.message || String(e));
+  }
+}
+
+async function stopSimulatorRun(event) {
+  const btn = event?.currentTarget;
+  if (!simulatorSelectedRunId) return;
+  setButtonLoading(btn, true);
+  try {
+    const res = await fetch(`/api/coordinator-simulator/runs/${encodeURIComponent(simulatorSelectedRunId)}/stop`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      simulatorSetMessage(data.error || 'Stop failed.', '#f85149');
+      return;
+    }
+    simulatorSetMessage(data.stopped ? `Sent SIGTERM to pid ${data.pid}.` : (data.message || 'Not running.'), '#d29922');
+    await refreshSimulatorPanelContent(true);
+  } catch (e) {
+    simulatorSetMessage('Stop failed: ' + (e?.message || String(e)), '#f85149');
+  } finally {
+    setButtonLoading(btn, false);
+  }
+}
+
+async function deleteSimulatorRun(runId, event) {
+  if (event) event.stopPropagation();
+  const targetRunId = (runId || simulatorSelectedRunId || '').trim();
+  if (!targetRunId) return;
+  if (!confirm(`Delete simulator run ${targetRunId}? This removes its sandbox files.`)) return;
+  try {
+    const res = await fetch(`/api/coordinator-simulator/runs/${encodeURIComponent(targetRunId)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      simulatorSetMessage(data.error || 'Delete failed.', '#f85149');
+      return;
+    }
+    if (simulatorSelectedRunId === targetRunId) {
+      simulatorSelectedRunId = null;
+      simulatorSelectedFilePath = '';
+      delete simulatorDetailOpenStateByRun[targetRunId];
+    }
+    simulatorSetMessage(`Deleted ${targetRunId}.`, '#d29922');
+    await refreshSimulatorPanelContent(true);
+  } catch (e) {
+    simulatorSetMessage('Delete failed: ' + (e?.message || String(e)), '#f85149');
+  }
+}
+
+function selectSimulatorRun(runId) {
+  simulatorSelectedRunId = runId;
+  simulatorSelectedFilePath = '';
+  refreshSimulatorPanelContent(true);
+}
+
+async function refreshSimulatorPanelContent(force = false) {
+  const wrap = document.getElementById('simulator-panel');
+  if (!wrap || wrap.style.display !== 'block') return;
+  try {
+    captureSimulatorDetailOpenState();
+    const runsRes = await api('/coordinator-simulator/runs');
+    simulatorRunCache = Array.isArray(runsRes.runs) ? runsRes.runs : [];
+    if (!simulatorSelectedRunId && simulatorRunCache.length > 0) {
+      simulatorSelectedRunId = simulatorRunCache[0].run_id;
+    } else if (simulatorSelectedRunId && !simulatorRunCache.some(r => r.run_id === simulatorSelectedRunId)) {
+      simulatorSelectedRunId = simulatorRunCache[0]?.run_id || null;
+    }
+    renderSimulatorRunsList(simulatorRunCache);
+    const detailWrap = document.getElementById('sim-run-detail');
+    if (!simulatorSelectedRunId) {
+      if (detailWrap) detailWrap.innerHTML = '<h3 style="margin-top:0">Run Detail</h3><div style="color:#8b949e;font-size:12px">No run selected.</div>';
+      return;
+    }
+    if (!force && simulatorDetailHovering) {
+      simulatorDetailPendingRefresh = true;
+      return;
+    }
+    const detail = await api(`/coordinator-simulator/runs/${encodeURIComponent(simulatorSelectedRunId)}`);
+    const status = detail.status || {};
+    const run = detail.run || {};
+    const detailOpenState = simulatorDetailOpenStateByRun[simulatorSelectedRunId] || {};
+    const behaviorRows = (detail.behavior_summary || []).slice(-100).map(b => `<li><code>${escapeHtml(b.type || '')}</code> ${escapeHtml(b.detail || '')}</li>`).join('');
+    const eventsTail = (detail.events || []).slice(-80).map(ev => `<tr>
+      <td style="padding:4px;border-bottom:1px solid #21262d;font-family:monospace;font-size:11px">${escapeHtml(ev.ts || '')}</td>
+      <td style="padding:4px;border-bottom:1px solid #21262d">${escapeHtml(ev.type || '')}</td>
+      <td style="padding:4px;border-bottom:1px solid #21262d">${escapeHtml(ev.summary || '')}</td>
+    </tr>`).join('');
+    detailWrap.innerHTML = `
+      <h3 style="margin-top:0;display:flex;justify-content:space-between;align-items:center">
+        <span>Run Detail: ${escapeHtml(simulatorSelectedRunId)}</span>
+        <div style="display:flex;gap:8px">
+          <button type="button" class="btn btn-danger write-action" onclick="stopSimulatorRun(event)">Stop</button>
+          <button type="button" class="btn btn-danger write-action" onclick='deleteSimulatorRun(${JSON.stringify(String(simulatorSelectedRunId))}, event)'>Delete</button>
+        </div>
+      </h3>
+      <div style="font-size:12px;margin-bottom:8px">
+        <div>state: <strong>${escapeHtml(status.state || 'UNKNOWN')}</strong> · attempt ${escapeHtml(String(status.current_attempt || 0))}/${escapeHtml(String(status.max_attempts || '-'))}</div>
+        <div>task_id: <code>${escapeHtml(run.task_id || '')}</code> · communication: <code>${escapeHtml(run.communication || '')}</code></div>
+        <div>sandbox: <code>${escapeHtml(run.sandbox_root || '')}</code></div>
+      </div>
+
+      <details class="sim-section" data-sim-key="section-behaviors" ${simulatorDetailOpenAttr(detailOpenState, 'section-behaviors', true)}>
+        <summary>Coordinator Behaviors (Derived + Raw)</summary>
+        <ul style="font-size:12px;padding-left:18px;margin-top:8px">${behaviorRows || '<li>(none yet)</li>'}</ul>
+        <div style="margin-top:8px">
+          <strong>events.jsonl tail</strong>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px"><tbody>${eventsTail || '<tr><td style="padding:4px;color:#8b949e">No events yet.</td></tr>'}</tbody></table>
+        </div>
+      </details>
+
+      <details class="sim-section" data-sim-key="section-attempts" ${simulatorDetailOpenAttr(detailOpenState, 'section-attempts', true)}>
+        <summary>Attempts, Handoff, Adapter Dispatch</summary>
+        ${renderSimulatorAttempts(detail.attempts || [], detailOpenState)}
+      </details>
+
+      <details class="sim-section" data-sim-key="section-runtime-log" ${simulatorDetailOpenAttr(detailOpenState, 'section-runtime-log', false)}>
+        <summary>Coordinator Runtime Log</summary>
+        <pre>${escapeHtml(detail.coordinator_log_tail || '(empty)')}</pre>
+      </details>
+
+      <details class="sim-section" data-sim-key="section-files" ${simulatorDetailOpenAttr(detailOpenState, 'section-files', false)}>
+        <summary>Generated Files</summary>
+        ${renderSimulatorFileTree(detail.file_tree || [])}
+      </details>
+    `;
+    bindSimulatorDetailInteractions();
+    if (simulatorSelectedFilePath) {
+      openSimulatorFile(simulatorSelectedFilePath);
+    }
+  } catch (e) {
+    const detailWrap = document.getElementById('sim-run-detail');
+    if (detailWrap) detailWrap.innerHTML = `<div style="color:#f85149;font-size:12px">Failed to refresh simulator data: ${escapeHtml(e?.message || String(e))}</div>`;
+  }
+}
+
 // Initial load (K7-1: load health for read_only first so banner and button state are correct)
 loadHealth().then(() => {
   loadTasks();
@@ -4388,4 +5103,5 @@ loadHealth().then(() => {
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsPanel);
   document.getElementById('nav-tasks')?.addEventListener('click', () => switchView('tasks'));
   document.getElementById('nav-ccb')?.addEventListener('click', () => switchView('ccb'));
+  document.getElementById('nav-simulator')?.addEventListener('click', () => switchView('simulator'));
 });
