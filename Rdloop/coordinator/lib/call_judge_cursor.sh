@@ -29,10 +29,16 @@ except: print('auto')
 " 2>/dev/null || echo "auto")
 fi
 
-system_content=""
-[ -f "$judge_prompt_path" ] && system_content=$(cat "$judge_prompt_path")
-user_content="---"
-[ -f "$evidence_json_path" ] && user_content="$user_content"$'\n'"$(cat "$evidence_json_path")"
+judge_request_path="${JUDGE_REQUEST_PATH:-}"
+if [ -n "$judge_request_path" ] && [ -f "$judge_request_path" ]; then
+  system_content=""
+  user_content="$(cat "$judge_request_path")"
+else
+  system_content=""
+  [ -f "$judge_prompt_path" ] && system_content=$(cat "$judge_prompt_path")
+  user_content="---"
+  [ -f "$evidence_json_path" ] && user_content="$user_content"$'\n'"$(cat "$evidence_json_path")"
+fi
 
 payload=$(python3 -c "
 import json,sys

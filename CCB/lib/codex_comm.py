@@ -875,7 +875,13 @@ class CodexCommunicator:
                 try:
                     result = subprocess.run(["ps", "-p", str(codex_pid)], capture_output=True, timeout=2)
                     if result.returncode != 0:
-                        return False, f"Codex process (PID:{codex_pid}) has exited"
+                        stderr_text = ""
+                        try:
+                            stderr_text = (result.stderr or b"").decode("utf-8", errors="ignore").lower()
+                        except Exception:
+                            stderr_text = ""
+                        if "operation not permitted" not in stderr_text and "not permitted" not in stderr_text:
+                            return False, f"Codex process (PID:{codex_pid}) has exited"
                 except Exception:
                     pass  # 无法验证，假设存在
             except OSError:
@@ -897,7 +903,13 @@ class CodexCommunicator:
                 try:
                     result = subprocess.run(["ps", "-p", str(bridge_pid)], capture_output=True, timeout=2)
                     if result.returncode != 0:
-                        return False, f"Bridge process (PID:{bridge_pid}) has exited"
+                        stderr_text = ""
+                        try:
+                            stderr_text = (result.stderr or b"").decode("utf-8", errors="ignore").lower()
+                        except Exception:
+                            stderr_text = ""
+                        if "operation not permitted" not in stderr_text and "not permitted" not in stderr_text:
+                            return False, f"Bridge process (PID:{bridge_pid}) has exited"
                 except Exception:
                     pass  # 无法验证，假设存在
             except OSError:

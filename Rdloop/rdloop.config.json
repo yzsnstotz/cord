@@ -3,9 +3,8 @@
   "default_judge": "ccb",
   "default_coder_model": "codex",
   "default_judge_model": "gemini",
-  "default_execution_mode": "semi-auto",
+  "default_run_surface": "visual_ccb",
   "agent_root": "/Users/yzliu/work/Cord/Agent",
-  "_comment_execution_mode": "auto = coordinator spawns bridge (claude_bridge), full auto; semi-auto = attach to human tmux (CCB cask/gask), human may intervene",
   "ccb_path": "/Users/yzliu/work/Cord/CCB",
   "ccb_work_dir": "/Users/yzliu/work/projects/cord_test",
   "use_wezterm_for_all": false

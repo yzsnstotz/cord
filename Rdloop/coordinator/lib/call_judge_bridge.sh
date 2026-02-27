@@ -44,15 +44,20 @@ except: print('')
   [ -n "$wt" ] && [ -d "$wt" ] && worktree_dir="$wt"
 fi
 
-# Build stdin: prompt + evidence
-full_instruction=""
-if [ -f "$judge_prompt_path" ]; then
-  full_instruction=$(cat "$judge_prompt_path")
-fi
-full_instruction="${full_instruction}
+# Build stdin from coordinator-owned request core when available.
+judge_request_path="${JUDGE_REQUEST_PATH:-}"
+if [ -n "$judge_request_path" ] && [ -f "$judge_request_path" ]; then
+  full_instruction="$(cat "$judge_request_path")"
+else
+  full_instruction=""
+  if [ -f "$judge_prompt_path" ]; then
+    full_instruction=$(cat "$judge_prompt_path")
+  fi
+  full_instruction="${full_instruction}
 ---
 "
-[ -f "$evidence_json_path" ] && full_instruction="${full_instruction}$(cat "$evidence_json_path")"
+  [ -f "$evidence_json_path" ] && full_instruction="${full_instruction}$(cat "$evidence_json_path")"
+fi
 
 tout=""
 command -v timeout >/dev/null 2>&1 && tout="timeout"

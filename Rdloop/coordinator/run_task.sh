@@ -787,14 +787,43 @@ setup_worktree() {
   local att_num="$1" repo="$2" bref="$3"
   local pad; pad=$(printf "%03d" "$att_num")
   local wt="${WORKTREES_DIR}/${TASK_ID}/attempt_${pad}"
-  # Create repo path if it does not exist (so setting repo_path to a new dir does not fail before git init)
-  if [ -n "$repo" ] && [ ! -d "$repo" ]; then
-    mkdir -p "$repo"
+  [ -z "$bref" ] && bref="main"
+  if [ -z "$repo" ]; then
+    enter_paused "PAUSED_NOT_GIT_REPO" "repo_path is empty" \
+      "[\"Set repo_path to a directory.\"]"
+    NORMAL_EXIT=1; exit 0
   fi
-  # Check repo is git
+  # Auto-create and auto-initialize git repo when needed.
+  if [ ! -d "$repo" ]; then
+    mkdir -p "$repo" 2>/dev/null || {
+      enter_paused "PAUSED_NOT_GIT_REPO" "Cannot create repo_path '${repo}'" \
+        "[\"Check path permissions or choose another folder.\"]"
+      NORMAL_EXIT=1; exit 0
+    }
+  fi
   if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
-    enter_paused "PAUSED_NOT_GIT_REPO" "repo_path '${repo}' is not a git repository" \
-      "[\"${repo} is not a git repo. Please init git or fix repo_path.\"]"
+    git -C "$repo" init >/dev/null 2>&1 || {
+      enter_paused "PAUSED_NOT_GIT_REPO" "Failed to initialize git repository at '${repo}'" \
+        "[\"Check write permission and git availability, then run next.\"]"
+      NORMAL_EXIT=1; exit 0
+    }
+  fi
+  # Ensure a usable base ref exists for worktree creation.
+  if ! git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1; then
+    git -C "$repo" checkout -B "$bref" >/dev/null 2>&1 || true
+    git -C "$repo" -c user.name=rdloop -c user.email=rdloop@local \
+      commit --allow-empty -m "Initialize repository for rdloop" >/dev/null 2>&1 || {
+      enter_paused "PAUSED_NOT_GIT_REPO" "Failed to create initial commit in '${repo}'" \
+        "[\"Check git config/permissions and run next.\"]"
+      NORMAL_EXIT=1; exit 0
+    }
+  fi
+  if ! git -C "$repo" show-ref --verify --quiet "refs/heads/${bref}"; then
+    git -C "$repo" branch "$bref" HEAD >/dev/null 2>&1 || true
+  fi
+  if ! git -C "$repo" show-ref --verify --quiet "refs/heads/${bref}"; then
+    enter_paused "PAUSED_NOT_GIT_REPO" "base_ref '${bref}' unavailable in '${repo}'" \
+      "[\"Choose a valid base_ref or rerun after fixing repository state.\"]"
     NORMAL_EXIT=1; exit 0
   fi
   mkdir -p "$(dirname "$wt")"
@@ -1025,9 +1054,19 @@ run_attempt() {
     [ -z "$coder_model" ] && coder_model=$(json_read "$config_json" "default_coder_model" "")
     [ -z "$judge_model" ] && judge_model=$(json_read "$config_json" "default_judge_model" "")
   fi
-  # v5.0: executor_type × session_mode two-parameter routing (replaces workflow_mode)
+  # v5.0: executor_type × session_mode routing, with run_surface for solo/multi.
   local executor_type; executor_type=$(json_read "$TASK_JSON" "executor_type" "")
   local session_mode; session_mode=$(json_read "$TASK_JSON" "session_mode" "continuous")
+  local run_surface; run_surface=$(json_read "$TASK_JSON" "run_surface" "")
+  if [ -z "$run_surface" ]; then
+    local legacy_execution_mode
+    legacy_execution_mode=$(json_read "$TASK_JSON" "execution_mode" "auto")
+    if [ "$legacy_execution_mode" = "semi-auto" ]; then
+      run_surface="visual_ccb"
+    else
+      run_surface="bridge"
+    fi
+  fi
   local context_strategy=""
 
   if [ -n "$executor_type" ]; then
@@ -1043,8 +1082,34 @@ run_attempt() {
         fi
         ;;
       solo_agent)
-        coder_type="solo"
-        judge_type="none"  # agent self-reviews via coordinator loop
+        # Solo mode: coder and judge should use the same provider/model, but run in separate instances/contexts.
+        [ -z "$judge_model" ] && judge_model="$coder_model"
+        local solo_provider="claude"
+        case "${coder_model}" in
+          codex*|*codex*) solo_provider="codex" ;;
+          gemini*|*gemini*) solo_provider="gemini" ;;
+          opencode*|*opencode*) solo_provider="opencode" ;;
+          droid*|*droid*) solo_provider="droid" ;;
+          cursor*|*cursor*) solo_provider="cursor" ;;
+          antigravity*|*antigravity*) solo_provider="antigravity" ;;
+          *) solo_provider="claude" ;;
+        esac
+        if [ "$run_surface" = "visual_ccb" ]; then
+          coder_type="ccb"
+          judge_type="ccb"
+        else
+          coder_type="solo"
+          case "$solo_provider" in
+            codex) judge_type="codex" ;;
+            claude) judge_type="claude" ;;
+            cursor) judge_type="cursor" ;;
+            antigravity) judge_type="antigravity" ;;
+            *)
+              log_error "solo_agent + bridge requires a supported judge adapter provider. coder_model='${coder_model}' resolved provider='${solo_provider}'. Supported: claude, codex, cursor, antigravity."
+              exit 1
+              ;;
+          esac
+        fi
         ;;
       multi_agent)
         coder_type="ccb"
@@ -1088,6 +1153,18 @@ run_attempt() {
   local ccb_coder_provider ccb_judge_provider
   ccb_coder_provider=$(json_read "$TASK_JSON" "collab_roles.executor" "")
   ccb_judge_provider=$(json_read "$TASK_JSON" "collab_roles.reviewer" "")
+  if [ "$executor_type" = "solo_agent" ] && [ "$coder_script_suffix" = "ccb" ]; then
+    if [ -z "$ccb_coder_provider" ]; then
+      case "${coder_model}" in
+        codex*|*codex*) ccb_coder_provider="codex" ;;
+        gemini*|*gemini*) ccb_coder_provider="gemini" ;;
+        opencode*|*opencode*) ccb_coder_provider="opencode" ;;
+        droid*|*droid*) ccb_coder_provider="droid" ;;
+        *) ccb_coder_provider="claude" ;;
+      esac
+    fi
+    [ -z "$ccb_judge_provider" ] && ccb_judge_provider="$ccb_coder_provider"
+  fi
   coder_timeout=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")
@@ -1136,6 +1213,17 @@ run_attempt() {
     fi
   else
     wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
+  fi
+  # Safety: if setup_worktree failed in subshell command substitution, wt can be empty.
+  # Never continue coder/test/judge with an invalid worktree, or execution may fall back to coordinator cwd.
+  if [ -z "${wt:-}" ] || [ ! -d "$wt" ]; then
+    local cur_state=""
+    [ -f "${TASK_DIR}/status.json" ] && cur_state=$(json_read "${TASK_DIR}/status.json" "state" "")
+    if [ "$cur_state" != "PAUSED" ]; then
+      enter_paused "PAUSED_CRASH" "worktree setup failed or returned empty path" \
+        '["Fix repo_path/base_ref and run next."]' "NEED_USER_INPUT" "" "true"
+    fi
+    NORMAL_EXIT=1; exit 0
   fi
   write_env_json "$att_dir" "$task_code" "$att_num"
 
@@ -1344,11 +1432,35 @@ print(json.dumps(cs))
     mkdir -p "${att_dir}/judge"
     local coder_rc_val; coder_rc_val=$(cat "${att_dir}/coder/rc.txt" 2>/dev/null || echo "1")
     if [ "$coder_rc_val" = "0" ]; then
-      echo '{"verdict":"PASS","score":8,"reasoning":"Solo mode auto-pass (coder exit 0)","dimensions":{}}' > "${att_dir}/judge/verdict.json"
+      cat > "${att_dir}/judge/verdict.json" <<'EOF'
+{
+  "schema_version": "v1",
+  "decision": "PASS",
+  "reasons": ["Solo mode auto-pass (coder exit 0)"],
+  "next_instructions": "",
+  "questions_for_user": []
+}
+EOF
     elif [ "$coder_rc_val" = "2" ]; then
-      echo '{"verdict":"NEED_USER_INPUT","score":0,"reasoning":"Agent requested user input","dimensions":{}}' > "${att_dir}/judge/verdict.json"
+      cat > "${att_dir}/judge/verdict.json" <<'EOF'
+{
+  "schema_version": "v1",
+  "decision": "NEED_USER_INPUT",
+  "reasons": ["Agent requested user input"],
+  "next_instructions": "",
+  "questions_for_user": ["Please provide the requested clarification and run next attempt."]
+}
+EOF
     else
-      echo '{"verdict":"FAIL","score":3,"reasoning":"Coder exited with non-zero: '"$coder_rc_val"'","dimensions":{}}' > "${att_dir}/judge/verdict.json"
+      cat > "${att_dir}/judge/verdict.json" <<EOF
+{
+  "schema_version": "v1",
+  "decision": "FAIL",
+  "reasons": ["Coder exited with non-zero: ${coder_rc_val}"],
+  "next_instructions": "Fix the coder failure (rc=${coder_rc_val}), then rerun the task.",
+  "questions_for_user": []
+}
+EOF
     fi
     echo "0" > "${att_dir}/judge/rc.txt"
     log_info "Judge skipped (judge_type=none), auto-verdict based on coder rc=${coder_rc_val}"
@@ -1372,6 +1484,13 @@ print(json.dumps(cs))
   fi
   cp "$jprompt" "${att_dir}/judge/prompt.txt" 2>/dev/null || : > "${att_dir}/judge/prompt.txt"
   export JUDGE_PROMPT_PATH="${att_dir}/judge/prompt.txt"
+  local jrequest="${att_dir}/judge/request.txt"
+  {
+    [ -f "$jprompt" ] && cat "$jprompt"
+    printf '\n---\n'
+    [ -f "${att_dir}/evidence.json" ] && cat "${att_dir}/evidence.json"
+  } > "$jrequest"
+  export JUDGE_REQUEST_PATH="$jrequest"
   export JUDGE_STDOUT_PATH="${att_dir}/judge/stdout.log"
   export JUDGE_STDERR_PATH="${att_dir}/judge/stderr.log"
   export JUDGE_RC_PATH="${att_dir}/judge/rc.txt"

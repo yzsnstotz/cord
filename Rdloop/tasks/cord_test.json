@@ -1,0 +1,39 @@
+{
+  "schema_version": "v1",
+  "task_id": "cord_test",
+  "task_type": "engineering_impl",
+  "execution_mode": "auto",
+  "channel_type": "ccb",
+  "repo_path": "/Users/yzliu/work/projects/cord_test/",
+  "base_ref": "main",
+  "goal": "pls create a folder in the project named \"cord_test\" and within it place a text file with content of \"hello world\"",
+  "acceptance": [],
+  "test_cmd": "true",
+  "max_attempts": 3,
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 300,
+  "attempt_context_mode": "fresh_each",
+  "constraints": [],
+  "allowed_paths": [],
+  "forbidden_globs": [
+    "**/.env",
+    "**/secrets*",
+    "**/*.pem"
+  ],
+  "coder": "ccb",
+  "judge": "ccb",
+  "coder_model": "codex",
+  "judge_model": "gemini",
+  "executor_instruction": "pls create a folder in the project named \"cord_test\" and within it place a text file with content of \"hello world\"",
+  "agent_config": {
+    "max_attempts": 10,
+    "auto_pass_threshold": 0.85,
+    "knowledge_shards": [],
+    "provider": "codex"
+  },
+  "executor_type": "solo_agent",
+  "session_mode": "continuous",
+  "workflow_mode": "solo",
+  "knowledge_enabled": true,
+  "knowledge_project_path": ""
+}

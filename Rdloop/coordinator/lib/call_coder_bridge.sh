@@ -27,17 +27,7 @@ try: print(json.load(open('$task_json')).get('coder_timeout_seconds',600))
 except: print(600)
 " 2>/dev/null || echo "600")
 
-project_path=$(python3 -c "
-import json
-try: print(json.load(open('$task_json')).get('repo_path',''))
-except: print('')
-" 2>/dev/null || echo "")
-
-knowledge_cache="${project_path}/.context/knowledge_cache.json"
-
-full_instruction="[WORKING DIRECTORY: ${worktree_dir}]
-[KNOWLEDGE CACHE: ${knowledge_cache}]
-${instruction}"
+full_instruction="${instruction}"
 
 tout=""
 command -v timeout >/dev/null 2>&1 && tout="timeout"

@@ -75,23 +75,25 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# solo_agent → solo
+# solo_agent → solo (bridge) and ccb (visual_ccb)
 TOTAL=$((TOTAL + 1))
-if grep -A2 'solo_agent)' "$RUN_TASK" | grep -q 'coder_type="solo"'; then
-  echo "  PASS: solo_agent routes to solo"
+if grep -A35 'solo_agent)' "$RUN_TASK" | grep -q 'coder_type="solo"' && \
+   grep -A35 'solo_agent)' "$RUN_TASK" | grep -q 'coder_type="ccb"'; then
+  echo "  PASS: solo_agent routes to solo/ccb by run_surface"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL: solo_agent should route to solo"
+  echo "  FAIL: solo_agent should route to solo/ccb by run_surface"
   FAIL=$((FAIL + 1))
 fi
 
-# multi_agent → ccb
+# multi_agent → ccb only (bridge routing removed from coordinator→agent path)
 TOTAL=$((TOTAL + 1))
-if grep -A2 'multi_agent)' "$RUN_TASK" | grep -q 'coder_type="ccb"'; then
-  echo "  PASS: multi_agent routes to ccb"
+if grep -A6 'multi_agent)' "$RUN_TASK" | grep -q 'coder_type="ccb"' && \
+   ! grep -A6 'multi_agent)' "$RUN_TASK" | grep -q 'coder_type="bridge"'; then
+  echo "  PASS: multi_agent routes to ccb only"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL: multi_agent should route to ccb"
+  echo "  FAIL: multi_agent should route to ccb only"
   FAIL=$((FAIL + 1))
 fi
 

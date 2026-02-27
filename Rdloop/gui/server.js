@@ -93,6 +93,133 @@ function ensureRepoPathExists(repoPath) {
   }
 }
 
+function isGitRepoDir(dirPath) {
+  if (!dirPath || typeof dirPath !== 'string') return false;
+  try {
+    const gitPath = path.join(dirPath, '.git');
+    return fs.existsSync(gitPath);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCandidatePath(rawPath) {
+  if (!rawPath || typeof rawPath !== 'string') return '';
+  const trimmed = rawPath.trim();
+  if (!trimmed) return '';
+  return path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(RDLOOP_ROOT, trimmed);
+}
+
+function collectRepoCandidates(seedPath) {
+  const candidates = new Set();
+  const roots = new Set();
+  const projectPath = getProjectPath();
+  const seedAbs = normalizeCandidatePath(seedPath);
+  if (seedAbs) candidates.add(seedAbs);
+  roots.add(RDLOOP_ROOT);
+  roots.add(path.dirname(RDLOOP_ROOT));
+  if (projectPath) {
+    roots.add(projectPath);
+    roots.add(path.dirname(projectPath));
+  }
+
+  // From task specs
+  try {
+    for (const f of fs.readdirSync(TASKS_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      const p = path.join(TASKS_DIR, f);
+      const obj = readJSON(p);
+      if (obj && obj.repo_path) candidates.add(normalizeCandidatePath(obj.repo_path));
+    }
+  } catch {}
+
+  // From existing run instances
+  try {
+    for (const d of fs.readdirSync(OUT_DIR)) {
+      if (d.startsWith('_')) continue;
+      const taskJsonPath = path.join(OUT_DIR, d, 'task.json');
+      if (!fs.existsSync(taskJsonPath)) continue;
+      const obj = readJSON(taskJsonPath);
+      if (obj && obj.repo_path) candidates.add(normalizeCandidatePath(obj.repo_path));
+    }
+  } catch {}
+
+  // Scan one level under roots for git repos
+  for (const root of roots) {
+    if (!root || !fs.existsSync(root)) continue;
+    if (isGitRepoDir(root)) candidates.add(path.normalize(root));
+    try {
+      const entries = fs.readdirSync(root, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        if (ent.name.startsWith('.')) continue;
+        const p = path.join(root, ent.name);
+        if (isGitRepoDir(p)) candidates.add(path.normalize(p));
+      }
+    } catch {}
+  }
+
+  return [...candidates]
+    .filter(Boolean)
+    .filter(p => fs.existsSync(p))
+    .slice(0, 200)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function collectFolderCandidates(seedPath) {
+  const candidates = new Set();
+  const roots = new Set();
+  const projectPath = getProjectPath();
+  const seedAbs = normalizeCandidatePath(seedPath);
+  if (seedAbs) candidates.add(seedAbs);
+  roots.add(RDLOOP_ROOT);
+  roots.add(path.dirname(RDLOOP_ROOT));
+  if (projectPath) {
+    roots.add(projectPath);
+    roots.add(path.dirname(projectPath));
+  }
+
+  try {
+    for (const f of fs.readdirSync(TASKS_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      const p = path.join(TASKS_DIR, f);
+      const obj = readJSON(p);
+      if (obj && obj.repo_path) candidates.add(normalizeCandidatePath(obj.repo_path));
+    }
+  } catch {}
+
+  try {
+    for (const d of fs.readdirSync(OUT_DIR)) {
+      if (d.startsWith('_')) continue;
+      const taskJsonPath = path.join(OUT_DIR, d, 'task.json');
+      if (!fs.existsSync(taskJsonPath)) continue;
+      const obj = readJSON(taskJsonPath);
+      if (obj && obj.repo_path) candidates.add(normalizeCandidatePath(obj.repo_path));
+    }
+  } catch {}
+
+  for (const root of roots) {
+    if (!root || !fs.existsSync(root)) continue;
+    candidates.add(path.normalize(root));
+    try {
+      const entries = fs.readdirSync(root, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        if (ent.name.startsWith('.')) continue;
+        candidates.add(path.normalize(path.join(root, ent.name)));
+      }
+    } catch {}
+  }
+
+  return [...candidates]
+    .filter(Boolean)
+    .filter(p => {
+      try { return fs.existsSync(p) && fs.statSync(p).isDirectory(); } catch { return false; }
+    })
+    .slice(0, 400)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 // Resolve CCB root path from config (so ccb/cask/gask are found when starting CCB sessions)
 function getCcbPath() {
   try {
@@ -278,6 +405,52 @@ function atomicWriteJSON(filepath, data) {
   }
 }
 
+function repairStaleRunningStatus(taskId, taskDir, status) {
+  try {
+    if (!status || normalizeState(status.state) !== 'RUNNING') return status;
+    const lockDir = path.join(taskDir, '.lockdir');
+    const lockPidPath = path.join(lockDir, 'pid');
+    const runnerPidPath = path.join(taskDir, 'gui', 'runner.pid');
+
+    let lockAlive = false;
+    if (fs.existsSync(lockPidPath)) {
+      const raw = fs.readFileSync(lockPidPath, 'utf8').trim();
+      const pid = parseInt(raw, 10);
+      lockAlive = !isNaN(pid) && isPidAlive(pid);
+    }
+    let runnerAlive = false;
+    if (fs.existsSync(runnerPidPath)) {
+      const raw = fs.readFileSync(runnerPidPath, 'utf8').trim();
+      const pid = parseInt(raw, 10);
+      runnerAlive = !isNaN(pid) && isPidAlive(pid);
+    }
+
+    const shouldRepair = (!lockAlive) && (!fs.existsSync(runnerPidPath) || !runnerAlive);
+    if (!shouldRepair) return status;
+
+    const repaired = {
+      ...status,
+      state: 'PAUSED',
+      last_decision: status.last_decision || 'NEED_USER_INPUT',
+      message: 'Task runner stopped unexpectedly before attempt completion.',
+      questions_for_user: ['Runner crashed or exited. Use Run Next to retry the attempt.'],
+      pause_category: 'PAUSED_INFRA',
+      pause_reason_code: 'PAUSED_CRASH',
+      updated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      state_version: Number(status.state_version || 1) + 1,
+      last_transition: {
+        consume_attempt: false,
+        reason_key: 'PAUSED_CRASH',
+        triggered_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+      }
+    };
+    atomicWriteJSON(path.join(taskDir, 'status.json'), repaired);
+    return repaired;
+  } catch {
+    return status;
+  }
+}
+
 // GET /api/tasks — cursor-based pagination (5.1)
 app.get('/api/tasks', (req, res) => {
   try {
@@ -293,7 +466,9 @@ app.get('/api/tasks', (req, res) => {
     });
 
     let tasks = dirs.map(taskId => {
-      const status = readJSON(path.join(OUT_DIR, taskId, 'status.json'));
+      const taskDir = path.join(OUT_DIR, taskId);
+      const statusRaw = readJSON(path.join(taskDir, 'status.json'));
+      const status = repairStaleRunningStatus(taskId, taskDir, statusRaw);
       if (!status) return null;
       const rawState = status?.state || 'UNKNOWN';
       const state = normalizeState(rawState);
@@ -303,7 +478,10 @@ app.get('/api/tasks', (req, res) => {
         return null;
       }
       const taskJson = readJSON(path.join(OUT_DIR, taskId, 'task.json'));
-      const execution_mode = (taskJson && taskJson.execution_mode === 'semi-auto') ? 'semi-auto' : 'auto';
+      const run_surface = taskJson?.run_surface === 'visual_ccb'
+        ? 'visual_ccb'
+        : ((taskJson?.execution_mode === 'semi-auto') ? 'visual_ccb' : 'bridge');
+      const execution_mode = run_surface === 'visual_ccb' ? 'semi-auto' : 'auto';
       return {
         task_id: taskId,
         state,
@@ -311,6 +489,7 @@ app.get('/api/tasks', (req, res) => {
         last_decision: status?.last_decision || '',
         message: status?.message || '',
         updated_at: updatedAt,
+        run_surface,
         execution_mode,
         _rank: stateRank(state)
       };
@@ -455,6 +634,8 @@ function resolveLiveLogPath(taskDir, logName) {
     } catch {}
     for (const attDir of attempts) {
       const roleDir = path.join(taskDir, attDir, role);
+      const soloRaw = path.join(taskDir, attDir, 'solo', '_raw_output.txt');
+      if (role === 'coder' && fs.existsSync(soloRaw)) return soloRaw;
       const runLog = path.join(roleDir, 'run.log');
       const stdoutLog = path.join(roleDir, 'stdout.log');
       const stderrLog = path.join(roleDir, 'stderr.log');
@@ -593,7 +774,9 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
   const env = readJSON(path.join(attDir, 'env.json'));
 
   // Coder/Judge input and output for attempt detail (full display)
-  const coderOutput = readFile(path.join(coderDir, 'run.log'));
+  const coderOutput = readFile(path.join(coderDir, 'run.log'))
+    || readFile(path.join(attDir, 'solo', '_raw_output.txt'))
+    || readFile(path.join(coderDir, 'stdout.log'));
   const taskJson = readJSON(path.join(OUT_DIR, taskId, 'task.json'));
   const taskType = taskJson?.task_type || '';
   let judgePromptPath = path.join(PROMPTS_DIR, 'judge.prompt.md');
@@ -712,7 +895,7 @@ app.put('/api/task/:taskId/task_json', requireWritable, validateTaskId, (req, re
   if (!current) {
     return res.status(500).json({ error: 'Failed to read task.json' });
   }
-  const allowed = ['goal', 'acceptance', 'repo_path', 'base_ref', 'max_attempts', 'test_cmd', 'coder', 'judge', 'coder_model', 'judge_model', 'attempt_context_mode'];
+  const allowed = ['goal', 'acceptance', 'repo_path', 'base_ref', 'max_attempts', 'test_cmd', 'coder', 'judge', 'coder_model', 'judge_model', 'attempt_context_mode', 'executor_instruction'];
   const patch = req.body && typeof req.body === 'object' ? req.body : {};
   for (const key of allowed) {
     if (patch[key] !== undefined) {
@@ -829,7 +1012,8 @@ app.get('/api/tasks/:taskId/status', validateTaskId, (req, res) => {
   if (!fs.existsSync(taskDir)) {
     return res.status(404).json({ error: 'Task not found' });
   }
-  const status = readJSON(path.join(taskDir, 'status.json'));
+  const statusRaw = readJSON(path.join(taskDir, 'status.json'));
+  const status = repairStaleRunningStatus(taskId, taskDir, statusRaw);
   if (!status) {
     return res.status(404).json({ error: 'status.json not found' });
   }
@@ -1280,12 +1464,7 @@ function pingCcbProvider(cmd, args, timeoutMs, cwd) {
 
 app.get('/api/ccb/status', (req, res) => {
   const timeoutMs = 3100;
-  let workDir = '';
-  try {
-    const cfg = readRdloopConfig();
-    workDir = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-  } catch {}
-  if (!workDir) workDir = getProjectPath() || process.cwd();
+  const workDir = getCcbRuntimeWorkDir();
   Promise.all([
     pingCcbProvider('ccb-ping', ['codex'], timeoutMs, workDir),
     pingCcbProvider('ccb-ping', ['gemini'], timeoutMs, workDir)
@@ -1384,6 +1563,14 @@ app.post('/api/ccb/guard-clean', requireWritable, (req, res) => {
 const CCB_SESSION_PREFIX = 'ccb_';
 const CCB_PROVIDERS = ['codex', 'gemini', 'opencode', 'claude', 'droid'];
 const CCB_PING_CMD = { codex: 'cask', gemini: 'gask', opencode: 'oask', claude: 'lask', droid: 'dask' };
+function normalizeCcbProvider(value) {
+  const p = String(value || '').trim().toLowerCase();
+  if (p === 'antigravity') return 'gemini';
+  return p;
+}
+function displayCcbProvider(value) {
+  return normalizeCcbProvider(value) === 'gemini' ? 'gemini' : String(value || '');
+}
 // Session names from CCB: ccb-* (native layout) or ccb_<pid> (GUI auto-tmux in cmd_start)
 function isCcbNativeSessionName(name) {
   return typeof name === 'string' && (name.startsWith('ccb-') || /^ccb_\d+$/.test(name));
@@ -1391,6 +1578,7 @@ function isCcbNativeSessionName(name) {
 function normalizeCcbAgentLabel(label) {
   const s = String(label || '').trim().toLowerCase();
   if (!s) return '';
+  if (s === 'antigravity' || s === 'googleantigravity') return 'gemini';
   if (s === 'opencode') return 'opencode';
   return s.replace(/[^a-z]/g, '');
 }
@@ -1400,10 +1588,106 @@ function providerFromPaneMeta(agentLabel, paneTitle) {
   const title = String(paneTitle || '').trim().toLowerCase();
   if (title.startsWith('ccb-codex')) return 'codex';
   if (title.startsWith('ccb-gemini')) return 'gemini';
+  if (title.startsWith('ccb-antigravity')) return 'gemini';
   if (title.startsWith('ccb-opencode')) return 'opencode';
   if (title.startsWith('ccb-claude')) return 'claude';
   if (title.startsWith('ccb-droid')) return 'droid';
   return '';
+}
+async function findProviderPaneInSession(sessionName, provider, env) {
+  const panesResult = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{@ccb_agent}\t#{pane_title}'], env, 1200);
+  const lines = (panesResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
+  for (const line of lines) {
+    const parts = line.split('\t');
+    if (parts.length < 6) continue;
+    const paneId = (parts[0] || '').trim();
+    const panePidRaw = (parts[1] || '').trim();
+    const paneDeadRaw = (parts[2] || '').trim();
+    const paneCmd = (parts[3] || '').trim();
+    const providerDetected = providerFromPaneMeta((parts[4] || '').trim(), (parts[5] || '').trim());
+    if (providerDetected !== provider || !paneId) continue;
+    return {
+      pane_id: paneId,
+      pid: /^\d+$/.test(panePidRaw) ? parseInt(panePidRaw, 10) : null,
+      pane_dead: paneDeadRaw === '1',
+      pane_command: paneCmd || null
+    };
+  }
+  return null;
+}
+function buildClaudeStartCmd(workDir) {
+  const dir = (workDir || process.cwd()).replace(/"/g, '\\"');
+  return 'cd "' + dir + '" && claude';
+}
+function readProcessTable() {
+  try {
+    const out = execSync('ps -Ao pid=,ppid=,command=', { encoding: 'utf8', timeout: 1500 });
+    const rows = [];
+    for (const line of (out || '').split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (!m) continue;
+      rows.push({ pid: parseInt(m[1], 10), ppid: parseInt(m[2], 10), command: m[3] || '' });
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+function hasClaudeRuntimeUnderPid(rootPid, processRows) {
+  if (!rootPid || !Number.isInteger(rootPid) || rootPid <= 0) return false;
+  const rows = Array.isArray(processRows) ? processRows : [];
+  if (rows.length === 0) return false;
+  const byParent = new Map();
+  const byPid = new Map();
+  for (const r of rows) {
+    byPid.set(r.pid, r);
+    if (!byParent.has(r.ppid)) byParent.set(r.ppid, []);
+    byParent.get(r.ppid).push(r.pid);
+  }
+  const queue = [rootPid];
+  const seen = new Set();
+  const re = /(?:^|\/)(claude(?:\.cmd|\.exe)?|claude-code)(?:\s|$)|@anthropic-ai\/claude-code/i;
+  while (queue.length) {
+    const pid = queue.shift();
+    if (!pid || seen.has(pid)) continue;
+    seen.add(pid);
+    const node = byPid.get(pid);
+    if (node && re.test(String(node.command || ''))) return true;
+    const kids = byParent.get(pid) || [];
+    for (const k of kids) queue.push(k);
+  }
+  return false;
+}
+function hasClaudeRuntimeInPane(pane, processRows) {
+  if (!pane || pane.pane_dead === true) return false;
+  if (!pane.pid || !Number.isInteger(pane.pid) || pane.pid <= 0) return false;
+  return hasClaudeRuntimeUnderPid(pane.pid, processRows);
+}
+async function ensureClaudeRuntimeInSession(sessionName, workDir, env) {
+  const startCmd = buildClaudeStartCmd(workDir);
+  const procRows = readProcessTable();
+  const pane = await findProviderPaneInSession(sessionName, 'claude', env);
+  if (pane && pane.pane_id) {
+    const hasRuntime = hasClaudeRuntimeInPane(pane, procRows);
+    if (pane.pane_dead === true || !hasRuntime) {
+      await runTmux(['respawn-pane', '-k', '-t', pane.pane_id, startCmd], env, 4000);
+    }
+    await runTmux(['select-pane', '-t', pane.pane_id, '-T', 'CCB-Claude'], env, 1000);
+    await runTmux(['set-option', '-p', '-t', pane.pane_id, '@ccb_agent', 'Claude'], env, 1000);
+    return { ok: true, action: 'respawned', pane_id: pane.pane_id };
+  }
+
+  let split = await runTmux(['split-window', '-h', '-t', sessionName, '-P', '-F', '#{pane_id}', startCmd], env, 5000);
+  if (split.code !== 0 || !(split.stdout || '').trim()) {
+    split = await runTmux(['split-window', '-v', '-t', sessionName, '-P', '-F', '#{pane_id}', startCmd], env, 5000);
+  }
+  const paneId = (split.stdout || '').trim().split('\n')[0].trim();
+  if (!paneId || !paneId.startsWith('%')) {
+    return { ok: false, error: (split.stderr || split.stdout || 'failed to create Claude pane').trim() };
+  }
+  await runTmux(['select-pane', '-t', paneId, '-T', 'CCB-Claude'], env, 1000);
+  await runTmux(['set-option', '-p', '-t', paneId, '@ccb_agent', 'Claude'], env, 1000);
+  return { ok: true, action: 'created', pane_id: paneId };
 }
 
 // P20: CCB instance lock detection (same semantics as CCB ProviderLock: ~/.ccb/run/ccb-{md5(cwd)[:8]}.lock)
@@ -1553,12 +1837,7 @@ app.get('/api/ccb/session-status', async (req, res) => {
   }
   if (!tmuxAvailable()) {
     try {
-      let workDirForLock = '';
-      try {
-        const cfg = readRdloopConfig();
-        workDirForLock = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-      } catch {}
-      if (!workDirForLock) workDirForLock = getProjectPath() || process.cwd();
+      const workDirForLock = getCcbRuntimeWorkDir();
       const lockScan = findCcbInstanceFromLockScan(workDirForLock);
       let ccb_instance = { running: false };
       let terminal_mode = 'unknown';
@@ -1577,6 +1856,13 @@ app.get('/api/ccb/session-status', async (req, res) => {
           status = pingResult.status === 'ok' ? 'ok' : (pingResult.status === 'not_installed' ? 'not_installed' : 'unavailable');
           ping_ms = pingResult.ping_ms != null ? pingResult.ping_ms : null;
         } else status = 'ok';
+        // Claude: ccb-ping only checks pane liveness (not whether the actual CLI
+        // is running).  Without tmux we have no pane to verify, so force off —
+        // unrelated interactive claude sessions would cause false positives.
+        if (provider === 'claude' && status === 'ok') {
+          status = 'off';
+          ping_ms = null;
+        }
         providers.push({ provider, session_name: null, pid: null, status, ping_ms, pane_id: null });
       }
       return res.json({ providers, tmux_available: false, message: 'tmux not installed', ccb_instance, terminal_mode, wezterm_available: weztermAvailable() });
@@ -1585,12 +1871,7 @@ app.get('/api/ccb/session-status', async (req, res) => {
     }
   }
   try {
-    let workDirForLock = '';
-    try {
-      const cfg = readRdloopConfig();
-      workDirForLock = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-    } catch {}
-    if (!workDirForLock) workDirForLock = getProjectPath() || process.cwd();
+    const workDirForLock = getCcbRuntimeWorkDir();
 
     const env = getCoordinatorEnv();
     // P25: ccb_instance from scanning all ccb-*.lock (any alive PID = running)
@@ -1613,11 +1894,14 @@ app.get('/api/ccb/session-status', async (req, res) => {
     // P27: helper to get pane_id for a provider in a session (tmux user option @ccb_agent = Codex/Gemini/...)
     async function getPaneIdForProvider(sessionName, provider) {
       const cap = provider.charAt(0).toUpperCase() + provider.slice(1);
+      const aliases = provider === 'gemini'
+        ? new Set([cap, provider, 'Antigravity', 'antigravity'])
+        : new Set([cap, provider]);
       const panesResult = await runTmux(['list-panes', '-t', sessionName, '-s', '-F', '#{pane_id} #{@ccb_agent}'], env, 1000);
       const lines = (panesResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
       for (const line of lines) {
         const match = line.match(/^(\S+)\s+(.*)$/);
-        if (match && (match[2] === cap || match[2] === provider)) return match[1];
+        if (match && aliases.has(match[2])) return match[1];
       }
       return null;
     }
@@ -1678,6 +1962,7 @@ app.get('/api/ccb/session-status', async (req, res) => {
         });
       }
     }
+    const processRows = readProcessTable();
     for (const prov of providers) {
       const sessionName = sessionToProvider.get(prov.provider);
       const paneInfo = paneByProvider.get(prov.provider);
@@ -1701,10 +1986,27 @@ app.get('/api/ccb/session-status', async (req, res) => {
         prov.pane_command = firstCmd || null;
       }
       const hasProviderRuntime = !!prov.pane_id || prov.session_name === (CCB_SESSION_PREFIX + prov.provider);
-      if (prov.pane_dead === true && prov.status === 'ok') {
+      // Claude runtime check: ccb-ping only verifies pane liveness, not that the
+      // actual claude CLI process is running.  When a pane exists (remain-on-exit)
+      // but claude has exited, or when CCB is down (terminal_mode='unknown') and
+      // laskd daemon still responds, the ping incorrectly returns 'ok'.
+      // Always verify the real process tree — we are in the tmux-available code path.
+      const claudeNoRuntime = prov.provider === 'claude'
+        && !hasClaudeRuntimeInPane({
+          pane_dead: prov.pane_dead === true,
+          pid: prov.pid,
+          pane_id: prov.pane_id
+        }, processRows);
+      if (claudeNoRuntime && prov.status === 'ok') {
+        // ccb-ping reports ok but no claude CLI process found in the managed pane
+        // (or no managed pane exists at all).  Stale session files / remain-on-exit
+        // panes / unrelated interactive claude sessions can all cause false positives.
         prov.status = 'off';
         prov.ping_ms = null;
-      } else if (!hasProviderRuntime && prov.status === 'ok' && terminal_mode === 'tmux') {
+      } else if (prov.pane_dead === true && prov.status === 'ok') {
+        prov.status = 'off';
+        prov.ping_ms = null;
+      } else if (!hasProviderRuntime && prov.status === 'ok') {
         // Daemon might still answer ping while provider pane/session is gone; show provider as off.
         prov.status = 'off';
         prov.ping_ms = null;
@@ -1728,8 +2030,8 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
     return res.status(400).json({ error: 'tmux not installed', hint: 'Install tmux (e.g. brew install tmux) to manage CCB sessions from GUI.' });
   }
   const body = req.body || {};
-  const providers = Array.isArray(body.providers) ? body.providers : ['codex', 'gemini'];
-  const workDir = (body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : getProjectPath() || process.cwd();
+  const providers = Array.isArray(body.providers) ? body.providers.map(normalizeCcbProvider) : ['codex', 'gemini'];
+  const workDir = getCcbRuntimeWorkDir((body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : '');
   appendToCcbGuiLog('start', { providers, work_dir: workDir });
 
   const ccbRoot = getCcbPath();
@@ -1764,7 +2066,24 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   const existingCcb = preNames.find(n => isCcbNativeSessionName(n) || n.startsWith('ai-'));
   if (existingCcb) {
     appendToCcbGuiLog('start_reuse', { session: existingCcb });
-    // Session exists — skip spawn, just ping providers and return status
+    const errors = [];
+    if (validProviders.includes('claude')) {
+      try {
+        const recover = await ensureClaudeRuntimeInSession(existingCcb, workDir, env);
+        if (!recover.ok) {
+          errors.push('claude: ' + (recover.error || 'failed to start Claude pane'));
+          appendToCcbGuiLog('start_reuse_claude_error', { session: existingCcb, error: recover.error || 'failed to start Claude pane' });
+        } else {
+          appendToCcbGuiLog('start_reuse_claude', { session: existingCcb, action: recover.action, pane_id: recover.pane_id });
+        }
+      } catch (e) {
+        errors.push('claude: ' + ((e && e.message) || String(e)));
+        appendToCcbGuiLog('start_reuse_claude_error', { session: existingCcb, error: (e && e.message) || String(e) });
+      }
+    }
+    // Session exists — reuse it and report provider status.
+    await new Promise(r => setTimeout(r, 500));
+    const processRows = readProcessTable();
     const sessions = [];
     for (const provider of validProviders) {
       let status = 'off';
@@ -1774,12 +2093,20 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
       } else {
         status = 'ok';
       }
+      if (provider === 'claude' && status === 'ok') {
+        const pane = await findProviderPaneInSession(existingCcb, 'claude', env);
+        if (!hasClaudeRuntimeInPane(pane, processRows)) status = 'off';
+      }
       sessions.push({ provider, session_name: existingCcb, status });
     }
     return res.json({
       ok: true, sessions,
       session_ids: [existingCcb],
-      errors: [], hint: 'Reused existing CCB session: ' + existingCcb
+      errors,
+      reused: true,
+      hint: errors.length
+        ? ('Reused existing CCB session: ' + existingCcb + ' (with Claude recovery issue)')
+        : ('Reused existing CCB session: ' + existingCcb)
     });
   }
 
@@ -1856,6 +2183,7 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
     sessions,
     session_ids: [...new Set(sessions.map(s => s.session_name).filter(Boolean))],
     errors: errors,
+    reused: false,
     ccb_stderr: stderrSnippet || undefined
   });
 });
@@ -1900,47 +2228,56 @@ app.get('/api/ccb/session/attach', async (req, res) => {
     return res.json({ ok: true, session: sessionNameParam, message: 'Terminal window should open; attach with: ' + attachCmd });
   }
 
-  const provider = (req.query.provider || '').trim();
+  const provider = normalizeCcbProvider(req.query.provider || '');
   if (!CCB_PROVIDERS.includes(provider)) {
     return res.status(400).json({ error: 'Invalid provider', hint: 'Use provider=codex|gemini|opencode|claude|droid or session_name=ccb-xxx' });
   }
   const legacyName = CCB_SESSION_PREFIX + provider;
-  let sessionName = null;
-  if (allNames.includes(legacyName)) {
-    sessionName = legacyName;
-  } else {
-    const ccbNative = allNames.filter(n => isCcbNativeSessionName(n));
-    if (CCB_PING_CMD[provider]) {
-      let workDirForPing = '';
-      try {
-        const cfg = readRdloopConfig();
-        workDirForPing = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-      } catch {}
-      if (!workDirForPing) workDirForPing = getProjectPath() || process.cwd();
-      const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDirForPing);
-      if (pingResult.status === 'ok') {
-        if (ccbNative.length > 0) {
-          sessionName = ccbNative[0];
-        } else {
-          const aiSessions = allNames.filter(n => n.startsWith('ai-'));
-          if (aiSessions.length > 0) sessionName = aiSessions[0];
-        }
-      }
-    }
+  const ccbNative = allNames.filter(n => isCcbNativeSessionName(n));
+  const aiSessions = allNames.filter(n => n.startsWith('ai-'));
+  const candidates = [];
+  if (allNames.includes(legacyName)) candidates.push(legacyName);
+  for (const n of ccbNative) if (!candidates.includes(n)) candidates.push(n);
+  for (const n of aiSessions) if (!candidates.includes(n)) candidates.push(n);
+
+  let sessionName = candidates[0] || null;
+  if (!sessionName && CCB_PING_CMD[provider]) {
+    const workDirForPing = getCcbRuntimeWorkDir();
+    const pingResult = await pingCcbProvider('ccb-ping', [provider], 2500, workDirForPing);
+    if (pingResult.status === 'ok' && aiSessions.length > 0) sessionName = aiSessions[0];
   }
   if (!sessionName) {
-    return res.status(400).json({ error: 'Session not running', hint: 'Click "启动" for ' + provider + ' first, then "打开终端".' });
+    return res.status(400).json({ error: 'Session not running', hint: 'Click "启动" for ' + displayCcbProvider(provider) + ' first, then "打开终端".' });
   }
-  const paneId = (req.query.pane_id || '').trim();
-  const attachCmd = paneId
-    ? 'tmux select-pane -t ' + paneId + ' \\; attach-session -t ' + sessionName
-    : 'tmux attach -t ' + sessionName;
+
+  let paneId = (req.query.pane_id || '').trim();
+  if (!paneId) {
+    for (const delay of [0, 300, 600, 900]) {
+      for (const sess of candidates) {
+        const pane = await findProviderPaneInSession(sess, provider, env);
+        if (pane && pane.pane_id) {
+          paneId = pane.pane_id;
+          sessionName = sess;
+          break;
+        }
+      }
+      if (paneId) break;
+      if (delay > 0) await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  if (!paneId) {
+    return res.status(409).json({
+      error: 'Provider pane not ready',
+      hint: 'Session is running but the ' + displayCcbProvider(provider) + ' pane is not available yet. Wait a moment and try again.'
+    });
+  }
+  const attachCmd = 'tmux select-pane -t ' + paneId + ' \\; attach-session -t ' + sessionName;
   if (os.platform() === 'darwin') {
     const script = 'tell application "Terminal" to do script "' + attachCmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
     spawn('osascript', ['-e', script], { stdio: 'ignore', detached: true }).unref();
   } else {
     const term = process.env.GNOME_TERMINAL ? 'gnome-terminal' : (process.env.KONSOLE_VERSION ? 'konsole' : 'xterm');
-    const fullCmd = paneId ? ('tmux select-pane -t ' + paneId + ' ; tmux attach -t ' + sessionName) : ('tmux attach -t ' + sessionName);
+    const fullCmd = 'tmux select-pane -t ' + paneId + ' ; tmux attach -t ' + sessionName;
     const args = term === 'gnome-terminal' ? ['--', 'bash', '-c', fullCmd] : (term === 'konsole' ? ['-e', fullCmd] : ['-e', fullCmd]);
     spawn(term, args, { stdio: 'ignore', detached: true }).unref();
   }
@@ -1963,22 +2300,13 @@ app.post('/api/ccb/session/open-terminal', requireWritable, async (req, res) => 
   }
   const body = req.body || {};
   const providers = Array.isArray(body.providers) && body.providers.length > 0
-    ? body.providers.filter(p => CCB_PROVIDERS.includes(p))
+    ? body.providers.map(normalizeCcbProvider).filter(p => CCB_PROVIDERS.includes(p))
     : ['codex'];
   if (providers.length === 0) {
     return res.status(400).json({ error: 'No valid providers', hint: 'Use providers: [\'codex\'] or [\'codex\', \'gemini\']' });
   }
   let workDir = (body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : '';
-  if (!workDir) {
-    try {
-      const cfg = readRdloopConfig();
-      workDir = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-    } catch {}
-  }
-  if (!workDir) {
-    const projectPath = getProjectPath();
-    workDir = projectPath || process.cwd();
-  }
+  workDir = getCcbRuntimeWorkDir(workDir);
   if (!fs.existsSync(workDir) || !fs.statSync(workDir).isDirectory()) {
     return res.status(400).json({ error: 'Work directory does not exist', work_dir: workDir });
   }
@@ -2062,21 +2390,13 @@ app.post('/api/ccb/session/open-wezterm', requireWritable, async (req, res) => {
   const weztermBin = weztermPath || 'wezterm';
   const body = req.body || {};
   const providers = Array.isArray(body.providers) && body.providers.length > 0
-    ? body.providers.filter(p => CCB_PROVIDERS.includes(p))
+    ? body.providers.map(normalizeCcbProvider).filter(p => CCB_PROVIDERS.includes(p))
     : ['codex'];
   if (providers.length === 0) {
     return res.status(400).json({ error: 'No valid providers', hint: 'Use providers: [\'codex\'] or [\'codex\', \'gemini\']' });
   }
   let workDir = (body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : '';
-  if (!workDir) {
-    try {
-      const cfg = readRdloopConfig();
-      workDir = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-    } catch {}
-  }
-  if (!workDir) {
-    workDir = getProjectPath() || process.cwd();
-  }
+  workDir = getCcbRuntimeWorkDir(workDir);
   if (!fs.existsSync(workDir) || !fs.statSync(workDir).isDirectory()) {
     return res.status(400).json({ error: 'Work directory does not exist', work_dir: workDir });
   }
@@ -2094,12 +2414,14 @@ app.post('/api/ccb/session/stop', requireWritable, async (req, res) => {
   if (os.platform() === 'win32') return res.status(400).json({ error: 'Not supported on Windows.' });
   if (!tmuxAvailable()) return res.status(400).json({ error: 'tmux not installed' });
   const body = req.body || {};
-  const toStop = Array.isArray(body.providers) && body.providers.length > 0 ? body.providers : null;
+  const toStop = Array.isArray(body.providers) && body.providers.length > 0 ? body.providers.map(normalizeCcbProvider) : null;
   const env = getCoordinatorEnv();
+  const workDirForOps = getCcbRuntimeWorkDir();
   const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
   const allNames = (listResult.stdout || '').split('\n').map(s => s.trim()).filter(Boolean);
   let sessionNames = [];
   const killedPanes = [];
+  const forceKilled = [];
   if (toStop) {
     const targetProviders = [...new Set(toStop.filter(p => CCB_PROVIDERS.includes(p)))];
     sessionNames = targetProviders
@@ -2133,23 +2455,41 @@ app.post('/api/ccb/session/stop', requireWritable, async (req, res) => {
   for (const name of sessionNames) {
     await runTmux(['kill-session', '-t', name], env, 2000);
   }
+
+  // Fallback: if targeted provider still responds, force cleanup via CCB native kill command.
+  // This handles cases where pane metadata drifts and tmux pane matching misses the live runtime.
+  if (toStop && toStop.length > 0) {
+    const ccbRoot = getCcbPath();
+    const ccbScript = ccbRoot && fs.existsSync(path.join(ccbRoot, 'ccb')) ? path.join(ccbRoot, 'ccb') : null;
+    for (const provider of [...new Set(toStop.filter(p => CCB_PROVIDERS.includes(p)))]) {
+      if (!CCB_PING_CMD[provider]) continue;
+      const pingAfterStop = await pingCcbProvider('ccb-ping', [provider], 1800, workDirForOps);
+      if (pingAfterStop.status !== 'ok') continue;
+      if (!ccbScript) continue;
+      try {
+        const out = execSync(
+          'python3 "' + ccbScript.replace(/"/g, '\\"') + '" kill ' + provider.replace(/"/g, '\\"') + ' 2>&1 || true',
+          { encoding: 'utf8', timeout: 10000, cwd: workDirForOps, env }
+        );
+        forceKilled.push({ provider, method: 'ccb kill', output: String(out || '').trim().split('\n').slice(-4).join('\n') });
+      } catch (e) {
+        forceKilled.push({ provider, method: 'ccb kill', error: (e && e.message) || String(e) });
+      }
+    }
+  }
   appendToCcbGuiLog('stop', {
     providers_requested: toStop || 'all',
     sessions_killed: sessionNames,
-    panes_killed: killedPanes
+    panes_killed: killedPanes,
+    force_killed: forceKilled
   });
-  res.json({ ok: true, stopped: sessionNames, panes_stopped: killedPanes });
+  res.json({ ok: true, stopped: sessionNames, panes_stopped: killedPanes, force_killed: forceKilled });
 });
 
 // POST /api/ccb/session/kill-instance — kill the currently active CCB process (lock-holder PID)
 app.post('/api/ccb/session/kill-instance', requireWritable, async (req, res) => {
   if (os.platform() === 'win32') return res.status(400).json({ error: 'Not supported on Windows.' });
-  let workDirForLock = '';
-  try {
-    const cfg = readRdloopConfig();
-    workDirForLock = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-  } catch (_) {}
-  if (!workDirForLock) workDirForLock = getProjectPath() || process.cwd();
+  const workDirForLock = getCcbRuntimeWorkDir();
   const lockScan = findCcbInstanceFromLockScan(workDirForLock);
   if (!lockScan.running || lockScan.pid == null) {
     appendToCcbGuiLog('kill_instance', { result: 'not_found', work_dir: workDirForLock });
@@ -2211,8 +2551,8 @@ app.post('/api/ccb/session/restart', requireWritable, async (req, res) => {
   if (os.platform() === 'win32') return res.status(400).json({ error: 'Not supported on Windows.' });
   if (!tmuxAvailable()) return res.status(400).json({ error: 'tmux not installed' });
   const body = req.body || {};
-  const providers = Array.isArray(body.providers) && body.providers.length > 0 ? body.providers : ['codex', 'gemini'];
-  const workDir = (body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : getProjectPath() || process.cwd();
+  const providers = Array.isArray(body.providers) && body.providers.length > 0 ? body.providers.map(normalizeCcbProvider) : ['codex', 'gemini'];
+  const workDir = getCcbRuntimeWorkDir((body.work_dir && typeof body.work_dir === 'string') ? body.work_dir.trim() : '');
   const env = getCoordinatorEnv();
   appendToCcbGuiLog('restart', { providers, work_dir: workDir });
   const listResult = await runTmux(['list-sessions', '-F', '#{session_name}'], env, 2000);
@@ -2276,7 +2616,7 @@ app.get('/api/ccb/agent-status', (req, res) => {
   return new Promise((resolve) => {
     const child = spawn('bash', [scriptPath, ...args], {
       env: { ...env, PATH: env.PATH || process.env.PATH },
-      cwd: getProjectPath() || process.cwd(),
+      cwd: getCcbRuntimeWorkDir(),
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let out = '';
@@ -2311,7 +2651,7 @@ app.get('/api/ccb/config', (req, res) => {
   try {
     const projectPath = getProjectPathOrCcbWorkDir();
     if (!projectPath) {
-      return res.status(404).json({ error: 'project_path or ccb_work_dir not configured (set in Rdloop config or CCB 工作目录)' });
+      return res.status(404).json({ error: 'project_path not configured and no recent task repo found' });
     }
     const ccbDir = path.join(projectPath, '.ccb');
     const configPath = path.join(ccbDir, 'ccb.config');
@@ -2338,10 +2678,10 @@ app.put('/api/ccb/config', requireWritable, (req, res) => {
   try {
     const projectPath = getProjectPathOrCcbWorkDir();
     if (!projectPath) {
-      return res.status(404).json({ error: 'project_path or ccb_work_dir not configured (set in Rdloop config or CCB 工作目录)' });
+      return res.status(404).json({ error: 'project_path not configured and no recent task repo found' });
     }
     const body = req.body || {};
-    const providers = Array.isArray(body.providers) ? body.providers : [];
+    const providers = Array.isArray(body.providers) ? body.providers.map(normalizeCcbProvider) : [];
     const valid = providers.filter(p => CCB_CONFIG_PROVIDERS.includes(String(p).toLowerCase()));
     const ccbDir = path.join(projectPath, '.ccb');
     if (!fs.existsSync(ccbDir)) fs.mkdirSync(ccbDir, { recursive: true });
@@ -2456,17 +2796,52 @@ function getProjectPath() {
   return null;
 }
 
-// For CCB config (P13): use project path, or fall back to ccb_work_dir so saving "default providers" works when only ccb_work_dir is set
+function getLastTaskRepoPath() {
+  let best = null;
+  let bestTs = -1;
+  try {
+    const entries = fs.readdirSync(OUT_DIR, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue;
+      if (ent.name.startsWith('_')) continue;
+      const taskDir = path.join(OUT_DIR, ent.name);
+      const taskJson = readJSON(path.join(taskDir, 'task.json')) || {};
+      const repoPath = normalizeCandidatePath(taskJson.repo_path || '');
+      if (!repoPath) continue;
+      let ts = 0;
+      const status = readJSON(path.join(taskDir, 'status.json'));
+      if (status && status.updated_at) {
+        const parsed = Date.parse(status.updated_at);
+        if (!Number.isNaN(parsed)) ts = parsed;
+      }
+      if (!ts) {
+        try { ts = fs.statSync(taskDir).mtimeMs || 0; } catch {}
+      }
+      if (ts >= bestTs && fs.existsSync(repoPath) && fs.statSync(repoPath).isDirectory()) {
+        bestTs = ts;
+        best = repoPath;
+      }
+    }
+  } catch {}
+  return best;
+}
+
+function getCcbRuntimeWorkDir(preferred) {
+  const candidate = (preferred && typeof preferred === 'string') ? preferred.trim() : '';
+  if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) return candidate;
+  const latestTaskRepo = getLastTaskRepoPath();
+  if (latestTaskRepo) return latestTaskRepo;
+  const projectPath = getProjectPath();
+  if (projectPath) return projectPath;
+  return process.cwd();
+}
+
+// For CCB config (P13): use project path, or fall back to the last task repo path.
 function getProjectPathOrCcbWorkDir() {
   const p = getProjectPath();
   if (p) return p;
-  try {
-    const cfg = readRdloopConfig();
-    const raw = (cfg.ccb_work_dir && typeof cfg.ccb_work_dir === 'string') ? cfg.ccb_work_dir.trim() : '';
-    if (!raw) return null;
-    const resolved = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(RDLOOP_ROOT, raw);
-    if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return resolved;
-  } catch {}
+  const latestTaskRepo = getLastTaskRepoPath();
+  if (latestTaskRepo) return latestTaskRepo;
   return null;
 }
 
@@ -2878,6 +3253,121 @@ app.get('/api/validate-path', (req, res) => {
   }
 });
 
+// Create a folder path for repo selection (supports absolute or RDLOOP_ROOT-relative paths).
+app.post('/api/folders', requireWritable, (req, res) => {
+  try {
+    const raw = (req.body?.path || '').toString().trim();
+    if (!raw) return res.status(400).json({ error: 'path is empty' });
+    const resolved = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(RDLOOP_ROOT, raw);
+    fs.mkdirSync(resolved, { recursive: true });
+    const exists = fs.existsSync(resolved);
+    const isDirectory = exists && fs.statSync(resolved).isDirectory();
+    res.json({ ok: exists && isDirectory, path: resolved, exists, isDirectory });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Folder picker options for GUI New/Edit forms (includes non-git directories).
+app.get('/api/folder-options', (req, res) => {
+  try {
+    const hint = (req.query.hint || '').toString();
+    const folders = collectFolderCandidates(hint);
+    res.json({ folders });
+  } catch (err) {
+    res.status(500).json({ folders: [], error: err.message });
+  }
+});
+
+// Folder browser API: resolve input path and return parent + immediate sub-directories.
+app.get('/api/folder-children', (req, res) => {
+  try {
+    const raw = (req.query.path || '').toString().trim();
+    let requested = raw
+      ? (path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(RDLOOP_ROOT, raw))
+      : (getProjectPath() || RDLOOP_ROOT);
+    let current = requested;
+
+    // If requested path does not exist, browse from nearest existing ancestor.
+    while (!fs.existsSync(current)) {
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    if (!fs.existsSync(current) || !fs.statSync(current).isDirectory()) {
+      current = RDLOOP_ROOT;
+    }
+
+    const parentDir = path.dirname(current);
+    const parent = parentDir !== current ? parentDir : null;
+    const children = fs.readdirSync(current, { withFileTypes: true })
+      .filter(ent => ent.isDirectory() && !ent.name.startsWith('.'))
+      .map(ent => path.join(current, ent.name))
+      .sort((a, b) => a.localeCompare(b));
+
+    res.json({
+      requested,
+      current,
+      parent,
+      children
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, requested: '', current: '', parent: null, children: [] });
+  }
+});
+
+// Repo picker options for GUI New/Edit forms
+app.get('/api/repo-options', (req, res) => {
+  try {
+    const hint = (req.query.hint || '').toString();
+    const repos = collectRepoCandidates(hint);
+    res.json({ repos });
+  } catch (err) {
+    res.status(500).json({ repos: [], error: err.message });
+  }
+});
+
+// Git ref options for selected repo_path in GUI New/Edit forms
+app.get('/api/git-refs', (req, res) => {
+  try {
+    const raw = (req.query.repo_path || '').toString().trim();
+    if (!raw) return res.json({ refs: [], head: null });
+    const repoPath = normalizeCandidatePath(raw);
+    if (!fs.existsSync(repoPath) || !fs.statSync(repoPath).isDirectory()) {
+      return res.json({ refs: [], head: null, error: 'repo_path does not exist' });
+    }
+    if (!isGitRepoDir(repoPath)) {
+      return res.json({ refs: [], head: null, error: 'repo_path is not a git repository' });
+    }
+    let refs = [];
+    let head = null;
+    try {
+      const out = execFileSync('git', ['-C', repoPath, 'for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/tags'], {
+        encoding: 'utf8',
+        timeout: 5000
+      });
+      refs = out.split('\n').map(s => s.trim()).filter(Boolean);
+    } catch {}
+    try {
+      head = execFileSync('git', ['-C', repoPath, 'symbolic-ref', '--short', 'HEAD'], {
+        encoding: 'utf8',
+        timeout: 3000
+      }).trim();
+    } catch {}
+    // Keep refs unique and stable
+    const uniq = [];
+    const seen = new Set();
+    for (const r of [head, ...refs]) {
+      if (!r || seen.has(r)) continue;
+      seen.add(r);
+      uniq.push(r);
+    }
+    res.json({ refs: uniq, head: head || null });
+  } catch (err) {
+    res.status(500).json({ refs: [], head: null, error: err.message });
+  }
+});
+
 app.get('/api/config', (req, res) => {
   try {
     const cfg = readRdloopConfig();
@@ -2898,7 +3388,9 @@ app.get('/api/config', (req, res) => {
       default_judge: cfg.default_judge || null,
       default_coder_model: cfg.default_coder_model || null,
       default_judge_model: cfg.default_judge_model || null,
-      default_execution_mode: cfg.default_execution_mode || 'auto',
+      default_run_surface: (cfg.default_run_surface === 'visual_ccb')
+        ? 'visual_ccb'
+        : ((cfg.default_execution_mode === 'semi-auto') ? 'visual_ccb' : 'bridge'),
       agent_root: agent_root || null,
       project_path: project_path || null,
       ccb_path: ccb_path || null,
@@ -2915,17 +3407,19 @@ app.get('/api/config', (req, res) => {
 app.put('/api/config', requireWritable, (req, res) => {
   try {
     const body = req.body || {};
-    const { default_coder, default_judge, default_coder_model, default_judge_model, default_execution_mode, agent_root: agentRootIn, ccb_path: ccbPathIn, ccb_work_dir: ccbWorkDirIn, ccb_auto_open_terminal: ccbAutoOpenTerminalIn, use_wezterm_for_all: useWeztermForAllIn } = body;
+    const { default_coder, default_judge, default_coder_model, default_judge_model, default_run_surface, agent_root: agentRootIn, ccb_path: ccbPathIn, ccb_work_dir: ccbWorkDirIn, ccb_auto_open_terminal: ccbAutoOpenTerminalIn, use_wezterm_for_all: useWeztermForAllIn } = body;
     const cfg = readRdloopConfig();
     if (default_coder !== undefined) cfg.default_coder = default_coder;
     if (default_judge !== undefined) cfg.default_judge = default_judge;
     if (default_coder_model !== undefined) cfg.default_coder_model = default_coder_model;
     if (default_judge_model !== undefined) cfg.default_judge_model = default_judge_model;
-    if (default_execution_mode !== undefined) {
-      if (!['auto', 'semi-auto'].includes(default_execution_mode)) {
-        return res.status(400).json({ error: 'default_execution_mode must be auto or semi-auto' });
+    if (default_run_surface !== undefined) {
+      if (!['bridge', 'visual_ccb'].includes(default_run_surface)) {
+        return res.status(400).json({ error: 'default_run_surface must be bridge or visual_ccb' });
       }
-      cfg.default_execution_mode = default_execution_mode;
+      cfg.default_run_surface = default_run_surface;
+      if (cfg.default_execution_mode !== undefined) delete cfg.default_execution_mode;
+      if (cfg._comment_execution_mode !== undefined) delete cfg._comment_execution_mode;
     }
     if (agentRootIn !== undefined) {
       const validation = validateAgentRoot(agentRootIn);
@@ -2955,7 +3449,9 @@ app.put('/api/config', requireWritable, (req, res) => {
       default_judge: cfg.default_judge || null,
       default_coder_model: cfg.default_coder_model || null,
       default_judge_model: cfg.default_judge_model || null,
-      default_execution_mode: cfg.default_execution_mode || 'auto',
+      default_run_surface: (cfg.default_run_surface === 'visual_ccb')
+        ? 'visual_ccb'
+        : ((cfg.default_execution_mode === 'semi-auto') ? 'visual_ccb' : 'bridge'),
       agent_root: (cfg.agent_root && cfg.agent_root.length) ? cfg.agent_root : null,
       ccb_path: (cfg.ccb_path && cfg.ccb_path.length) ? cfg.ccb_path : null,
       ccb_work_dir: (cfg.ccb_work_dir && cfg.ccb_work_dir.length) ? cfg.ccb_work_dir : null,
@@ -3029,6 +3525,12 @@ function validateTaskSpecData(spec) {
   if (spec.execution_mode !== undefined && !['auto', 'semi-auto'].includes(spec.execution_mode)) {
     errors.push('execution_mode: must be auto or semi-auto');
   }
+  if (spec.run_surface !== undefined && !['bridge', 'visual_ccb'].includes(spec.run_surface)) {
+    errors.push('run_surface: must be bridge or visual_ccb');
+  }
+  if (spec.executor_instruction !== undefined && typeof spec.executor_instruction !== 'string') {
+    errors.push('executor_instruction: must be a string');
+  }
   if (spec.workflow_mode !== undefined && !['single', 'solo', 'collab'].includes(spec.workflow_mode)) {
     errors.push('workflow_mode: must be single, solo, or collab');
   }
@@ -3045,6 +3547,28 @@ function validateTaskSpecData(spec) {
   }
   if ((spec.executor_type === 'solo_agent' || spec.executor_type === 'multi_agent') && (spec.session_mode === 'fresh' || spec.session_mode === 'iterative')) {
     errors.push('session_mode: ' + spec.executor_type + ' only supports continuous');
+  }
+  if (spec.executor_type === 'multi_agent' && spec.run_surface === 'bridge') {
+    errors.push('run_surface: multi_agent only supports visual_ccb');
+  }
+  if (spec.executor_type === 'solo_agent') {
+    const effectiveRunSurface = spec.run_surface || (spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge');
+    if (effectiveRunSurface === 'bridge') {
+      const providerRaw = String(
+        (spec.coder_model != null ? spec.coder_model : (spec.agent_config && spec.agent_config.provider)) || ''
+      ).toLowerCase();
+      const providerResolved = providerRaw.includes('codex') ? 'codex'
+        : providerRaw.includes('cursor') ? 'cursor'
+        : providerRaw.includes('antigravity') ? 'antigravity'
+        : providerRaw.includes('claude') ? 'claude'
+        : providerRaw.includes('gemini') ? 'gemini'
+        : providerRaw.includes('opencode') ? 'opencode'
+        : providerRaw.includes('droid') ? 'droid'
+        : '';
+      if (providerResolved && !['claude', 'codex', 'cursor', 'antigravity'].includes(providerResolved)) {
+        errors.push('solo_agent bridge judge unsupported for provider: ' + providerResolved + ' (supported: claude, codex, cursor, antigravity)');
+      }
+    }
   }
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
   if (spec.collab_roles !== undefined && spec.collab_roles !== null) {

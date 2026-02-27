@@ -97,9 +97,12 @@ fi
 # 6) run_rdloop_task.sh exists and is executable
 [ -x "${TOOLS_ROOT}/run_rdloop_task.sh" ] || [ -f "${TOOLS_ROOT}/run_rdloop_task.sh" ] || fail "run_rdloop_task.sh missing"
 
-# 7) rdloop.config.json has default_execution_mode
+# 7) rdloop.config.json has default run behavior field
 [ -f "${RDLOOP_ROOT}/rdloop.config.json" ] || fail "rdloop.config.json missing"
-grep -q "default_execution_mode" "${RDLOOP_ROOT}/rdloop.config.json" || fail "default_execution_mode missing in config"
+if ! grep -q "default_run_surface" "${RDLOOP_ROOT}/rdloop.config.json" && \
+   ! grep -q "default_execution_mode" "${RDLOOP_ROOT}/rdloop.config.json"; then
+  fail "default_run_surface/default_execution_mode missing in config"
+fi
 
 # P06: 8 test scripts from P02/P03/P04 exist
 [ -f "${AGENT_ROOT}/tests/test_init_knowledge_agent.sh" ] || fail "test_init_knowledge_agent.sh missing"

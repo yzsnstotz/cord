@@ -80,7 +80,14 @@ fi
 iteration=0
 instruction=$(cat "$instruction_path")
 goal=$(json_read "$task_json" "goal" "")
+executor_instruction=$(json_read "$task_json" "executor_instruction" "")
 test_cmd=$(json_read "$task_json" "test_cmd" "")
+working_dir="$worktree_dir"
+[ -z "$working_dir" ] && working_dir=$(json_read "$task_json" "repo_path" "")
+[ -z "$working_dir" ] && working_dir="."
+if [ -z "$goal" ] && [ -n "$executor_instruction" ]; then
+  goal="$executor_instruction"
+fi
 
 while [ "$iteration" -lt "$max_iterations" ]; do
   iteration=$((iteration + 1))
@@ -94,7 +101,7 @@ while [ "$iteration" -lt "$max_iterations" ]; do
 
 GOAL: ${goal}
 INSTRUCTION: ${instruction}
-WORKING DIRECTORY: ${worktree_dir}
+WORKING DIRECTORY: ${working_dir}
 TEST COMMAND: ${test_cmd}
 
 ${knowledge_context}
@@ -102,6 +109,10 @@ ${knowledge_context}
 STEP 1 — DESIGN:
 Analyze the goal, read relevant files, create a detailed plan.
 Then begin execution: write code, run tests.
+${executor_instruction:+
+EXECUTOR INSTRUCTIONS:
+${executor_instruction}
+}
 
 OUTPUT FORMAT (JSON at end of your response):
 {

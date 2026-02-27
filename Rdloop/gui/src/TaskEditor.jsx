@@ -16,8 +16,10 @@ function escapeHtml(str) {
 function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
   const [executorType, setExecutorType] = useState(initialSpec.executor_type || 'solo_agent');
   const [sessionMode, setSessionMode] = useState(initialSpec.session_mode || 'continuous');
+  const [runSurface, setRunSurface] = useState(initialSpec.run_surface || ((initialSpec.execution_mode === 'semi-auto') ? 'visual_ccb' : 'bridge'));
   const [taskId, setTaskId] = useState(initialSpec.task_id || '');
   const [goal, setGoal] = useState(initialSpec.goal || initialSpec.instruction || '');
+  const [executorInstruction, setExecutorInstruction] = useState(initialSpec.executor_instruction || '');
   const [acceptance, setAcceptance] = useState(Array.isArray(initialSpec.acceptance_criteria)
     ? (initialSpec.acceptance_criteria || []).join('\n')
     : (initialSpec.acceptance || ''));
@@ -36,6 +38,7 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
 
   const updateSessionModeConstraints = useCallback((execType) => {
     setExecutorType(execType);
+    if (execType === 'multi_agent') setRunSurface('visual_ccb');
     if (execType === 'api_call') {
       if (sessionMode === 'continuous') setSessionMode('iterative');
     } else if (execType === 'solo_agent' || execType === 'multi_agent') {
@@ -53,6 +56,8 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
       task_id: taskId,
       executor_type: executorType,
       session_mode: sessionMode,
+      ...(executorType === 'api_call' ? {} : { run_surface: runSurface }),
+      execution_mode: (executorType !== 'api_call' && runSurface === 'visual_ccb') ? 'semi-auto' : 'auto',
       goal,
       acceptance: acceptance.split('\n').filter(Boolean),
       acceptance_criteria: acceptance.split('\n').filter(Boolean),
@@ -65,6 +70,10 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
         provider: initialSpec.agent_config?.provider || '',
       },
     };
+    if (executorType === 'solo_agent' && executorInstruction.trim()) {
+      spec.executor_instruction = executorInstruction.trim();
+      spec.goal = executorInstruction.trim();
+    }
     if (executorType === 'multi_agent' && initialSpec.collab_roles) {
       spec.collab_roles = initialSpec.collab_roles;
     }
@@ -101,6 +110,22 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
             <option value="continuous" disabled={isContinuousDisabled}>Continuous — persistent agent session</option>
           </select>
         </div>
+        {(executorType === 'solo_agent' || executorType === 'multi_agent') && (
+          <div style={{ marginBottom: 12 }}>
+            <label className="form-label">Run Surface</label>
+            <select
+              id="modal-run-surface"
+              className="form-select"
+              value={runSurface}
+              onChange={(e) => setRunSurface(e.target.value)}
+            >
+              {executorType !== 'multi_agent' && (
+                <option value="bridge">Bridge / solo_bridge - non-visual</option>
+              )}
+              <option value="visual_ccb">Visual CCB - visible run</option>
+            </select>
+          </div>
+        )}
         <div style={{ marginBottom: 12 }}>
           <label className="form-label">Task ID</label>
           <input
@@ -123,6 +148,19 @@ function TaskEditor({ initialSpec = {}, onSave, onCancel }) {
             style={{ width: '100%', resize: 'vertical' }}
           />
         </div>
+        {executorType === 'solo_agent' && (
+          <div style={{ marginBottom: 12 }}>
+            <label className="form-label">Executor instructions</label>
+            <textarea
+              id="modal-executor-instruction"
+              className="form-input"
+              rows={3}
+              value={executorInstruction}
+              onChange={(e) => setExecutorInstruction(e.target.value)}
+              style={{ width: '100%', resize: 'vertical' }}
+            />
+          </div>
+        )}
         <div style={{ marginBottom: 12 }}>
           <label className="form-label">Acceptance (one per line)</label>
           <textarea

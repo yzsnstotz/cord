@@ -9,10 +9,13 @@ Providers:
     gemini, codex, opencode, droid, claude
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import argparse
 from pathlib import Path
+from importlib import import_module
 
 script_dir = Path(__file__).resolve().parent
 lib_dir = script_dir.parent / "lib"
@@ -29,6 +32,14 @@ PROVIDER_COMMS = {
     "opencode": ("opencode_comm", "OpenCodeCommunicator"),
     "droid": ("droid_comm", "DroidCommunicator"),
     "claude": ("claude_comm", "ClaudeCommunicator"),
+}
+
+PROVIDER_SESSION_MODULES = {
+    "codex": "caskd_session",
+    "gemini": "gaskd_session",
+    "opencode": "oaskd_session",
+    "claude": "laskd_session",
+    "droid": "daskd_session",
 }
 
 def _usage():
@@ -53,6 +64,26 @@ def _resolve_work_dir(session_file: str | None) -> Path:
     if parent_name in (".ccb", ".ccb_config"):
         return p.parent.parent
     return p.parent
+
+def _attempt_session_recover(provider: str, work_dir: Path) -> tuple[bool, str]:
+    module_name = PROVIDER_SESSION_MODULES.get(provider)
+    if not module_name:
+        return False, "session recovery unsupported"
+    try:
+        mod = import_module(module_name)
+        loader = getattr(mod, "load_project_session", None)
+        if not callable(loader):
+            return False, "session loader unavailable"
+        session = loader(work_dir)
+        if not session:
+            return False, "session not found"
+        ensure = getattr(session, "ensure_pane", None)
+        if not callable(ensure):
+            return False, "session ensure_pane unavailable"
+        ok, msg = ensure()
+        return bool(ok), str(msg or "")
+    except Exception as e:
+        return False, str(e)
 
 
 def main():
@@ -117,6 +148,12 @@ def main():
 
         comm = comm_class()
         healthy, message = comm.ping(display=False)
+        if not healthy and args.autostart:
+            recovered, recover_msg = _attempt_session_recover(provider, work_dir)
+            if recovered:
+                healthy, message = comm.ping(display=False)
+            elif recover_msg:
+                print(f"[WARN] Session recover failed: {recover_msg}", file=sys.stderr)
         print(message)
         return 0 if healthy else 1
     except ImportError as e:

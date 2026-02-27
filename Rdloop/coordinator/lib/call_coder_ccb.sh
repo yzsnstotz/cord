@@ -35,6 +35,41 @@ try: print(json.load(open('$task_json')).get('repo_path',''))
 except: print('')
 " 2>/dev/null || echo "")
 
+find_ccb_root() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 1
+  if [ ! -d "$p" ]; then
+    p="$(dirname "$p" 2>/dev/null || echo "")"
+  fi
+  [ -d "$p" ] || return 1
+  p="$(cd "$p" 2>/dev/null && pwd || echo "$p")"
+  echo "$p"
+  return 0
+}
+
+rdloop_root="$(cd "$(dirname "$0")/../.." && pwd)"
+ccb_path_cfg=$(python3 -c "
+import json
+try:
+  print((json.load(open('${rdloop_root}/rdloop.config.json')).get('ccb_path') or '').strip())
+except:
+  print('')
+" 2>/dev/null || echo "")
+
+session_root=""
+if [ -n "$project_path" ]; then
+  session_root="$(find_ccb_root "$project_path" 2>/dev/null || echo "")"
+fi
+if [ -z "$session_root" ] && [ -n "$worktree_dir" ] && [ -d "$worktree_dir" ]; then
+  session_root="$(cd "$worktree_dir" 2>/dev/null && pwd || echo "$worktree_dir")"
+fi
+ccb_run_dir=""
+if [ -n "$session_root" ]; then
+  mkdir -p "${session_root}/.ccb" 2>/dev/null || true
+  ccb_run_dir="${session_root}/.ccb/run"
+  mkdir -p "$ccb_run_dir" 2>/dev/null || true
+fi
+
 # P16: provider from collab_roles.executor (5th arg) or fallback to coder_model prefix
 ccb_bin="cask"
 ccb_provider="codex"
@@ -51,39 +86,130 @@ else
   if [[ "$coder_model" == gemini* ]]; then ccb_bin="gask"; ccb_provider="gemini"; fi
 fi
 
-# P18: Session file from repo_path/.ccb/ (project-level), not worktree. cwd for cask/gask remains worktree_dir.
+ask_autostart_env_var=""
+case "$ccb_bin" in
+  cask) ask_autostart_env_var="CCB_CASKD_AUTOSTART" ;;
+  gask) ask_autostart_env_var="CCB_GASKD_AUTOSTART" ;;
+  lask) ask_autostart_env_var="CCB_LASKD_AUTOSTART" ;;
+  oask) ask_autostart_env_var="CCB_OASKD_AUTOSTART" ;;
+  dask) ask_autostart_env_var="CCB_DASKD_AUTOSTART" ;;
+esac
+
+ccb_bin_cmd="$ccb_bin"
+if [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/bin/${ccb_bin}" ]; then
+  ccb_bin_cmd="${ccb_path_cfg}/bin/${ccb_bin}"
+else
+  found_ccb_bin="$(command -v "$ccb_bin" 2>/dev/null || echo "")"
+  [ -n "$found_ccb_bin" ] && ccb_bin_cmd="$found_ccb_bin"
+fi
+
+ccb_ping_cmd=""
+if [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/bin/ccb-ping" ]; then
+  ccb_ping_cmd="${ccb_path_cfg}/bin/ccb-ping"
+else
+  if [ -n "$ccb_bin_cmd" ] && [ -x "$(dirname "$ccb_bin_cmd")/ccb-ping" ]; then
+    ccb_ping_cmd="$(dirname "$ccb_bin_cmd")/ccb-ping"
+  else
+    ccb_ping_cmd="$(command -v ccb-ping 2>/dev/null || echo ccb-ping)"
+  fi
+fi
+
+ccb_launcher_cmd=""
+if [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/bin/ccb" ]; then
+  ccb_launcher_cmd="${ccb_path_cfg}/bin/ccb"
+else
+  found_ccb_launcher="$(command -v ccb 2>/dev/null || echo "")"
+  [ -n "$found_ccb_launcher" ] && ccb_launcher_cmd="$found_ccb_launcher"
+fi
+
+# P18: Session file from task repo root. GUI ccb_work_dir is not used for task delivery.
 ccb_session_file=""
-if [ -n "$project_path" ] && [ -d "${project_path}/.ccb" ]; then
+if [ -n "$session_root" ]; then
   case "$ccb_bin" in
-    cask) ccb_session_file="${project_path}/.ccb/.codex-session" ;;
-    gask) ccb_session_file="${project_path}/.ccb/.gemini-session" ;;
-    lask) ccb_session_file="${project_path}/.ccb/.claude-session" ;;
-    oask) ccb_session_file="${project_path}/.ccb/.opencode-session" ;;
-    dask) ccb_session_file="${project_path}/.ccb/.droid-session" ;;
-    *)   ccb_session_file="${project_path}/.ccb/.codex-session" ;;
+    cask) ccb_session_file="${session_root}/.ccb/.codex-session" ;;
+    gask) ccb_session_file="${session_root}/.ccb/.gemini-session" ;;
+    lask) ccb_session_file="${session_root}/.ccb/.claude-session" ;;
+    oask) ccb_session_file="${session_root}/.ccb/.opencode-session" ;;
+    dask) ccb_session_file="${session_root}/.ccb/.droid-session" ;;
+    *)   ccb_session_file="${session_root}/.ccb/.codex-session" ;;
   esac
 fi
 
-knowledge_cache="${project_path}/.context/knowledge_cache.json"
 instruction=$(cat "$instruction_path" 2>/dev/null || echo "")
-
-full_prompt="[WORKING DIRECTORY: ${worktree_dir}]
-[KNOWLEDGE CACHE: ${knowledge_cache}]
-[NOTE: semi-auto mode — human may observe and intervene via tmux]
-${instruction}"
+full_prompt="${instruction}"
 
 {
   echo "[CODER][semi-auto/ccb] $(date -u +%Y-%m-%dT%H:%M:%SZ) attached to human tmux session"
-  echo "[CODER][semi-auto/ccb] provider=${ccb_bin} timeout=${timeout_s}s project_path=${project_path:-<unset>}"
+  echo "[CODER][semi-auto/ccb] provider=${ccb_bin} timeout=${timeout_s}s project_path=${project_path:-<unset>} session_root=${session_root:-<unset>}"
+  if [ -n "$ccb_session_file" ] && [ ! -f "$ccb_session_file" ]; then
+    echo "[CODER][semi-auto/ccb] session file missing, attempting provider autostart/readiness bootstrap: ${ccb_session_file}"
+  fi
 
   ccb_ping_ok=0
-  ping_retries=3
+  ping_retries=5
   ping_interval=1
+  bootstrap_attempted=0
+  stale_session_reset_done=0
+  ccb_bootstrap_dir="${session_root:-$worktree_dir}"
   for (( attempt=1; attempt <= ping_retries; attempt++ )); do
+    last_ping_diag=""
+    ping_rc=1
     if [ -n "$ccb_session_file" ]; then
-      CCB_SESSION_FILE="$ccb_session_file" ccb-ping "$ccb_provider" > /dev/null 2>&1 && { ccb_ping_ok=1; break; }
+      if [ -n "$ccb_run_dir" ]; then
+        if last_ping_diag="$(CCB_RUN_DIR="$ccb_run_dir" CCB_SESSION_FILE="$ccb_session_file" "$ccb_ping_cmd" "$ccb_provider" --session-file "$ccb_session_file" --autostart 2>&1)"; then
+          ping_rc=0
+        else
+          ping_rc=$?
+        fi
+      else
+        if last_ping_diag="$(CCB_SESSION_FILE="$ccb_session_file" "$ccb_ping_cmd" "$ccb_provider" --session-file "$ccb_session_file" --autostart 2>&1)"; then
+          ping_rc=0
+        else
+          ping_rc=$?
+        fi
+      fi
     else
-      (cd "$worktree_dir" && ccb-ping "$ccb_provider") > /dev/null 2>&1 && { ccb_ping_ok=1; break; }
+      if [ -n "$ccb_run_dir" ]; then
+        if last_ping_diag="$(cd "$worktree_dir" && CCB_RUN_DIR="$ccb_run_dir" "$ccb_ping_cmd" "$ccb_provider" --autostart 2>&1)"; then
+          ping_rc=0
+        else
+          ping_rc=$?
+        fi
+      else
+        if last_ping_diag="$(cd "$worktree_dir" && "$ccb_ping_cmd" "$ccb_provider" --autostart 2>&1)"; then
+          ping_rc=0
+        else
+          ping_rc=$?
+        fi
+      fi
+    fi
+    if echo "$last_ping_diag" | grep -Eqi "session unhealthy|has exited|no active .* session found"; then
+      if [ "$stale_session_reset_done" -ne 1 ] && [ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ]; then
+        stale_session_reset_done=1
+        stale_backup="${ccb_session_file}.stale.$(date +%s)"
+        mv "$ccb_session_file" "$stale_backup" 2>/dev/null || true
+        echo "[CODER][semi-auto/ccb] detected stale session file; moved to ${stale_backup}"
+      fi
+    fi
+    if [ "$ping_rc" -eq 0 ]; then
+      ccb_ping_ok=1
+      break
+    fi
+    if [ "$bootstrap_attempted" -ne 1 ] && [ -n "$ccb_launcher_cmd" ]; then
+      bootstrap_attempted=1
+      echo "[CODER][semi-auto/ccb] ping failed; attempting provider bootstrap via ccb launcher: ${ccb_launcher_cmd} ${ccb_provider}"
+      bootstrap_out="$(cd "$ccb_bootstrap_dir" && "$ccb_launcher_cmd" "$ccb_provider" </dev/null 2>&1 | sed -n '1,8p' || true)"
+      if [ -n "$bootstrap_out" ]; then
+        echo "[CODER][semi-auto/ccb] bootstrap output: $(echo "$bootstrap_out" | tr '\n' ' ' | sed 's/  */ /g')"
+        if echo "$bootstrap_out" | grep -Eqi "stdin is not a terminal"; then
+          if [ "$(uname -s)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
+            launch_cmd="cd \"$ccb_bootstrap_dir\" && \"$ccb_launcher_cmd\" \"$ccb_provider\""
+            apple_cmd="$(printf '%s' "$launch_cmd" | sed 's/\\/\\\\/g; s/\"/\\"/g')"
+            osascript -e "tell application \"Terminal\" to do script \"${apple_cmd}\"" >/dev/null 2>&1 || true
+            echo "[CODER][semi-auto/ccb] non-tty bootstrap detected; opened Terminal for interactive CCB launch in ${ccb_bootstrap_dir}"
+          fi
+        fi
+      fi
     fi
     if [ "$attempt" -lt "$ping_retries" ]; then
       echo "[CODER][semi-auto/ccb] ping attempt ${attempt}/${ping_retries} failed, retrying in ${ping_interval}s..."
@@ -92,22 +218,68 @@ ${instruction}"
   done
 
   if [ "$ccb_ping_ok" -ne 1 ]; then
+    ping_diag="$last_ping_diag"
+    if [ -n "$ping_diag" ]; then
+      echo "[CODER][semi-auto/ccb] ping diagnostic output: $(echo "$ping_diag" | tr '\n' ' ' | sed 's/  */ /g')"
+    fi
     echo "[CODER][semi-auto/ccb] CCB daemon unavailable after ${ping_retries} ping(s)"
-    echo "[CODER][semi-auto/ccb] diagnostic: provider=${ccb_provider} (ask=${ccb_bin}) session_file=${ccb_session_file:-<unset>} session_file_exists=$([ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ] && echo yes || echo no) ccb-ping=$(command -v ccb-ping 2>/dev/null || echo ccb-ping)"
+    echo "[CODER][semi-auto/ccb] diagnostic: provider=${ccb_provider} (ask=${ccb_bin_cmd}) session_root=${session_root:-<unset>} session_file=${ccb_session_file:-<unset>} session_file_exists=$([ -n "$ccb_session_file" ] && [ -f "$ccb_session_file" ] && echo yes || echo no) ccb_run_dir=${ccb_run_dir:-<unset>} ccb_path_cfg=${ccb_path_cfg:-<unset>} ccb-ping=${ccb_ping_cmd:-<unset>}"
     echo "127" > "${attempt_dir}/coder/rc.txt"
     exit 127
   fi
 
   if [ -n "$ccb_session_file" ]; then
-    CCB_SESSION_FILE="$ccb_session_file" "$ccb_bin" \
-      --output "$output_file" \
-      --timeout "$timeout_s" \
-      "$full_prompt" 2>&1
+    if [ -n "$ask_autostart_env_var" ]; then
+      if [ -n "$ccb_run_dir" ]; then
+        env "$ask_autostart_env_var=1" CCB_RUN_DIR="$ccb_run_dir" CCB_SESSION_FILE="$ccb_session_file" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      else
+        env "$ask_autostart_env_var=1" CCB_SESSION_FILE="$ccb_session_file" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      fi
+    else
+      if [ -n "$ccb_run_dir" ]; then
+        CCB_RUN_DIR="$ccb_run_dir" CCB_SESSION_FILE="$ccb_session_file" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      else
+        CCB_SESSION_FILE="$ccb_session_file" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      fi
+    fi
   else
-    "$ccb_bin" \
-      --output "$output_file" \
-      --timeout "$timeout_s" \
-      "$full_prompt" 2>&1
+    if [ -n "$ask_autostart_env_var" ]; then
+      if [ -n "$ccb_run_dir" ]; then
+        env "$ask_autostart_env_var=1" CCB_RUN_DIR="$ccb_run_dir" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      else
+        env "$ask_autostart_env_var=1" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      fi
+    else
+      if [ -n "$ccb_run_dir" ]; then
+        CCB_RUN_DIR="$ccb_run_dir" "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      else
+        "$ccb_bin_cmd" \
+          --output "$output_file" \
+          --timeout "$timeout_s" \
+          "$full_prompt" 2>&1
+      fi
+    fi
   fi
 
   rc=$?

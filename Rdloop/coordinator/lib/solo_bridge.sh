@@ -20,7 +20,37 @@ FRESH_PER_STEP=false
 SESSION_FILE="${SESSION_DIR}/agent.session"
 LAST_REQUEST_MTIME=0
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CORD_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+BRIDGELOG_DIR="${BRIDGELOG_DIR:-${CORD_ROOT}/bridgelog}"
+BRIDGELOG_FILE="${BRIDGELOG_DIR}/claude_bridge_comm.log"
+mkdir -p "$BRIDGELOG_DIR" 2>/dev/null || true
+
+bridge_log_json() {
+  local event="$1"
+  local provider="${2:-}"
+  local payload="${3:-{}}"
+  python3 - "$BRIDGELOG_FILE" "$event" "$provider" "$payload" <<'PY' 2>/dev/null || true
+import json, sys, datetime
+log_file, event, provider, payload_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    payload = json.loads(payload_raw)
+except Exception:
+    payload = {"payload_raw": payload_raw}
+entry = {
+    "ts": datetime.datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+    "event": event,
+    "source": "solo_bridge",
+    "provider": provider or None,
+    **payload
+}
+with open(log_file, "a", encoding="utf-8") as f:
+    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+PY
+}
+
 echo "[BRIDGE] Started. provider=${PROVIDER} session_dir=${SESSION_DIR} fresh=${FRESH_PER_STEP}"
+bridge_log_json "solo_bridge_started" "${PROVIDER}" "session_dir=${SESSION_DIR} attempt_dir=${ATTEMPT_DIR} fresh_per_step=${FRESH_PER_STEP}"
 
 dispatch_to_agent() {
   local request_file="$1"
@@ -37,13 +67,18 @@ dispatch_to_agent() {
   if [ "$FRESH_PER_STEP" = "false" ] && [ -f "$SESSION_FILE" ]; then
     session_flag="--session-file ${SESSION_FILE}"
   fi
+  local cwd
+  cwd=$(python3 -c "import json; print(json.load(open('${SESSION_DIR}/../../../task.json')).get('repo_path','.'))" 2>/dev/null || echo ".")
+  [ -z "$cwd" ] && cwd="."
+  [ -d "$cwd" ] || cwd="."
+  local instruction_preview
+  instruction_preview=$(printf "%s" "$instruction" | head -c 4000 | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo "\"\"")
+  bridge_log_json "solo_bridge_request_dispatch" "${PROVIDER}" "request_file=${request_file} response_file=${response_file} cwd=${cwd} instruction_preview=${instruction_preview}"
 
   local rc=0
   case "$PROVIDER" in
     claude)
       # Claude CLI: -p for prompt, --cwd for working directory
-      local cwd
-      cwd=$(python3 -c "import json; print(json.load(open('${SESSION_DIR}/../../../task.json')).get('repo_path','.'))" 2>/dev/null || echo ".")
       set +e
       claude -p "$(cat "$instruction_file")" \
         --cwd "$cwd" \
@@ -55,8 +90,7 @@ dispatch_to_agent() {
       ;;
     codex)
       set +e
-      codex --prompt "$(cat "$instruction_file")" \
-        --auto-edit \
+      codex exec --ephemeral --full-auto -C "$cwd" - < "$instruction_file" \
         2>&1 | tee "$step_log" > "${SESSION_DIR}/_raw_output.txt"
       rc=${PIPESTATUS[0]}
       set -e
@@ -100,6 +134,9 @@ if parsed is None:
 
 json.dump(parsed, open('${response_file}', 'w'), indent=2)
 " 2>/dev/null || echo '{"self_eval":"dead_loop","summary":"Failed to parse agent output"}' > "$response_file"
+  local response_preview
+  response_preview=$(cat "${response_file}" 2>/dev/null | head -c 4000 | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo "\"\"")
+  bridge_log_json "solo_bridge_response_written" "${PROVIDER}" "response_file=${response_file} rc=${rc} response_preview=${response_preview}"
 }
 
 # Main loop: watch for new requests
@@ -126,6 +163,7 @@ while true; do
       mkdir -p "$step_dir"
 
       echo "[BRIDGE] Processing request iteration=${iteration}"
+      bridge_log_json "solo_bridge_request_detected" "${PROVIDER}" "iteration=${iteration} request_mtime=${req_mtime}"
       dispatch_to_agent "${SESSION_DIR}/request.json" "${SESSION_DIR}/response.json" "${step_dir}/agent.log"
       echo "[BRIDGE] Response written for iteration=${iteration}"
     fi
@@ -135,3 +173,4 @@ while true; do
 done
 
 echo "[BRIDGE] Exiting."
+bridge_log_json "solo_bridge_exiting" "${PROVIDER}" "session_dir=${SESSION_DIR}"

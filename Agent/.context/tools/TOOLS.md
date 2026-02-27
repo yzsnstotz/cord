@@ -52,6 +52,19 @@ Call ONLY on existing projects at STEP 3, or before a task requiring specific fi
 SKIP if init.md just ran (index.json is empty).
 On mismatch → STOP, report to user, do not proceed.
 
+### ensure_git_repo.sh
+```bash
+bash $TOOLS_ROOT/ensure_git_repo.sh <repo_path> [base_ref]
+```
+Ensures `<repo_path>` exists, is initialized as a git repo, has an initial commit, and contains `base_ref`.
+Use for automatic task activation when user chooses a new/non-git folder.
+
+### list_git_refs.sh
+```bash
+bash $TOOLS_ROOT/list_git_refs.sh <repo_path>
+```
+Prints branch/tag refs for repo selection UIs and quick git diagnostics.
+
 ## Notes
 - Scripts idempotent where possible
 - Non-zero exit → exception; load exceptions.md

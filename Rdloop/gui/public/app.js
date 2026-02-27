@@ -34,6 +34,10 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function providerDisplayName(provider) {
+  return String(provider || '').toLowerCase() === 'gemini' ? 'Gemini' : String(provider || '');
+}
+
 // Decode JSON-style Unicode escapes (\uXXXX) so coder_output and evidence display correctly
 function decodeUnicodeEscapes(str) {
   if (str == null || typeof str !== 'string') return '';
@@ -83,7 +87,7 @@ function updateReadOnlyBanner() {
   document.querySelectorAll('.write-action').forEach(b => { b.disabled = readOnlyMode; });
 }
 
-// P10: Settings panel — agent_root, default_execution_mode, coder/judge defaults; save all at once
+// P10: Settings panel — agent_root, default_run_surface, coder/judge defaults; save all at once
 let settingsConfigSnapshot = null;
 
 const ALLOWED_ROLE_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
@@ -112,13 +116,13 @@ async function openSettingsPanel() {
   settingsConfigSnapshot = { ...cfg };
   const agentRoot = (cfg.agent_root && cfg.agent_root.length) ? cfg.agent_root : '';
   const ccbPath = (cfg.ccb_path && cfg.ccb_path.length) ? cfg.ccb_path : '';
-  const execMode = cfg.default_execution_mode === 'semi-auto' ? 'semi-auto' : 'auto';
+  const runSurface = cfg.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
   const coderSel = buildAdapterSelector('settings-coder', cfg.default_coder || '', cfg.default_coder_model || '');
   const judgeSel = buildAdapterSelector('settings-judge', cfg.default_judge || '', cfg.default_judge_model || '');
 
   const rolesHtml = Array.isArray(roles) && roles.length
     ? roles.map(r => {
-        const opts = ALLOWED_ROLE_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${r.provider === p ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('');
+        const opts = ALLOWED_ROLE_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${r.provider === p ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
         const disabled = !r.assignable ? 'disabled' : '';
         return `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
@@ -150,15 +154,11 @@ async function openSettingsPanel() {
         </div>
 
         <div style="margin-bottom:12px">
-          <label class="form-label">Default execution mode</label>
-          <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
-            <label style="cursor:pointer;font-size:13px">
-              <input type="radio" name="settings-exec-mode" value="auto" ${execMode === 'auto' ? 'checked' : ''} onchange="onSettingsExecModeChange()"> auto — 全自动无人介入
-            </label>
-            <label style="cursor:pointer;font-size:13px">
-              <input type="radio" name="settings-exec-mode" value="semi-auto" ${execMode === 'semi-auto' ? 'checked' : ''} onchange="onSettingsExecModeChange()"> semi-auto — 人在回路可观察介入
-            </label>
-          </div>
+          <label class="form-label">Default run surface (solo/multi-agent)</label>
+          <select id="settings-run-surface" class="form-select" style="width:auto;margin-top:6px" onchange="onSettingsRunSurfaceChange()">
+            <option value="bridge" ${runSurface === 'bridge' ? 'selected' : ''}>Bridge / solo_bridge — non-visual</option>
+            <option value="visual_ccb" ${runSurface === 'visual_ccb' ? 'selected' : ''}>Visual CCB — run in visible CCB session</option>
+          </select>
           <div id="settings-ccb-hint" style="display:none;margin-top:8px;padding:8px;background:#3d2e00;border:1px solid #9e6a00;border-radius:6px;font-size:12px;color:#d4a012"></div>
         </div>
 
@@ -190,7 +190,7 @@ async function openSettingsPanel() {
               <div style="margin-bottom:8px">
                 <label class="form-label" style="font-size:11px">Provider</label>
                 <select id="settings-knowledge-provider" class="form-select" style="width:auto">
-                  ${['codex','gemini','claude','opencode'].map(p => '<option value="'+p+'" '+(cfg.knowledge_provider===p?'selected':'')+'>'+p+'</option>').join('')}
+                  ${['codex','gemini','claude','opencode'].map(p => '<option value="'+p+'" '+(cfg.knowledge_provider===p?'selected':'')+'>'+providerDisplayName(p)+'</option>').join('')}
                 </select>
               </div>
               <div style="margin-bottom:8px">
@@ -204,8 +204,8 @@ async function openSettingsPanel() {
 
         <div style="margin-bottom:12px" id="settings-roles-section">
           <label class="form-label">Role configuration (collab_context.md)</label>
-          <div id="settings-roles-wrap" style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;${execMode === 'auto' ? 'opacity:0.6;pointer-events:none' : ''}">${rolesHtml}</div>
-          <div id="settings-roles-hint" style="font-size:11px;color:#8b949e;margin-top:4px;display:${execMode === 'auto' ? 'block' : 'none'}">角色配置仅在 semi-auto 模式下生效。</div>
+          <div id="settings-roles-wrap" style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px">${rolesHtml}</div>
+          <div id="settings-roles-hint" style="font-size:11px;color:#8b949e;margin-top:4px">角色配置用于 multi-agent 的 visual CCB 运行。</div>
           <button type="button" class="btn write-action" style="margin-top:8px;font-size:12px" onclick="submitAgentRoles()">Save roles</button>
           <span id="settings-roles-msg" style="margin-left:8px;font-size:12px;color:#3fb950"></span>
         </div>
@@ -242,7 +242,7 @@ async function openSettingsPanel() {
   if (agentRootEl) {
     agentRootEl.addEventListener('blur', validateSettingsAgentRoot);
   }
-  onSettingsExecModeChange();
+  onSettingsRunSurfaceChange();
   refreshModelSelector('settings-coder').catch(() => {});
   refreshModelSelector('settings-judge').catch(() => {});
 }
@@ -358,10 +358,9 @@ async function submitSettings() {
     if (agentRootEl) agentRootEl.value = s.agent_root || '';
     const ccbPathEl = document.getElementById('settings-ccb-path');
     if (ccbPathEl) ccbPathEl.value = s.ccb_path || '';
-    const execMode = s.default_execution_mode === 'semi-auto' ? 'semi-auto' : 'auto';
-    document.querySelectorAll('input[name="settings-exec-mode"]').forEach(r => {
-      r.checked = r.value === execMode;
-    });
+    const runSurface = s.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
+    const runSurfaceEl = document.getElementById('settings-run-surface');
+    if (runSurfaceEl) runSurfaceEl.value = runSurface;
     const ch = inferChannelFromAdapter(s.default_coder);
     const channelEl = document.getElementById('adapter-settings-channel-type');
     if (channelEl) channelEl.value = ch;
@@ -377,11 +376,7 @@ async function submitSettings() {
 
   const agentRoot = (document.getElementById('settings-agent-root')?.value ?? '').trim();
   const ccbPath = (document.getElementById('settings-ccb-path')?.value ?? '').trim();
-  const execRadios = document.querySelectorAll('input[name="settings-exec-mode"]');
-  let default_execution_mode = 'auto';
-  for (const r of execRadios) {
-    if (r.checked) { default_execution_mode = r.value; break; }
-  }
+  const default_run_surface = document.getElementById('settings-run-surface')?.value || 'bridge';
   const default_coder = document.getElementById('adapter-settings-coder')?.value ?? null;
   const default_judge = document.getElementById('adapter-settings-judge')?.value ?? null;
   const default_coder_model = document.getElementById('adapter-settings-coder-model')?.value?.trim() || null;
@@ -401,7 +396,7 @@ async function submitSettings() {
   const payload = {
     agent_root: agentRoot || '',
     ccb_path: ccbPath || '',
-    default_execution_mode,
+    default_run_surface,
     default_coder: payloadCoder,
     default_judge: payloadJudge,
     default_coder_model: payloadCoderModel,
@@ -540,11 +535,9 @@ function updateCcbProviderRows(providers, tmuxOk) {
       if (actionsDiv) {
         let primaryBtn = '';
         let secondaryBtn = '';
-        if (isOff || (!isOn && !isRunning)) {
-          primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'])" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
-        } else {
-          primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-open-${escapeHtml(p.provider)}" onclick="ccbAttachProvider('${escapeHtml(p.provider)}')">Open</button>`;
-          secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'])" title="Stop ${escapeHtml(p.provider)}">Stop</button>`;
+        primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'])" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
+        if (!(isOff || (!isOn && !isRunning))) {
+          secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'])" title="Stop ${escapeHtml(providerDisplayName(p.provider))}">Stop</button>`;
         }
         actionsDiv.innerHTML = primaryBtn + secondaryBtn;
       }
@@ -587,7 +580,7 @@ async function renderCcbPanel() {
     sessionRes = await api('/ccb/session-status').catch(() => ({ providers: [], tmux_available: false, terminal_mode: 'unknown', wezterm_available: false }));
     ccbConfig = await api('/ccb/config').catch(() => ({ providers: [] }));
   } catch (_) {}
-  const workDir = (config.ccb_work_dir || config.project_path || '').trim();
+  const workDir = (config.project_path || '').trim();
   window._lastCcbSessionStatus = sessionRes;
   const providers = sessionRes.providers.length ? sessionRes.providers : [
     { provider: 'codex', session_name: null, pid: null, status: 'off', ping_ms: null },
@@ -620,18 +613,16 @@ async function renderCcbPanel() {
     // Primary action: Start if off, Open if running
     let primaryBtn = '';
     let secondaryBtn = '';
-    if (isOff || (!isOn && !isRunning)) {
-      primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'])" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
-    } else {
-      primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-open-${escapeHtml(p.provider)}" onclick="ccbAttachProvider('${escapeHtml(p.provider)}')">Open</button>`;
-      secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'])" title="Stop ${escapeHtml(p.provider)}">Stop</button>`;
+    primaryBtn = `<button type="button" class="btn btn-primary write-action ccb-card-btn" id="ccb-btn-start-${escapeHtml(p.provider)}" onclick="ccbStartProviders(['${escapeHtml(p.provider)}'])" ${!tmuxOk ? 'disabled' : ''}>Start</button>`;
+    if (!(isOff || (!isOn && !isRunning))) {
+      secondaryBtn = `<button type="button" class="btn btn-danger write-action ccb-card-btn-sm" id="ccb-btn-stop-${escapeHtml(p.provider)}" onclick="ccbStopProviders(['${escapeHtml(p.provider)}'])" title="Stop ${escapeHtml(providerDisplayName(p.provider))}">Stop</button>`;
     }
 
     return `
       <div class="ccb-card" id="ccb-card-${escapeHtml(p.provider)}">
         <div class="ccb-card-header">
           <span class="ccb-card-status" id="ccb-status-${escapeHtml(p.provider)}">${statusDot}</span>
-          <span class="ccb-card-name">${escapeHtml(p.provider)}</span>
+          <span class="ccb-card-name">${escapeHtml(providerDisplayName(p.provider))}</span>
           <span class="ccb-card-status-text" id="ccb-status-text-${escapeHtml(p.provider)}">${statusText}</span>
         </div>
         <div class="ccb-card-actions">
@@ -675,10 +666,7 @@ async function renderCcbPanel() {
       <div class="ccb-config-body">
         <div class="ccb-config-row">
           <label class="form-label">Work Directory</label>
-          <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" id="ccb-work-dir" class="form-input" value="${escapeHtml(workDir)}" placeholder="${escapeHtml(config.project_path || '/path/to/project')}" style="flex:1">
-            <button type="button" class="btn write-action" onclick="saveCcbWorkDir()">Save</button>
-          </div>
+          <input type="text" id="ccb-work-dir" class="form-input" value="${escapeHtml(workDir)}" placeholder="${escapeHtml(config.project_path || '/path/to/project')}" style="flex:1" readonly>
         </div>
         <div class="ccb-config-row">
           <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
@@ -689,7 +677,7 @@ async function renderCcbPanel() {
         <div class="ccb-config-row">
           <label class="form-label">Default Providers <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#6e7681">(used by "Start All" &amp; WezTerm)</span></label>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
-            ${['codex', 'gemini', 'opencode', 'claude', 'droid'].map(p => `<label style="cursor:pointer;font-size:13px"><input type="checkbox" class="ccb-config-cb" data-provider="${escapeHtml(p)}" ${(ccbConfig.providers || []).includes(p) ? 'checked' : ''}> ${escapeHtml(p)}</label>`).join('')}
+            ${['codex', 'gemini', 'opencode', 'claude', 'droid'].map(p => `<label style="cursor:pointer;font-size:13px"><input type="checkbox" class="ccb-config-cb" data-provider="${escapeHtml(p)}" ${(ccbConfig.providers || []).includes(p) ? 'checked' : ''}> ${escapeHtml(providerDisplayName(p))}</label>`).join('')}
           </div>
           <div style="margin-top:8px;display:flex;gap:8px">
             <button type="button" class="btn write-action" onclick="saveCcbConfig()">Save Config</button>
@@ -714,9 +702,7 @@ async function renderCcbPanel() {
 }
 
 async function ccbStartProviders(providers) {
-  const workDir = (document.getElementById('ccb-work-dir')?.value || '').trim();
   const cfg = await api('/config').catch(() => ({}));
-  const dir = workDir || (cfg.project_path || '');
   const notice = document.getElementById('ccb-panel-notice');
 
   // If use_wezterm_for_all is enabled, route through WezTerm instead of tmux
@@ -725,12 +711,12 @@ async function ccbStartProviders(providers) {
     return;
   }
 
-  if (notice) { notice.textContent = 'Starting ' + providers.join(', ') + '... (waiting for session)'; notice.style.color = '#8b949e'; }
+  if (notice) { notice.textContent = 'Starting ' + providers.map(providerDisplayName).join(', ') + '... (waiting for session)'; notice.style.color = '#8b949e'; }
   try {
     const res = await fetch('/api/ccb/session/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providers, work_dir: dir || undefined })
+      body: JSON.stringify({ providers })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -738,7 +724,7 @@ async function ccbStartProviders(providers) {
       alert(data.error || data.hint || 'Start failed');
       return;
     }
-    const ids = (data.session_ids || []).join(', ') || providers.join(', ');
+    const ids = (data.session_ids || []).join(', ') || providers.map(providerDisplayName).join(', ');
     if (notice) {
       notice.textContent = 'Started: ' + ids + (data.hint ? '. ' + data.hint : '');
       notice.style.color = '#3fb950';
@@ -746,11 +732,12 @@ async function ccbStartProviders(providers) {
     }
     // Auto-open terminal if configured
     const hasAttachableSession = Array.isArray(data.session_ids) && data.session_ids.length > 0;
-    if (hasAttachableSession && cfg.ccb_auto_open_terminal !== false) {
-      const sessionId = (data.session_ids && data.session_ids[0]) || null;
+    // Avoid duplicate windows: fresh start already opens a terminal window from backend.
+    // Auto-attach only when reusing an existing session.
+    if (hasAttachableSession && data.reused === true) {
+      const providerToOpen = (providers && providers.length > 0) ? providers[0] : 'codex';
       setTimeout(() => {
-        if (sessionId) ccbAttachSession(sessionId);
-        else ccbAttachProvider(providers[0]);
+        ccbAttachProvider(providerToOpen);
       }, 1500);
     }
     // Poll status so cards update
@@ -758,31 +745,6 @@ async function ccbStartProviders(providers) {
   } catch (e) {
     if (notice) notice.textContent = '';
     alert(e?.message || 'Start failed');
-  }
-}
-
-async function saveCcbWorkDir() {
-  const input = document.getElementById('ccb-work-dir');
-  const dir = (input?.value || '').trim();
-  const notice = document.getElementById('ccb-panel-notice');
-  try {
-    const res = await fetch('/api/config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ccb_work_dir: dir })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      if (notice) { notice.textContent = data.error || 'Save failed'; notice.style.color = '#f85149'; }
-      return;
-    }
-    if (notice) {
-      notice.textContent = 'Work directory saved.';
-      notice.style.color = '#3fb950';
-      setTimeout(() => { notice.textContent = ''; }, 3000);
-    }
-  } catch (e) {
-    if (notice) { notice.textContent = e?.message || 'Save failed'; notice.style.color = '#f85149'; }
   }
 }
 
@@ -804,15 +766,13 @@ async function ccbOpenTerminalAndRun(providers) {
     await ccbOpenWezTermAndRun(allProviders);
     return;
   }
-  const workDir = (document.getElementById('ccb-work-dir')?.value || '').trim();
-  const dir = workDir || (cfg.project_path || '') || undefined;
   const notice = document.getElementById('ccb-panel-notice');
   if (notice) { notice.textContent = 'Opening terminal...'; notice.style.color = '#8b949e'; }
   try {
     const res = await fetch('/api/ccb/session/open-terminal', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ work_dir: dir || undefined, providers: providers || ['codex'] })
+      body: JSON.stringify({ providers: providers || ['codex'] })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -839,16 +799,14 @@ async function ccbOpenWezTermWithConfig() {
 }
 
 async function ccbOpenWezTermAndRun(providers) {
-  const workDir = (document.getElementById('ccb-work-dir')?.value || '').trim();
   const cfg = await api('/config').catch(() => ({}));
-  const dir = workDir || (cfg.project_path || '') || undefined;
   const notice = document.getElementById('ccb-panel-notice');
   if (notice) { notice.textContent = 'Opening WezTerm...'; notice.style.color = '#8b949e'; }
   try {
     const res = await fetch('/api/ccb/session/open-wezterm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ work_dir: dir || undefined, providers: providers || ['codex'] })
+      body: JSON.stringify({ providers: providers || ['codex'] })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -912,13 +870,10 @@ async function ccbAttachProvider(provider) {
       return;
     }
     const last = window._lastCcbSessionStatus || {};
-    const terminalMode = last.terminal_mode || 'unknown';
     const prov = (last.providers || []).find(p => p.provider === provider);
     const paneId = prov && prov.pane_id ? encodeURIComponent(prov.pane_id) : '';
     let url = '/api/ccb/session/attach?provider=' + encodeURIComponent(provider);
-    if (terminalMode === 'wezterm') {
-      url += '&terminal_mode=wezterm';
-    } else if (paneId) {
+    if (paneId) {
       url += '&pane_id=' + paneId;
     }
     const res = await fetch(url);
@@ -929,7 +884,7 @@ async function ccbAttachProvider(provider) {
     }
     const notice = document.getElementById('ccb-panel-notice');
     if (notice) {
-      notice.textContent = 'Opening ' + provider + ' terminal...';
+      notice.textContent = 'Opening ' + providerDisplayName(provider) + ' terminal...';
       notice.style.color = '#3fb950';
       setTimeout(() => { notice.textContent = ''; }, 4000);
     }
@@ -2080,10 +2035,10 @@ function onChannelTypeChange() {
   if (typeof syncFormToJson === 'function') syncFormToJson();
 }
 
-function onExecutionModeChange() {
+function onRunSurfaceChange() {
   const wrap = document.getElementById('collab-config-wrap');
-  const mode = document.getElementById('modal-execution-mode')?.value || 'auto';
-  if (wrap) wrap.style.display = mode === 'semi-auto' ? 'block' : 'none';
+  const mode = document.getElementById('modal-run-surface')?.value || 'bridge';
+  if (wrap) wrap.style.display = (_currentExecutorType === 'multi_agent' && mode === 'visual_ccb') ? 'block' : 'none';
 }
 
 async function validateRepoPath() {
@@ -2104,13 +2059,291 @@ async function validateRepoPath() {
       status.textContent = 'Valid';
       status.style.color = '#3fb950';
     } else {
-      status.textContent = r.error || 'Invalid';
-      status.style.color = '#f85149';
+      if (r.error === 'Path does not exist') {
+        status.textContent = 'Will create on run';
+        status.style.color = '#d29922';
+      } else {
+        status.textContent = r.error || 'Invalid';
+        status.style.color = '#f85149';
+      }
     }
   } catch (_) {
     status.textContent = 'Error';
     status.style.color = '#f85149';
   }
+}
+
+function setChoiceOptions(inputEl, values, preferredValue, datalistId) {
+  if (!inputEl) return;
+  const prev = (preferredValue !== undefined && preferredValue !== null)
+    ? String(preferredValue)
+    : String(inputEl.value || '');
+  const opts = [];
+  const seen = new Set();
+  for (const v of values || []) {
+    const s = (v || '').toString().trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    opts.push(s);
+  }
+  if (inputEl.tagName === 'SELECT') {
+    if (prev && !seen.has(prev)) opts.unshift(prev);
+    inputEl.innerHTML = opts.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+    if (prev) inputEl.value = prev;
+    return;
+  }
+  if (datalistId) {
+    let dl = document.getElementById(datalistId);
+    if (!dl) {
+      dl = document.createElement('datalist');
+      dl.id = datalistId;
+      document.body.appendChild(dl);
+    }
+    dl.innerHTML = opts.map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+    inputEl.setAttribute('list', datalistId);
+  }
+  if (prev) inputEl.value = prev;
+}
+
+async function refreshRepoOptions(preferredRepoPath) {
+  const repoInput = document.getElementById('modal-repo-path');
+  if (!repoInput) return;
+  const hint = (preferredRepoPath ?? repoInput.value ?? '').trim();
+  try {
+    const data = await api('/folder-options?hint=' + encodeURIComponent(hint));
+    const folders = Array.isArray(data.folders) ? data.folders : [];
+    setChoiceOptions(repoInput, folders, hint, 'modal-repo-path-options');
+  } catch {
+    setChoiceOptions(repoInput, hint ? [hint] : [], hint, 'modal-repo-path-options');
+  }
+}
+
+async function refreshBaseRefOptions(preferredRef) {
+  const repoInput = document.getElementById('modal-repo-path');
+  const refInput = document.getElementById('modal-base-ref');
+  if (!repoInput || !refInput) return;
+  const repoPath = (repoInput.value || '').trim();
+  let refs = [];
+  let head = '';
+  if (repoPath) {
+    try {
+      const data = await api('/git-refs?repo_path=' + encodeURIComponent(repoPath));
+      refs = Array.isArray(data.refs) ? data.refs : [];
+      head = (data.head || '').trim();
+    } catch {}
+  }
+  const fallback = preferredRef || refInput.value || head || 'main';
+  const merged = [head, ...refs, fallback, 'main'].filter(Boolean);
+  setChoiceOptions(refInput, merged, fallback, 'modal-base-ref-options');
+}
+
+async function onRepoSelectionChanged() {
+  await validateRepoPath();
+  await refreshBaseRefOptions();
+  if (typeof syncFormToJson === 'function') syncFormToJson();
+}
+
+async function createSelectedFolder() {
+  const repoInput = document.getElementById('modal-repo-path');
+  if (!repoInput) return;
+  const raw = (repoInput.value || '').trim();
+  if (!raw) {
+    alert('repo_path is empty');
+    return;
+  }
+  try {
+    const res = await fetch('/api/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: raw })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      alert(data.error || 'Failed to create folder');
+      return;
+    }
+    repoInput.value = data.path || raw;
+    await refreshRepoOptions(repoInput.value);
+    await onRepoSelectionChanged();
+  } catch (e) {
+    alert(e?.message || 'Failed to create folder');
+  }
+}
+
+function closeFolderPickerModal() {
+  const el = document.getElementById('folder-picker-modal');
+  if (el) el.remove();
+}
+
+let _folderPickerState = { requested: '', current: '', parent: null, children: [] };
+
+function folderPickerEscapeForOnclick(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function renderFolderPickerList() {
+  const listEl = document.getElementById('folder-picker-list');
+  const pathEl = document.getElementById('folder-picker-path');
+  const curEl = document.getElementById('folder-picker-current');
+  const msgEl = document.getElementById('folder-picker-msg');
+  if (!listEl || !pathEl) return;
+  pathEl.value = _folderPickerState.requested || _folderPickerState.current || '';
+  if (curEl) curEl.textContent = _folderPickerState.current || '';
+  if (msgEl) msgEl.textContent = '';
+
+  const rows = [];
+  if (_folderPickerState.parent) {
+    rows.push(
+      `<button type="button" class="btn" style="text-align:left" onclick="folderPickerNavigateTo('${folderPickerEscapeForOnclick(_folderPickerState.parent)}')">.. (Up)</button>`
+    );
+  }
+  for (const child of (_folderPickerState.children || [])) {
+    rows.push(
+      `<button type="button" class="btn" style="text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" onclick="folderPickerNavigateTo('${folderPickerEscapeForOnclick(child)}')">${escapeHtml(child)}</button>`
+    );
+  }
+  listEl.innerHTML = rows.length ? rows.join('') : '<div style="color:#8b949e;font-size:12px">No subfolders</div>';
+}
+
+async function folderPickerLoad(pathValue) {
+  const msgEl = document.getElementById('folder-picker-msg');
+  try {
+    const requestedRaw = (pathValue || '').trim();
+    const data = await api('/folder-children?path=' + encodeURIComponent(pathValue || ''));
+    _folderPickerState = {
+      requested: data.requested || requestedRaw || '',
+      current: data.current || '',
+      parent: data.parent || null,
+      children: Array.isArray(data.children) ? data.children : []
+    };
+    renderFolderPickerList();
+    if (msgEl && _folderPickerState.requested && _folderPickerState.current && _folderPickerState.requested !== _folderPickerState.current) {
+      msgEl.textContent = `Path not found; opened nearest existing: ${_folderPickerState.current}`;
+      msgEl.style.color = '#d29922';
+    }
+  } catch (e) {
+    if (msgEl) {
+      msgEl.textContent = e?.message || 'Failed to load folders';
+      msgEl.style.color = '#f85149';
+    }
+  }
+}
+
+async function folderPickerNavigateTo(pathValue) {
+  await folderPickerLoad(pathValue || '');
+}
+
+async function folderPickerOpenFromInput() {
+  const pathEl = document.getElementById('folder-picker-path');
+  if (!pathEl) return;
+  await folderPickerLoad(pathEl.value || '');
+}
+
+let _folderPickerTypeTimer = null;
+function folderPickerOnPathInput() {
+  const pathEl = document.getElementById('folder-picker-path');
+  if (!pathEl) return;
+  const val = pathEl.value || '';
+  if (_folderPickerTypeTimer) clearTimeout(_folderPickerTypeTimer);
+  _folderPickerTypeTimer = setTimeout(() => {
+    _folderPickerTypeTimer = null;
+    folderPickerLoad(val).catch(() => {});
+  }, 120);
+}
+
+async function folderPickerUseCurrent() {
+  const repoInput = document.getElementById('modal-repo-path');
+  if (!repoInput) return;
+  const val = (_folderPickerState.current || _folderPickerState.requested || '').trim();
+  if (!val) return;
+  repoInput.value = val;
+  closeFolderPickerModal();
+  await refreshRepoOptions(val);
+  await onRepoSelectionChanged();
+}
+
+async function folderPickerCreateCurrent() {
+  const msg = document.getElementById('folder-picker-msg');
+  const pathEl = document.getElementById('folder-picker-path');
+  const raw = (pathEl?.value || '').trim();
+  if (!raw) {
+    if (msg) msg.textContent = 'Path is empty';
+    return;
+  }
+  if (msg) msg.textContent = '';
+  try {
+    const res = await fetch('/api/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: raw })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      if (msg) msg.textContent = data.error || 'Failed to create folder';
+      return;
+    }
+    await folderPickerLoad(data.path || raw);
+    await folderPickerUseCurrent();
+  } catch (e) {
+    if (msg) msg.textContent = e?.message || 'Failed to create folder';
+  }
+}
+
+async function openFolderPickerModal() {
+  const old = document.getElementById('folder-picker-modal');
+  if (old) old.remove();
+  const repoInput = document.getElementById('modal-repo-path');
+  const current = (repoInput?.value || '').trim();
+  const modalHtml = `
+    <div id="folder-picker-modal" class="modal-overlay" onclick="if(event.target===this)closeFolderPickerModal()">
+      <div class="modal-box" style="max-width:760px;max-height:85vh;overflow-y:auto">
+        <h3 style="margin-top:0">Folder Browser</h3>
+        <div style="margin-bottom:8px">
+          <label class="form-label" style="font-size:11px">Path</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="folder-picker-path" class="form-input" value="${escapeHtml(current)}" placeholder="/path/to/folder" style="flex:1" oninput="folderPickerOnPathInput()">
+            <button type="button" id="folder-picker-open-btn" class="btn">Open</button>
+            <button type="button" class="btn write-action" onclick="folderPickerCreateCurrent()">Create</button>
+            <button type="button" class="btn btn-primary write-action" onclick="folderPickerUseCurrent()">Use</button>
+          </div>
+          <div style="font-size:11px;color:#8b949e;margin-top:6px">Opened folder: <code id="folder-picker-current"></code></div>
+          <div id="folder-picker-msg" style="font-size:12px;color:#f85149;margin-top:6px"></div>
+        </div>
+        <div style="margin-top:10px">
+          <label class="form-label" style="font-size:11px">Subfolders (click to enter)</label>
+          <div id="folder-picker-list" style="display:grid;grid-template-columns:1fr;gap:6px;max-height:50vh;overflow:auto;margin-top:6px">
+            <div style="color:#8b949e;font-size:12px">Loading…</div>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:10px">
+          <button type="button" class="btn" onclick="closeFolderPickerModal()">Close</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  updateReadOnlyBanner();
+  const pathInput = document.getElementById('folder-picker-path');
+  const openBtn = document.getElementById('folder-picker-open-btn');
+  if (openBtn) {
+    openBtn.addEventListener('click', () => {
+      folderPickerOpenFromInput().catch(() => {});
+    });
+  }
+  if (pathInput) {
+    pathInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        folderPickerOpenFromInput().catch(() => {});
+      }
+    });
+  }
+  await folderPickerLoad(current || '');
+}
+
+async function initRepoGitSelectors(repoPath, baseRef) {
+  await refreshRepoOptions(repoPath || '');
+  await refreshBaseRefOptions(baseRef || 'main');
+  await validateRepoPath();
 }
 
 let _formToJsonTimer = null;
@@ -2147,12 +2380,13 @@ function syncFormToJson() {
       coderModel = document.getElementById('adapter-coder')?.value || 'codex';
       judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
     }
-    const executionMode = document.getElementById('modal-execution-mode')?.value || 'auto';
+    const runSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
     const spec = {
       schema_version: 'v1',
       task_id: taskId || 'my_task',
       task_type: taskType || undefined,
-      execution_mode: executionMode,
+      run_surface: runSurface,
+      execution_mode: runSurface === 'visual_ccb' ? 'semi-auto' : 'auto',
       channel_type: channelType,
       repo_path: repoPath || undefined,
       base_ref: baseRef || 'main',
@@ -2171,16 +2405,25 @@ function syncFormToJson() {
       ...(coderModel ? { coder_model: coderModel } : {}),
       ...(judgeModel ? { judge_model: judgeModel } : {})
     };
-    if (executionMode === 'semi-auto') {
-      const executorEl = document.getElementById('collab-role-executor');
-      const reviewerEl = document.getElementById('collab-role-reviewer');
-      const designerEl = document.getElementById('collab-role-designer');
-      const inspirationEl = document.getElementById('collab-role-inspiration');
-      spec.collab_roles = {};
-      if (executorEl?.value) spec.collab_roles.executor = executorEl.value;
-      if (reviewerEl?.value) spec.collab_roles.reviewer = reviewerEl.value;
-      if (designerEl?.value) spec.collab_roles.designer = designerEl.value;
-      if (inspirationEl?.value) spec.collab_roles.inspiration = inspirationEl.value;
+    if (_currentExecutorType === 'solo_agent') {
+      const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+      const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim();
+      if (soloExecutorInstruction) {
+        spec.executor_instruction = soloExecutorInstruction;
+        spec.goal = soloExecutorInstruction;
+      }
+      spec.coder_model = soloProvider || 'claude';
+      spec.judge_model = soloProvider || 'claude';
+      spec.coder = 'solo';
+      spec.judge = 'solo';
+      spec.agent_config = {
+        ...(spec.agent_config || {}),
+        provider: soloProvider || 'claude'
+      };
+    }
+    if (_currentExecutorType === 'multi_agent' && runSurface === 'visual_ccb') {
+      const roles = collectCollabRolesFromForm();
+      if (roles) spec.collab_roles = roles;
     }
     jsonEl.value = JSON.stringify(spec, null, 2);
   }, 400);
@@ -2197,6 +2440,8 @@ function syncJsonToForm() {
     set('modal-task-id', spec.task_id);
     if (spec.task_type) document.getElementById('modal-task-type') && (document.getElementById('modal-task-type').value = spec.task_type);
     set('modal-instruction', spec.goal || spec.instruction);
+    set('modal-solo-provider', spec.agent_config?.provider || spec.coder_model || '');
+    set('modal-solo-executor-instruction', spec.executor_instruction || '');
     document.getElementById('modal-acceptance') && (document.getElementById('modal-acceptance').value = Array.isArray(spec.acceptance) ? spec.acceptance.join('\n') : (spec.acceptance || ''));
     set('modal-test-cmd', spec.test_cmd);
     set('modal-max-attempts', spec.max_attempts !== undefined ? spec.max_attempts : 3);
@@ -2207,9 +2452,18 @@ function syncJsonToForm() {
     set('modal-base-ref', spec.base_ref || 'main');
     document.getElementById('modal-allowed-paths') && (document.getElementById('modal-allowed-paths').value = Array.isArray(spec.allowed_paths) ? spec.allowed_paths.join('\n') : '');
     document.getElementById('modal-forbidden-globs') && (document.getElementById('modal-forbidden-globs').value = Array.isArray(spec.forbidden_globs) ? spec.forbidden_globs.join('\n') : '');
-    if (spec.execution_mode) document.getElementById('modal-execution-mode') && (document.getElementById('modal-execution-mode').value = spec.execution_mode);
+    const runSurface = spec.run_surface || (spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge');
+    document.getElementById('modal-run-surface') && (document.getElementById('modal-run-surface').value = runSurface);
     if (spec.channel_type) document.getElementById('adapter-channel-type') && (document.getElementById('adapter-channel-type').value = spec.channel_type);
-    onExecutionModeChange();
+    if (spec.executor_type) {
+      setExecutorType(spec.executor_type);
+      const smEl = document.getElementById('modal-session-mode');
+      const nextSm = spec.session_mode || defaultSessionModeForExecutor(spec.executor_type);
+      if (smEl) smEl.value = nextSm;
+      _currentSessionMode = nextSm;
+      updateSessionModeConstraints();
+    }
+    onRunSurfaceChange();
     onChannelTypeChange();
     const coderVal = spec.coder;
     const judgeVal = spec.judge;
@@ -2222,39 +2476,21 @@ function syncJsonToForm() {
     if (judgeSel) judgeSel.innerHTML = buildAdapterSelector('judge', ch === 'ccb' ? (judgeModelVal || 'codex') : judgeVal, judgeModelVal, ch);
     refreshModelSelector('coder').catch(() => {});
     refreshModelSelector('judge').catch(() => {});
-    if (spec.collab_roles) {
-      ['executor', 'reviewer', 'designer', 'inspiration'].forEach(role => {
-        const el = document.getElementById('collab-role-' + role);
-        if (el && spec.collab_roles[role]) el.value = spec.collab_roles[role];
-      });
-    }
+    if (spec.collab_roles) applyCollabRolesToForm(spec.collab_roles);
+    initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
   } catch (_) { /* invalid JSON, ignore */ }
 }
 
-async function onSettingsExecModeChange() {
-  const mode = document.querySelector('input[name="settings-exec-mode"]:checked')?.value || 'auto';
-  const rolesSection = document.getElementById('settings-roles-section');
-  const rolesWrap = document.getElementById('settings-roles-wrap');
-  const hintEl = document.getElementById('settings-roles-hint');
-  if (rolesSection && rolesWrap && hintEl) {
-    if (mode === 'auto') {
-      rolesWrap.style.opacity = '0.6';
-      rolesWrap.style.pointerEvents = 'none';
-      hintEl.style.display = 'block';
-    } else {
-      rolesWrap.style.opacity = '';
-      rolesWrap.style.pointerEvents = '';
-      hintEl.style.display = 'none';
-    }
-  }
+async function onSettingsRunSurfaceChange() {
+  const mode = document.getElementById('settings-run-surface')?.value || 'bridge';
   const ccbHint = document.getElementById('settings-ccb-hint');
-  if (mode === 'semi-auto' && ccbHint) {
+  if (mode === 'visual_ccb' && ccbHint) {
     try {
       const st = await api('/ccb/session-status');
       const online = (st.providers || []).some(p => p.status === 'ok');
       ccbHint.style.display = 'block';
       if (!online) {
-        ccbHint.textContent = 'CCB 未检测到在线 session。请在下方设置 CCB 目录后点击任务栏的「启动」启动 ccb codex / ccb gemini。';
+        ccbHint.textContent = 'CCB 未检测到在线 session。请在 CCB 面板启动 agent session。';
       } else {
         ccbHint.textContent = 'CCB session 已就绪。';
         ccbHint.style.background = '#1a2f1a';
@@ -2363,6 +2599,10 @@ async function onTaskTypeChange() {
     container.innerHTML = '';
     return;
   }
+  if (_currentExecutorType !== 'api_call') {
+    container.innerHTML = '';
+    return;
+  }
 
   container.innerHTML = '<div style="color:#8b949e;font-size:12px">Loading rubric...</div>';
   await loadRubric(taskType);
@@ -2397,9 +2637,22 @@ function setExecutorType(type) {
   showIf('section-knowledge', type !== 'api_call');
   showIf('section-observation', type === 'solo_agent');
   showIf('section-acceptance', type !== 'solo_agent');
+  showIf('rubric-thresholds-container', type === 'api_call');
   showIf('section-channel-type', false);
-  showIf('section-execution-mode', false);
+  showIf('section-run-surface', type !== 'api_call');
   showIf('section-attempt-context', type === 'api_call');
+  const rsEl = document.getElementById('modal-run-surface');
+  if (rsEl) {
+    const bridgeOpt = rsEl.querySelector('option[value="bridge"]');
+    if (bridgeOpt) {
+      bridgeOpt.disabled = type === 'multi_agent';
+      bridgeOpt.hidden = type === 'multi_agent';
+    }
+    if (type === 'multi_agent') {
+      rsEl.value = 'visual_ccb';
+    }
+  }
+  onRunSurfaceChange();
 }
 
 function updateSessionModeConstraints() {
@@ -2431,6 +2684,77 @@ function setWorkflowMode(mode) {
   else if (mode === 'collab') setExecutorType('multi_agent');
 }
 
+function workflowModeToExecutorType(mode) {
+  if (mode === 'solo') return 'solo_agent';
+  if (mode === 'collab') return 'multi_agent';
+  return 'api_call';
+}
+
+function defaultSessionModeForExecutor(executorType) {
+  return executorType === 'api_call' ? 'fresh' : 'continuous';
+}
+
+const COLLAB_ROLE_KEYS = ['pm', 'executor', 'reviewer', 'designer', 'inspiration'];
+const DEFAULT_COLLAB_ROLE_PROVIDERS = {
+  pm: 'claude',
+  executor: 'codex',
+  reviewer: 'gemini',
+  designer: 'codex',
+  inspiration: 'codex'
+};
+const COLLAB_ROLE_LABELS = {
+  pm: 'PM',
+  executor: 'executor',
+  reviewer: 'reviewer',
+  designer: 'designer',
+  inspiration: 'inspiration'
+};
+
+function normalizeCollabRoleKey(raw) {
+  const key = String(raw || '').trim().toLowerCase();
+  if (key === 'pm' || key === 'project_manager' || key === 'project manager') return 'pm';
+  return COLLAB_ROLE_KEYS.includes(key) ? key : '';
+}
+
+function normalizeCollabRolesMap(collabRoles) {
+  const out = {};
+  if (!collabRoles || typeof collabRoles !== 'object' || Array.isArray(collabRoles)) return out;
+  Object.entries(collabRoles).forEach(([role, provider]) => {
+    const key = normalizeCollabRoleKey(role);
+    const p = String(provider || '').trim().toLowerCase();
+    if (key && ALLOWED_ROLE_PROVIDERS.includes(p)) out[key] = p;
+  });
+  return out;
+}
+
+function collabRoleDefaultsFromApi(roleRows) {
+  const out = {};
+  if (!Array.isArray(roleRows)) return out;
+  roleRows.forEach(row => {
+    const key = normalizeCollabRoleKey(row?.role);
+    const provider = String(row?.provider || '').trim().toLowerCase();
+    if (key && ALLOWED_ROLE_PROVIDERS.includes(provider)) out[key] = provider;
+  });
+  return out;
+}
+
+function collectCollabRolesFromForm() {
+  const out = {};
+  for (const role of COLLAB_ROLE_KEYS) {
+    const el = document.getElementById('collab-role-' + role);
+    if (el && el.value) out[role] = el.value;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function applyCollabRolesToForm(collabRoles) {
+  const normalized = normalizeCollabRolesMap(collabRoles);
+  COLLAB_ROLE_KEYS.forEach(role => {
+    const el = document.getElementById('collab-role-' + role);
+    if (el && normalized[role]) el.value = normalized[role];
+  });
+}
+
 // A2-1: Open "New Task" modal (A6: apply saved default adapters when no template selected)
 async function openNewSpecModal() {
   await loadAdapters();
@@ -2438,19 +2762,28 @@ async function openNewSpecModal() {
   let defaultJudge = null;
   let defaultCoderModel = null;
   let defaultJudgeModel = null;
-  let defaultExecutionMode = 'auto';
+  let defaultRunSurface = 'bridge';
+  let collabRoleDefaults = {};
   try {
     const cfg = await api('/config');
     defaultCoder = cfg.default_coder || null;
     defaultJudge = cfg.default_judge || null;
     defaultCoderModel = cfg.default_coder_model || null;
     defaultJudgeModel = cfg.default_judge_model || null;
-    defaultExecutionMode = cfg.default_execution_mode || 'auto';
+    defaultRunSurface = cfg.default_run_surface || 'bridge';
+  } catch {}
+  try {
+    const roles = await api('/agent/roles');
+    collabRoleDefaults = collabRoleDefaultsFromApi(roles);
   } catch {}
 
   const defaultChannel = inferChannelFromAdapter(defaultCoder);
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
-  const COLLAB_ROLES = [{ role: 'PM', provider: 'claude', readOnly: true }, { role: 'executor', provider: 'codex', readOnly: false }, { role: 'reviewer', provider: 'gemini', readOnly: false }, { role: 'designer', provider: 'codex', readOnly: false }, { role: 'inspiration', provider: 'codex', readOnly: false }];
+  const COLLAB_ROLES = COLLAB_ROLE_KEYS.map(key => ({
+    key,
+    label: COLLAB_ROLE_LABELS[key],
+    provider: collabRoleDefaults[key] || DEFAULT_COLLAB_ROLE_PROVIDERS[key]
+  }));
 
   const TEMPLATES = {
     hello_world: {
@@ -2561,24 +2894,24 @@ async function openNewSpecModal() {
           </select>
         </div>
 
-        <div id="section-execution-mode" style="margin-bottom:12px;display:none">
-          <label class="form-label">Execution mode (v3.3)</label>
-          <select id="modal-execution-mode" class="form-select" style="width:auto" onchange="onExecutionModeChange()">
-            <option value="auto" ${(defaultExecutionMode || 'auto') === 'auto' ? 'selected' : ''}>auto — 全自动无人介入</option>
-            <option value="semi-auto" ${defaultExecutionMode === 'semi-auto' ? 'selected' : ''}>semi-auto — 人在回路可观察介入</option>
+        <div id="section-run-surface" style="margin-bottom:12px;display:none">
+          <label class="form-label">Run surface</label>
+          <select id="modal-run-surface" class="form-select" style="width:auto" onchange="onRunSurfaceChange(); syncFormToJson()">
+            <option value="bridge" ${defaultRunSurface === 'bridge' ? 'selected' : ''}>Bridge / solo_bridge — non-visual</option>
+            <option value="visual_ccb" ${defaultRunSurface === 'visual_ccb' ? 'selected' : ''}>Visual CCB — run in visible CCB session</option>
           </select>
         </div>
 
-        <div id="collab-config-wrap" style="margin-bottom:12px;display:${defaultExecutionMode === 'semi-auto' ? 'block' : 'none'};padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <div id="collab-config-wrap" style="margin-bottom:12px;display:none;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <details open>
-            <summary class="form-label" style="cursor:pointer">协作配置 (semi-auto)</summary>
+            <summary class="form-label" style="cursor:pointer">协作配置 (visual CCB)</summary>
             <div id="collab-roles-table" style="margin-top:8px;font-size:12px">
               <table style="width:100%;border-collapse:collapse">
                 <thead><tr><th style="text-align:left">Role</th><th style="text-align:left">Provider</th></tr></thead>
                 <tbody>
                   ${COLLAB_ROLES.map(r => {
-                    const opts = r.readOnly ? `<option value="claude" selected>claude</option>` : COLLAB_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('');
-                    return `<tr><td>${escapeHtml(r.role)}</td><td><select id="collab-role-${escapeHtml(r.role)}" class="form-select" style="min-width:100px" ${r.readOnly ? 'disabled' : ''}>${opts}</select></td></tr>`;
+                    const opts = COLLAB_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
+                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px">${opts}</select></td></tr>`;
                   }).join('')}
                 </tbody>
               </table>
@@ -2615,6 +2948,20 @@ async function openNewSpecModal() {
         <div id="section-loop-config" style="margin-bottom:12px;display:none">
           <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
             <strong class="form-label">Agent Loop Config</strong>
+            <div style="margin-top:8px;margin-bottom:8px">
+              <label class="form-label" style="font-size:11px">Solo agent provider</label>
+              <select id="modal-solo-provider" class="form-select">
+                <option value="claude">claude</option>
+                <option value="codex">codex</option>
+                <option value="gemini">gemini</option>
+                <option value="opencode">opencode</option>
+                <option value="droid">droid</option>
+              </select>
+            </div>
+            <div style="margin-top:8px;margin-bottom:8px">
+              <label class="form-label" style="font-size:11px">Executor instructions</label>
+              <textarea id="modal-solo-executor-instruction" class="form-input" rows="3" placeholder="Instructions sent to the solo executor agent" style="width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
               <div>
                 <label class="form-label" style="font-size:11px">Max iterations</label>
@@ -2710,14 +3057,20 @@ async function openNewSpecModal() {
         <div id="section-repo-git" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <strong class="form-label">Repo &amp; Git</strong>
           <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">repo_path (absolute path to git repo)</label>
+            <label class="form-label" style="font-size:11px">repo_path (choose repository)</label>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input type="text" id="modal-repo-path" class="form-input" placeholder="/path/to/repo" style="flex:1;margin-bottom:6px" onblur="validateRepoPath()" oninput="syncFormToJson()">
+              <input type="text" id="modal-repo-path" class="form-input" placeholder="/path/to/repo" style="flex:1;margin-bottom:6px" onchange="onRepoSelectionChanged()" oninput="syncFormToJson()">
+              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="openFolderPickerModal()">Choose / Create</button>
+              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshRepoOptions().then(() => onRepoSelectionChanged())">Refresh</button>
               <span id="modal-repo-path-status" style="font-size:12px;min-width:80px" title="Validation result"></span>
             </div>
+          </div>
           <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">base_ref (branch or ref)</label>
-            <input type="text" id="modal-base-ref" class="form-input" placeholder="main" style="margin-bottom:6px" oninput="syncFormToJson()">
+            <label class="form-label" style="font-size:11px">base_ref (choose git branch/ref)</label>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <input type="text" id="modal-base-ref" class="form-input" placeholder="main" style="flex:1;margin-bottom:6px" onchange="syncFormToJson()" oninput="syncFormToJson()">
+              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshBaseRefOptions()">Refresh</button>
+            </div>
           </div>
           <div style="margin-top:6px">
             <label class="form-label" style="font-size:11px">allowed_paths (one per line, optional)</label>
@@ -2756,6 +3109,15 @@ async function openNewSpecModal() {
 
   // Apply default executor type (v5)
   setExecutorType('api_call');
+  const soloProviderEl = document.getElementById('modal-solo-provider');
+  if (soloProviderEl) {
+    const desired = (defaultCoderModel || defaultCoder || 'claude').trim();
+    if ([...soloProviderEl.options].some(o => o.value === desired)) {
+      soloProviderEl.value = desired;
+    }
+  }
+
+  initRepoGitSelectors('', 'main').catch(() => {});
 
   // Store templates for use in applyTemplate
   window._specTemplates = TEMPLATES;
@@ -2800,6 +3162,10 @@ function applyTemplate() {
   if (fg) fg.value = Array.isArray(tpl.forbidden_globs) ? tpl.forbidden_globs.join('\n') : (tpl.forbidden_globs || '');
   const inst = document.getElementById('modal-instruction');
   if (inst) inst.value = tpl.goal || tpl.instruction || '';
+  const soloProvider = document.getElementById('modal-solo-provider');
+  if (soloProvider) soloProvider.value = tpl.agent_config?.provider || tpl.coder_model || 'claude';
+  const soloInst = document.getElementById('modal-solo-executor-instruction');
+  if (soloInst) soloInst.value = tpl.executor_instruction || tpl.goal || tpl.instruction || '';
   const acc = document.getElementById('modal-acceptance');
   if (acc) acc.value = Array.isArray(tpl.acceptance) ? tpl.acceptance.join('\n') : (tpl.acceptance || '');
   const tc = document.getElementById('modal-test-cmd');
@@ -2808,6 +3174,7 @@ function applyTemplate() {
   if (ma) ma.value = tpl.max_attempts !== undefined ? String(tpl.max_attempts) : '3';
   // Load rubric
   if (tpl.task_type) onTaskTypeChange();
+  initRepoGitSelectors(tpl.repo_path || '', tpl.base_ref || 'main').catch(() => {});
 }
 
 // A2-2: Save new spec
@@ -2824,8 +3191,9 @@ async function saveNewSpec() {
   const buildFromForm = !jsonStr || jsonStr.trim() === '';
   if (buildFromForm) {
     const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
-    if (!instruction) {
-      errEl.textContent = 'instruction / goal is required';
+    const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+    if (!instruction && !soloExecutorInstruction) {
+      errEl.textContent = 'instruction / goal is required (or solo executor instructions)';
       return;
     }
   }
@@ -2854,7 +3222,8 @@ async function saveNewSpec() {
       judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
     }
     const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
-    const goal = instruction || '';
+    const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+    const goal = instruction || soloExecutorInstruction || '';
     const acceptanceLines = (document.getElementById('modal-acceptance')?.value || '').split(/\n/).map(s => s.trim()).filter(Boolean);
     const acceptance = acceptanceLines.length ? acceptanceLines : [];
     const testCmd = (document.getElementById('modal-test-cmd')?.value || 'true').trim();
@@ -2867,11 +3236,13 @@ async function saveNewSpec() {
     const judgeTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-judge-timeout')?.value || '300', 10) || 300));
     const constraintsRaw = (document.getElementById('modal-constraints')?.value || '').trim();
     const constraints = constraintsRaw ? constraintsRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
+    const runSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
     spec = {
       schema_version: 'v1',
       task_id: taskId,
       task_type: taskType || undefined,
-      execution_mode: document.getElementById('modal-execution-mode')?.value || 'auto',
+      run_surface: runSurface,
+      execution_mode: runSurface === 'visual_ccb' ? 'semi-auto' : 'auto',
       channel_type: channelType,
       repo_path: document.getElementById('modal-repo-path')?.value?.trim() || undefined,
       base_ref: document.getElementById('modal-base-ref')?.value?.trim() || 'main',
@@ -2891,6 +3262,7 @@ async function saveNewSpec() {
       judge_timeout_seconds: judgeTimeout,
       created_at: new Date().toISOString()
     };
+    if (soloExecutorInstruction) spec.executor_instruction = soloExecutorInstruction;
     // A4: read thresholds
     if (taskType) {
       const thresholds = readThresholdsFromUI(taskType);
@@ -2921,18 +3293,14 @@ async function saveNewSpec() {
   if (taskTypeVal) spec.task_type = taskTypeVal;
   const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
   if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
-  const executionModeVal = document.getElementById('modal-execution-mode')?.value;
-  if (executionModeVal) spec.execution_mode = executionModeVal;
-  if (executionModeVal === 'semi-auto') {
-    const executorEl = document.getElementById('collab-role-executor');
-    const reviewerEl = document.getElementById('collab-role-reviewer');
-    const designerEl = document.getElementById('collab-role-designer');
-    const inspirationEl = document.getElementById('collab-role-inspiration');
-    spec.collab_roles = {};
-    if (executorEl?.value) spec.collab_roles.executor = executorEl.value;
-    if (reviewerEl?.value) spec.collab_roles.reviewer = reviewerEl.value;
-    if (designerEl?.value) spec.collab_roles.designer = designerEl.value;
-    if (inspirationEl?.value) spec.collab_roles.inspiration = inspirationEl.value;
+  const runSurfaceVal = document.getElementById('modal-run-surface')?.value;
+  if (runSurfaceVal) {
+    spec.run_surface = runSurfaceVal;
+    spec.execution_mode = runSurfaceVal === 'visual_ccb' ? 'semi-auto' : 'auto';
+  }
+  if (_currentExecutorType === 'multi_agent' && runSurfaceVal === 'visual_ccb') {
+    const roles = collectCollabRolesFromForm();
+    if (roles) spec.collab_roles = roles;
   }
   // Repo & Git from form
   const rp = document.getElementById('modal-repo-path')?.value?.trim();
@@ -2941,6 +3309,8 @@ async function saveNewSpec() {
   if (br !== undefined && br !== '') spec.base_ref = br;
   const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
   if (instructionVal) spec.goal = instructionVal;
+  const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+  if (soloExecutorInstructionVal) spec.executor_instruction = soloExecutorInstructionVal;
   const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
   if (acceptanceVal) spec.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
   const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
@@ -2963,8 +3333,8 @@ async function saveNewSpec() {
     if (fgRaw.startsWith('[')) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
     else { spec.forbidden_globs = fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
   }
-  // A4: merge thresholds
-  if (spec.task_type) {
+  // A4: merge thresholds (api_call only)
+  if (spec.task_type && _currentExecutorType === 'api_call') {
     const thresholds = readThresholdsFromUI(spec.task_type);
     if (thresholds) spec.rubric_thresholds = thresholds;
   }
@@ -2975,19 +3345,45 @@ async function saveNewSpec() {
   // Legacy compat: keep workflow_mode for backward compat
   spec.workflow_mode = _currentWorkflowMode;
   if (_currentExecutorType === 'api_call') {
+    if (spec.run_surface !== undefined) delete spec.run_surface;
     spec.execution_mode = 'auto';
   } else if (_currentExecutorType === 'solo_agent') {
-    spec.execution_mode = 'auto';
+    const soloRunSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
+    spec.run_surface = soloRunSurface;
+    spec.execution_mode = soloRunSurface === 'visual_ccb' ? 'semi-auto' : 'auto';
+    if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
+    const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
+    spec.coder_model = soloProvider;
+    spec.judge_model = soloProvider;
+    if (soloRunSurface === 'visual_ccb') {
+      spec.coder = 'ccb';
+      spec.judge = 'ccb';
+    } else {
+      spec.coder = 'solo';
+      spec.judge = 'solo';
+    }
     spec.agent_config = {
       max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
       auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
       knowledge_shards: (document.getElementById('modal-knowledge-shards')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
-      provider: document.getElementById('modal-solo-provider')?.value || 'claude'
+      provider: soloProvider
     };
     const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
     if (testCmdSolo) spec.test_cmd = testCmdSolo;
   } else if (_currentExecutorType === 'multi_agent') {
+    spec.run_surface = 'visual_ccb';
     spec.execution_mode = 'semi-auto';
+    spec.coder = 'ccb';
+    spec.judge = 'ccb';
+    const roles = collectCollabRolesFromForm();
+    if (roles) spec.collab_roles = roles;
+  }
+  if (_currentExecutorType !== 'api_call') {
+    if (spec.rubric_thresholds !== undefined) delete spec.rubric_thresholds;
+    if (spec.scoring_mode !== undefined) delete spec.scoring_mode;
+  }
+  if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
+    delete spec.collab_roles;
   }
   // Knowledge settings for solo + multi_agent
   if (_currentExecutorType !== 'api_call') {
@@ -3033,16 +3429,21 @@ async function openEditSpecModal(taskId) {
   const editChannel = spec.channel_type || inferChannelFromAdapter(spec.coder);
   const coderAdapterForSelector = editChannel === 'ccb' ? (spec.coder_model || 'codex') : spec.coder;
   const judgeAdapterForSelector = editChannel === 'ccb' ? (spec.judge_model || 'codex') : spec.judge;
-  const editExecutionMode = spec.execution_mode || 'auto';
-  const editCollabRoles = spec.collab_roles || {};
+  const editRunSurface = spec.run_surface || (spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge');
+  const editExecutorType = spec.executor_type || workflowModeToExecutorType(spec.workflow_mode);
+  const editSessionMode = spec.session_mode || defaultSessionModeForExecutor(editExecutorType);
+  let collabRoleDefaults = {};
+  try {
+    const roles = await api('/agent/roles');
+    collabRoleDefaults = collabRoleDefaultsFromApi(roles);
+  } catch {}
+  const editCollabRoles = normalizeCollabRolesMap(spec.collab_roles || {});
   const COLLAB_PROVIDERS_EDIT = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
-  const COLLAB_ROLES_EDIT = [
-    { role: 'PM', provider: 'claude', readOnly: true },
-    { role: 'executor', provider: editCollabRoles.executor || 'codex', readOnly: false },
-    { role: 'reviewer', provider: editCollabRoles.reviewer || 'gemini', readOnly: false },
-    { role: 'designer', provider: editCollabRoles.designer || 'codex', readOnly: false },
-    { role: 'inspiration', provider: editCollabRoles.inspiration || 'codex', readOnly: false }
-  ];
+  const COLLAB_ROLES_EDIT = COLLAB_ROLE_KEYS.map(key => ({
+    key,
+    label: COLLAB_ROLE_LABELS[key],
+    provider: editCollabRoles[key] || collabRoleDefaults[key] || DEFAULT_COLLAB_ROLE_PROVIDERS[key]
+  }));
 
   // Pre-load rubric if task_type known
   if (spec.task_type) await loadRubric(spec.task_type);
@@ -3056,6 +3457,28 @@ async function openEditSpecModal(taskId) {
       <div class="modal-box" style="max-width:800px;max-height:90vh;overflow-y:auto">
         <h3 style="margin-top:0">Edit Task Spec: ${escapeHtml(taskId)}</h3>
 
+        <div id="section-mode-v5" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <strong class="form-label">Execution Mode (v5)</strong>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+            <div>
+              <label class="form-label" style="font-size:11px">Executor Type</label>
+              <select id="modal-executor-type" class="form-select" onchange="setExecutorType(this.value)">
+                <option value="api_call" ${editExecutorType === 'api_call' ? 'selected' : ''}>API Call — single-flow LLM via CLI proxy</option>
+                <option value="solo_agent" ${editExecutorType === 'solo_agent' ? 'selected' : ''}>Solo Agent — autonomous agent loop</option>
+                <option value="multi_agent" ${editExecutorType === 'multi_agent' ? 'selected' : ''}>Multi Agent — collaborative multi-worker</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" style="font-size:11px">Session Mode</label>
+              <select id="modal-session-mode" class="form-select" onchange="_currentSessionMode=this.value;updateSessionModeConstraints()">
+                <option value="fresh" ${editSessionMode === 'fresh' ? 'selected' : ''}>Fresh — each attempt from scratch</option>
+                <option value="iterative" ${editSessionMode === 'iterative' ? 'selected' : ''}>Iterative — carry context across attempts</option>
+                <option value="continuous" ${editSessionMode === 'continuous' ? 'selected' : ''}>Continuous — persistent agent session</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <div style="margin-bottom:12px">
           <label class="form-label">Task Type (A4)</label>
           <select id="modal-task-type" class="form-select" onchange="onTaskTypeChange()">
@@ -3068,7 +3491,7 @@ async function openEditSpecModal(taskId) {
           </select>
         </div>
 
-        <div style="margin-bottom:12px">
+        <div id="section-attempt-context" style="margin-bottom:12px">
           <label class="form-label">Attempt context mode</label>
           <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch. iterative: n+1 gets previous coder output as context.">
             <option value="fresh_each" ${(spec.attempt_context_mode || 'fresh_each') === 'fresh_each' ? 'selected' : ''}>fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
@@ -3076,24 +3499,24 @@ async function openEditSpecModal(taskId) {
           </select>
         </div>
 
-        <div style="margin-bottom:12px">
-          <label class="form-label">Execution mode (v3.3)</label>
-          <select id="modal-execution-mode" class="form-select" style="width:auto" onchange="onExecutionModeChange()">
-            <option value="auto" ${editExecutionMode === 'auto' ? 'selected' : ''}>auto — 全自动无人介入</option>
-            <option value="semi-auto" ${editExecutionMode === 'semi-auto' ? 'selected' : ''}>semi-auto — 人在回路可观察介入</option>
+        <div id="section-run-surface" style="margin-bottom:12px">
+          <label class="form-label">Run surface</label>
+          <select id="modal-run-surface" class="form-select" style="width:auto" onchange="onRunSurfaceChange()">
+            <option value="bridge" ${editRunSurface === 'bridge' ? 'selected' : ''}>Bridge / solo_bridge — non-visual</option>
+            <option value="visual_ccb" ${editRunSurface === 'visual_ccb' ? 'selected' : ''}>Visual CCB — run in visible CCB session</option>
           </select>
         </div>
 
-        <div id="collab-config-wrap" style="margin-bottom:12px;display:${editExecutionMode === 'semi-auto' ? 'block' : 'none'};padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <div id="collab-config-wrap" style="margin-bottom:12px;display:none;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <details open>
-            <summary class="form-label" style="cursor:pointer">协作配置 (semi-auto)</summary>
+            <summary class="form-label" style="cursor:pointer">协作配置 (visual CCB)</summary>
             <div id="collab-roles-table" style="margin-top:8px;font-size:12px">
               <table style="width:100%;border-collapse:collapse">
                 <thead><tr><th style="text-align:left">Role</th><th style="text-align:left">Provider</th></tr></thead>
                 <tbody>
                   ${COLLAB_ROLES_EDIT.map(r => {
-                    const opts = r.readOnly ? `<option value="claude" selected>claude</option>` : COLLAB_PROVIDERS_EDIT.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('');
-                    return `<tr><td>${escapeHtml(r.role)}</td><td><select id="collab-role-${escapeHtml(r.role)}" class="form-select" style="min-width:100px" ${r.readOnly ? 'disabled' : ''}>${opts}</select></td></tr>`;
+                    const opts = COLLAB_PROVIDERS_EDIT.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
+                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px">${opts}</select></td></tr>`;
                   }).join('')}
                 </tbody>
               </table>
@@ -3101,7 +3524,7 @@ async function openEditSpecModal(taskId) {
           </details>
         </div>
 
-        <div style="margin-bottom:12px">
+        <div id="section-channel-type" style="margin-bottom:12px">
           <label class="form-label">Execution channel (v3.3)</label>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <select id="adapter-channel-type" class="form-select" style="width:auto" onchange="onChannelTypeChange()">
@@ -3111,7 +3534,7 @@ async function openEditSpecModal(taskId) {
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+        <div id="section-adapter-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
           <div>
             <label class="form-label">Coder Adapter (A5)</label>
             <div id="coder-adapter-selector">${buildAdapterSelector('coder', coderAdapterForSelector, spec.coder_model, editChannel)}</div>
@@ -3125,7 +3548,68 @@ async function openEditSpecModal(taskId) {
           <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
         </div>
 
-        <div class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <div id="section-loop-config" style="margin-bottom:12px;display:none">
+          <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+            <strong class="form-label">Agent Loop Config</strong>
+            <div style="margin-top:8px;margin-bottom:8px">
+              <label class="form-label" style="font-size:11px">Solo agent provider</label>
+              <select id="modal-solo-provider" class="form-select">
+                <option value="claude" ${(spec.agent_config?.provider || spec.coder_model || 'claude') === 'claude' ? 'selected' : ''}>claude</option>
+                <option value="codex" ${(spec.agent_config?.provider || spec.coder_model || '') === 'codex' ? 'selected' : ''}>codex</option>
+                <option value="gemini" ${(spec.agent_config?.provider || spec.coder_model || '') === 'gemini' ? 'selected' : ''}>gemini</option>
+                <option value="opencode" ${(spec.agent_config?.provider || spec.coder_model || '') === 'opencode' ? 'selected' : ''}>opencode</option>
+                <option value="droid" ${(spec.agent_config?.provider || spec.coder_model || '') === 'droid' ? 'selected' : ''}>droid</option>
+              </select>
+            </div>
+            <div style="margin-top:8px;margin-bottom:8px">
+              <label class="form-label" style="font-size:11px">Executor instructions</label>
+              <textarea id="modal-solo-executor-instruction" class="form-input" rows="3" placeholder="Instructions sent to the solo executor agent" style="width:100%;resize:vertical">${escapeHtml(spec.executor_instruction || '')}</textarea>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
+              <div>
+                <label class="form-label" style="font-size:11px">Max iterations</label>
+                <input type="number" id="modal-max-iterations" class="form-input" value="${spec.agent_config?.max_attempts ?? spec.solo_config?.max_iterations ?? 10}" min="1" max="100">
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">Auto-pass threshold</label>
+                <input type="number" id="modal-auto-pass-threshold" class="form-input" value="${spec.agent_config?.auto_pass_threshold ?? spec.solo_config?.auto_pass_threshold ?? 0.85}" min="0" max="1" step="0.05">
+              </div>
+            </div>
+            <div style="margin-bottom:8px">
+              <label class="form-label" style="font-size:11px">Test command</label>
+              <input type="text" id="modal-test-cmd-solo" class="form-input" value="${escapeHtml(spec.test_cmd || '')}" placeholder="bash run_tests.sh">
+            </div>
+          </div>
+        </div>
+
+        <div id="section-observation" style="margin-bottom:12px;display:none">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="modal-open-terminal" ${((spec.solo_config && spec.solo_config.open_terminal) !== false) ? 'checked' : ''}>
+            <span class="form-label" style="display:inline;margin:0">Open agent terminal on start</span>
+          </label>
+        </div>
+
+        <div id="section-knowledge" style="margin-bottom:12px;display:none">
+          <details>
+            <summary class="form-label" style="cursor:pointer">Knowledge Settings</summary>
+            <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+              <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
+                <input type="checkbox" id="modal-knowledge-enabled" ${spec.knowledge_enabled ? 'checked' : ''}>
+                <span>Enable knowledge read/write</span>
+              </label>
+              <div style="margin-bottom:8px">
+                <label class="form-label" style="font-size:11px">Project path</label>
+                <input type="text" id="modal-knowledge-project" class="form-input" value="${escapeHtml(spec.knowledge_project_path || '')}" placeholder="/path/to/project">
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">Relevant shards (comma-separated)</label>
+                <input type="text" id="modal-knowledge-shards" class="form-input" value="${escapeHtml(Array.isArray(spec.agent_config?.knowledge_shards) ? spec.agent_config.knowledge_shards.join(', ') : '')}" placeholder="auth, api, frontend">
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div id="section-acceptance" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <strong class="form-label">需求与验收</strong>
           <div style="margin-top:8px">
             <label class="form-label" style="font-size:11px">instruction / goal</label>
@@ -3162,13 +3646,18 @@ async function openEditSpecModal(taskId) {
           <div style="margin-top:8px">
             <label class="form-label" style="font-size:11px">repo_path</label>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input type="text" id="modal-repo-path" class="form-input" value="${escapeHtml(spec.repo_path || '')}" placeholder="/path/to/repo" style="flex:1;margin-bottom:6px" onblur="validateRepoPath()">
+              <input type="text" id="modal-repo-path" class="form-input" value="${escapeHtml(spec.repo_path || '')}" placeholder="/path/to/repo" style="flex:1;margin-bottom:6px" onchange="onRepoSelectionChanged()">
+              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="openFolderPickerModal()">Choose / Create</button>
+              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshRepoOptions().then(() => onRepoSelectionChanged())">Refresh</button>
               <span id="modal-repo-path-status" style="font-size:12px;min-width:80px"></span>
             </div>
           </div>
           <div style="margin-top:6px">
             <label class="form-label" style="font-size:11px">base_ref</label>
-            <input type="text" id="modal-base-ref" class="form-input" value="${escapeHtml(spec.base_ref || 'main')}" placeholder="main" style="margin-bottom:6px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <input type="text" id="modal-base-ref" class="form-input" value="${escapeHtml(spec.base_ref || 'main')}" placeholder="main" style="flex:1;margin-bottom:6px" onchange="syncFormToJson()">
+              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshBaseRefOptions()">Refresh</button>
+            </div>
           </div>
           <div style="margin-top:6px">
             <label class="form-label" style="font-size:11px">allowed_paths (one per line)</label>
@@ -3204,9 +3693,15 @@ async function openEditSpecModal(taskId) {
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
   updateReadOnlyBanner();
+  setExecutorType(editExecutorType);
+  _currentSessionMode = editSessionMode;
+  const smEl = document.getElementById('modal-session-mode');
+  if (smEl) smEl.value = editSessionMode;
+  updateSessionModeConstraints();
   onChannelTypeChange();
   refreshModelSelector('coder').catch(() => {});
   refreshModelSelector('judge').catch(() => {});
+  initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
 }
 
 // A2-5: Save edited spec
@@ -3246,18 +3741,14 @@ async function saveEditSpec(taskId) {
   if (taskTypeVal) spec.task_type = taskTypeVal;
   const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
   if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
-  const executionModeVal = document.getElementById('modal-execution-mode')?.value;
-  if (executionModeVal) spec.execution_mode = executionModeVal;
-  if (executionModeVal === 'semi-auto') {
-    const executorEl = document.getElementById('collab-role-executor');
-    const reviewerEl = document.getElementById('collab-role-reviewer');
-    const designerEl = document.getElementById('collab-role-designer');
-    const inspirationEl = document.getElementById('collab-role-inspiration');
-    spec.collab_roles = {};
-    if (executorEl?.value) spec.collab_roles.executor = executorEl.value;
-    if (reviewerEl?.value) spec.collab_roles.reviewer = reviewerEl.value;
-    if (designerEl?.value) spec.collab_roles.designer = designerEl.value;
-    if (inspirationEl?.value) spec.collab_roles.inspiration = inspirationEl.value;
+  const runSurfaceVal = document.getElementById('modal-run-surface')?.value;
+  if (runSurfaceVal) {
+    spec.run_surface = runSurfaceVal;
+    spec.execution_mode = runSurfaceVal === 'visual_ccb' ? 'semi-auto' : 'auto';
+  }
+  if (_currentExecutorType === 'multi_agent' && runSurfaceVal === 'visual_ccb') {
+    const roles = collectCollabRolesFromForm();
+    if (roles) spec.collab_roles = roles;
   } else if (spec.collab_roles !== undefined) delete spec.collab_roles;
   spec.task_id = taskId;
 
@@ -3268,6 +3759,9 @@ async function saveEditSpec(taskId) {
   if (br !== undefined && br !== '') spec.base_ref = br;
   const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
   if (instructionVal) spec.goal = instructionVal;
+  const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
+  if (soloExecutorInstructionVal) spec.executor_instruction = soloExecutorInstructionVal;
+  else if (spec.executor_instruction !== undefined) delete spec.executor_instruction;
   const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
   if (acceptanceVal) spec.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
   const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
@@ -3292,9 +3786,66 @@ async function saveEditSpec(taskId) {
   }
 
   // A4: merge thresholds from UI
-  if (spec.task_type) {
+  if (spec.task_type && _currentExecutorType === 'api_call') {
     const thresholds = readThresholdsFromUI(spec.task_type);
     if (thresholds) spec.rubric_thresholds = thresholds;
+  }
+  spec.executor_type = _currentExecutorType;
+  spec.session_mode = _currentSessionMode || document.getElementById('modal-session-mode')?.value || defaultSessionModeForExecutor(_currentExecutorType);
+  spec.workflow_mode = _currentWorkflowMode;
+  if (_currentExecutorType === 'api_call') {
+    if (spec.run_surface !== undefined) delete spec.run_surface;
+    spec.execution_mode = 'auto';
+  } else if (_currentExecutorType === 'solo_agent') {
+    const soloRunSurface = document.getElementById('modal-run-surface')?.value || 'bridge';
+    spec.run_surface = soloRunSurface;
+    spec.execution_mode = soloRunSurface === 'visual_ccb' ? 'semi-auto' : 'auto';
+    if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
+    const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
+    spec.coder_model = soloProvider;
+    spec.judge_model = soloProvider;
+    if (soloRunSurface === 'visual_ccb') {
+      spec.coder = 'ccb';
+      spec.judge = 'ccb';
+    } else {
+      spec.coder = 'solo';
+      spec.judge = 'solo';
+    }
+    spec.agent_config = {
+      max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
+      auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
+      knowledge_shards: (document.getElementById('modal-knowledge-shards')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
+      provider: soloProvider
+    };
+    const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
+    if (testCmdSolo) spec.test_cmd = testCmdSolo;
+  } else if (_currentExecutorType === 'multi_agent') {
+    spec.run_surface = 'visual_ccb';
+    spec.execution_mode = 'semi-auto';
+    spec.coder = 'ccb';
+    spec.judge = 'ccb';
+    const roles = collectCollabRolesFromForm();
+    if (roles) spec.collab_roles = roles;
+  }
+  if (_currentExecutorType !== 'api_call') {
+    if (spec.rubric_thresholds !== undefined) delete spec.rubric_thresholds;
+    if (spec.scoring_mode !== undefined) delete spec.scoring_mode;
+  }
+  if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
+    delete spec.collab_roles;
+  }
+  if (_currentExecutorType !== 'api_call') {
+    const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
+    if (knEnabled) {
+      spec.knowledge_enabled = true;
+      spec.knowledge_project_path = (document.getElementById('modal-knowledge-project')?.value || '').trim();
+    } else if (spec.knowledge_enabled !== undefined) {
+      delete spec.knowledge_enabled;
+      if (spec.knowledge_project_path !== undefined) delete spec.knowledge_project_path;
+    }
+  }
+  if (spec.executor_type === 'solo_agent' && soloExecutorInstructionVal && !instructionVal) {
+    spec.goal = soloExecutorInstructionVal;
   }
 
   try {

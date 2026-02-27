@@ -44,15 +44,20 @@ ENDJSON
   exit 127
 fi
 
-# Prepare stdin: judge prompt + evidence (use temp file so CLI sees non-TTY input without "stdin is not a terminal" errors)
+# Prepare stdin from coordinator-owned request core when available.
 tmp_stdin="${out_attempt_dir}/judge/stdin.txt"
-if [ -f "$judge_prompt_path" ]; then
-  cat "$judge_prompt_path" > "$tmp_stdin"
+judge_request_path="${JUDGE_REQUEST_PATH:-}"
+if [ -n "$judge_request_path" ] && [ -f "$judge_request_path" ]; then
+  cat "$judge_request_path" > "$tmp_stdin"
 else
-  printf '' > "$tmp_stdin"
+  if [ -f "$judge_prompt_path" ]; then
+    cat "$judge_prompt_path" > "$tmp_stdin"
+  else
+    printf '' > "$tmp_stdin"
+  fi
+  echo "---" >> "$tmp_stdin"
+  cat "$evidence_json_path" >> "$tmp_stdin"
 fi
-echo "---" >> "$tmp_stdin"
-cat "$evidence_json_path" >> "$tmp_stdin"
 
 # Call codex exec (non-interactive) with stdin from file
 tmp_verdict="${out_attempt_dir}/judge/verdict.tmp.json"
