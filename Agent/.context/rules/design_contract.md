@@ -1,11 +1,12 @@
-# design_contract.md v2.0
+# design_contract.md v2.1
 # Trigger: design phase / interface def (multi_agent tasks only)
 # DISCARD after use
 
 ## Scope
 
-This rule applies **only** to `executor_type: multi_agent` tasks.
-`api_call` and `solo_agent` tasks have a single worker — no interface contract needed.
+This rule applies **only** to `task_type: multi_agent` tasks.
+`task_type: solo` and `task_type: copywriting` do not require a multi-worker interface contract.
+For `copywriting`, the role flow is PM -> Executor -> Reviewer (Designer is skipped).
 
 ## Purpose
 

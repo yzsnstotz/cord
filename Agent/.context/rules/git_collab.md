@@ -1,4 +1,4 @@
-# git_collab.md v2.0
+# git_collab.md v2.1
 # Trigger: git_collab activated
 # KEEP full session when git_collab is active
 # Replaces cli_collab.md state-write rules for git_collab mode.
@@ -34,7 +34,7 @@ PM emits a `BranchInitSpec` JSON. Coordinator receives it and executes `git_ops.
   "workers": [
     {
       "task_id": "<task_id>",
-      "executor_type": "api_call | solo_agent | multi_agent",
+      "task_type": "copywriting | solo | multi_agent",
       "label": "<branch-label-suffix>"
     }
   ]
@@ -49,12 +49,12 @@ PM emits a `BranchInitSpec` JSON. Coordinator receives it and executes `git_ops.
 - `base_ref`: Git ref to branch from (default: `"main"`).
 - `workers[]`: Array of worker definitions.
   - `task_id`: Unique task identifier.
-  - `executor_type`: One of `api_call`, `solo_agent`, `multi_agent`.
+  - `task_type`: One of `copywriting`, `solo`, `multi_agent`.
   - `label`: Suffix for worker branch name (e.g., `"content"`, `"executor-a"`, `"reviewer"`).
 
 **Resulting branches:**
 - Task branch: `task/<YYYYMMDD>-<slug>`
-- Worker branches: `worker/<slug>-<label>` (naming varies by `executor_type`)
+- Worker branches: `worker/<slug>-<label>` (naming varies by task split plan)
 
 ### 3. PM issues merge decisions
 
@@ -108,6 +108,12 @@ Executor works **only** on its assigned worker branch.
 - MUST NOT modify the task branch directly
 - MUST NOT push to `main`
 
+### 1.5 role-commit is coordinator-owned
+
+- During role transitions, coordinator executes `git_ops.sh role-commit`.
+- Agents do NOT run `git commit` as a transition operation.
+- Agent responsibility is to finish artifacts in workspace; coordinator records phase commit.
+
 ### 2. Local tests before push
 
 Executor MUST confirm local tests pass before committing/pushing.
@@ -127,13 +133,19 @@ When work is complete, executor's PR description follows the unified template:
 
 ```markdown
 ## Task
-task_id: <id> | executor_type: <type> | session_mode: <mode>
+task_id: <id> | task_type: <type> | launch_mode: <mode>
 
 ## Summary
 [What was implemented]
 
 ## Quality Score (if judge enabled)
-- judge overall: X / 10
+- decision: pass | fail | need_user_input
+- final_score_0_5: <0.0-5.0>
+- final_score_0_100: <0-100>
+- top_issues:
+  - <issue 1>
+- fix_suggestions:
+  - <suggestion 1>
 
 ## Contract Compliance (multi_agent)
 - [x] <export_name>: implemented at <file_path>

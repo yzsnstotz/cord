@@ -1,10 +1,10 @@
-# collab_context.md v2.0
+# collab_context.md v2.1
 # Single source of truth for all collab worker context (cli_collab mode).
 # For git_collab mode, see rules/git_collab.md instead.
 # PM embeds relevant sections into every /ask task package.
 # CCB must NOT inject role or rubric content into CLAUDE.md / AGENTS.md / .clinerules.
 # KEEP full session when cli_collab is active.
-# v2.0: State Read Delegation removed (coordinator reads git state directly in git_collab mode).
+# v2.1: Adds Inspiration trigger rules for low reviewer scores and repeated misses.
 
 ## Purpose
 
@@ -12,7 +12,7 @@ This file owns all content that workers need to operate correctly in collab mode
 - Role Assignment (who does what)
 - Async Guardrail (CCB protocol rule)
 - Rubrics (scoring criteria for reviewer)
-- Inspiration Constraint (for brainstorming)
+- Inspiration Trigger + Constraint (for brainstorming)
 
 When PM sends a task via /ask, it MUST prepend the [WORKER CONTEXT] block below
 so workers are self-contained and never depend on CCB's file injection.
@@ -44,6 +44,8 @@ WORKER RULES (HARD)
 - Do NOT report results directly to user — report to PM only.
 - Do NOT call state_update.sh — PM does that.
 - Do NOT treat yourself as PM.
+- If `task_type=solo`, each role pane is context-isolated; do NOT request or reuse another pane's raw history.
+- In all modes, role transitions are coordinator-controlled; workers must not self-trigger next-role activation.
 
 ASYNC GUARDRAIL (CCB MANDATORY)
 If any bash output contains [CCB_ASYNC_SUBMITTED]:
@@ -100,6 +102,28 @@ inspiration output:
   - present to user as options list only
   - NEVER insert directly into plan or code
   - designer must explicitly state: "adopting X because Y, rejecting Z"
+```
+
+## Solo Pane + Role Transition Constraints (canonical)
+
+```
+when task_type=solo:
+  - each role pane (pm/designer/executor/reviewer) has isolated history
+  - workers must not ask "send me the other pane transcript"
+  - coordinator is the only authority that can switch roles
+```
+
+## Inspiration Trigger (v2.1 canonical)
+
+```
+trigger inspiration role when BOTH conditions are true:
+  1) reviewer score is low (below configured threshold)
+  2) task has failed to meet gate multiple times (>=2 attempts without pass)
+
+inspiration output constraints:
+  - MUST NOT directly output executable code or final copywriting text
+  - MUST output only creative directions, alternatives, and rationale
+  - coordinator injects selected ideas into the next executor context
 ```
 
 ---
