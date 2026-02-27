@@ -1,0 +1,10 @@
+{
+  "task_id": "copy_legacy",
+  "execution_mode": "semi-auto",
+  "goal": "write release copy",
+  "acceptance": "300 words",
+  "task_type": "copywriting",
+  "launch_mode": "ccb",
+  "launch_mode_locked": false,
+  "schema_version": "v51"
+}

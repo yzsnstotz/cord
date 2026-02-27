@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rdloop.local/schema/task_schema_v51.json",
+  "title": "task.json v51",
+  "description": "v5.1 task spec: task_type + launch_mode",
+  "type": "object",
+  "required": ["task_type", "launch_mode", "launch_mode_locked"],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["v51", "v5", "v1"] },
+    "task_id": { "type": "string" },
+    "task_type": {
+      "type": "string",
+      "enum": ["copywriting", "solo", "multi_agent"]
+    },
+    "launch_mode": {
+      "type": "string",
+      "enum": ["ccb", "bridge"]
+    },
+    "launch_mode_locked": {
+      "type": "boolean",
+      "default": false
+    },
+    "agent_config": {
+      "type": "object",
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "auto_pass_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "knowledge_shards": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provider": { "type": "string" }
+      }
+    },
+    "collab_roles": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "goal": { "type": "string" },
+    "acceptance": { "type": ["string", "array"] },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "test_cmd": { "type": "string" },
+    "max_attempts": { "type": "integer" },
+    "judge_enabled": { "type": "boolean" },
+    "repo_path": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "task_type": { "const": "copywriting" } },
+        "required": ["task_type"]
+      },
+      "then": {
+        "required": ["collab_roles"],
+        "properties": {
+          "collab_roles": {
+            "type": "object",
+            "required": ["executor", "reviewer"],
+            "properties": {
+              "executor": { "type": "string" },
+              "reviewer": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "task_type": { "enum": ["solo", "multi_agent"] } },
+        "required": ["task_type"]
+      },
+      "then": {
+        "required": ["collab_roles"]
+      }
+    }
+  ]
+}

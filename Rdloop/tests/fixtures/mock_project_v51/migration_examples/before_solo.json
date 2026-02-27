@@ -1,0 +1,8 @@
+{
+  "task_id": "solo_legacy",
+  "executor_type": "solo_agent",
+  "session_mode": "continuous",
+  "run_surface": "bridge",
+  "goal": "implement login",
+  "acceptance": "tests pass"
+}

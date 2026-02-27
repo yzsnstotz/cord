@@ -1,0 +1,10 @@
+{
+  "task_id": "multi_legacy",
+  "execution_mode": "auto",
+  "goal": "integrate payment",
+  "acceptance": "e2e pass",
+  "task_type": "multi_agent",
+  "launch_mode": "bridge",
+  "launch_mode_locked": false,
+  "schema_version": "v51"
+}

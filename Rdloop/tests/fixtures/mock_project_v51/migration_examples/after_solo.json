@@ -1,0 +1,9 @@
+{
+  "task_id": "solo_legacy",
+  "goal": "implement login",
+  "acceptance": "tests pass",
+  "task_type": "solo",
+  "launch_mode": "bridge",
+  "launch_mode_locked": false,
+  "schema_version": "v51"
+}

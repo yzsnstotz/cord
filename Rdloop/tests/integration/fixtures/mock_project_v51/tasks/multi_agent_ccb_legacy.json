@@ -1,0 +1,25 @@
+{
+  "schema_version": "v5",
+  "task_id": "multi_agent_ccb_legacy",
+  "executor_type": "multi_agent",
+  "session_mode": "continuous",
+  "run_surface": "visual_ccb",
+  "repo_path": "__REPO__",
+  "goal": "Run multi agent routing through ccb mode",
+  "acceptance": "Role transitions emitted with session_id",
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "judge_enabled": true,
+  "agent_config": {
+    "max_attempts": 1,
+    "auto_pass_threshold": 0.85,
+    "knowledge_shards": [],
+    "provider": "claude"
+  },
+  "collab_roles": {
+    "pm": "claude",
+    "designer": "claude",
+    "executor": "codex",
+    "reviewer": "gemini"
+  }
+}

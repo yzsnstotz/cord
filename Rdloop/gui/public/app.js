@@ -75,6 +75,78 @@ function decodeUnicodeEscapes(str) {
   return str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 }
 
+// ================================================================
+// §v5.1.4 Task Specification Helpers (F1/F2/F4)
+// ================================================================
+
+function getV51Schema() {
+  return {
+    task_types: ['copywriting', 'solo', 'multi_agent'],
+    launch_modes: ['ccb', 'bridge']
+  };
+}
+
+function mapLegacyExecutorTypeToTaskType(execType) {
+  switch (execType) {
+    case 'api_call': return 'copywriting';
+    case 'solo_agent': return 'solo';
+    case 'multi_agent': return 'multi_agent';
+    default: return '';
+  }
+}
+
+function mapLegacyWorkflowModeToTaskType(workflowMode) {
+  switch (workflowMode) {
+    case 'single': return 'copywriting';
+    case 'solo': return 'solo';
+    case 'collab': return 'multi_agent';
+    default: return '';
+  }
+}
+
+function inferLaunchModeFromLegacy(spec) {
+  if (spec.run_surface === 'visual_ccb' || spec.execution_mode === 'semi-auto' || spec.channel_type === 'ccb') {
+    return 'ccb';
+  }
+  if (spec.run_surface === 'bridge' || spec.execution_mode === 'auto' || spec.channel_type === 'coding-agent-cli' || spec.channel_type === 'cliapi-proxy') {
+    return 'bridge';
+  }
+  return 'bridge'; // default
+}
+
+/** 
+ * Returns a normalized v5.1 view of a spec. 
+ * If fields missing, attempts to infer from legacy.
+ */
+function normalizeSpecToV51(spec) {
+  const out = { ...(spec || {}) };
+  const notes = [];
+  
+  if (!out.task_type) {
+    const fromExec = mapLegacyExecutorTypeToTaskType(out.executor_type);
+    const fromWorkflow = mapLegacyWorkflowModeToTaskType(out.workflow_mode);
+    out.task_type = fromExec || fromWorkflow || 'solo';
+    if (fromExec || fromWorkflow) notes.push(`task_type inferred from legacy executor/workflow`);
+  }
+  
+  if (!out.launch_mode) {
+    out.launch_mode = inferLaunchModeFromLegacy(out);
+    notes.push(`launch_mode inferred from legacy execution fields`);
+  }
+  
+  if (out.launch_mode_locked === undefined) {
+    out.launch_mode_locked = false;
+  }
+  
+  return { spec: out, notes };
+}
+
+function isLegacyTask(spec) {
+  if (!spec) return false;
+  const legacyFields = ['executor_type', 'workflow_mode', 'session_mode', 'channel_type', 'run_surface', 'execution_mode'];
+  return legacyFields.some(f => spec[f] !== undefined);
+}
+
 // Badge helper (state display only — no user content)
 function badge(state) {
   const cls = {
@@ -1167,7 +1239,7 @@ async function loadTasks() {
     <div class="task-item ${t.task_id === currentTaskId ? 'active' : ''}" data-task-id="${escapeHtml(t.task_id)}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:4px">
         <div style="min-width:0;flex:1">
-          <div class="task-id">${escapeHtml(t.task_id)}${t.execution_mode === 'semi-auto' ? ' <span style="font-size:10px;color:#8b949e" title="semi-auto">⟳</span>' : ''}</div>
+          <div class="task-id">${escapeHtml(t.task_id)}${t.launch_mode === 'ccb' ? ' <span style="font-size:10px;color:#8b949e" title="launch_mode: ccb (visible tmux)">⟳</span>' : ''}</div>
           <div class="task-meta">
             <span class="task-state-tag">${escapeHtml(t.state)}</span>
             <span style="font-size:11px;color:#8b949e">att ${escapeHtml(String(t.current_attempt || 0))} · ${escapeHtml(t.last_decision || '-')}</span>
@@ -1302,6 +1374,17 @@ function updateTaskMeta(data) {
   const metaDecision = document.getElementById('meta-decision');
   if (metaDecision) metaDecision.textContent = s.last_decision || '-';
 
+  const metaTaskType = document.getElementById('meta-task-type');
+  if (metaTaskType) metaTaskType.textContent = s.task_type || '-';
+
+  const metaLaunchMode = document.getElementById('meta-launch-mode');
+  if (metaLaunchMode) metaLaunchMode.textContent = s.launch_mode || '-';
+
+  const metaResolvedView = document.getElementById('meta-resolved-view');
+  if (metaResolvedView) {
+    metaResolvedView.textContent = s.launch_mode_source ? `Source: ${s.launch_mode_source}` : '-';
+  }
+
   const metaMsg = document.getElementById('meta-message');
   if (metaMsg) metaMsg.textContent = s.message || '-';
 
@@ -1367,6 +1450,14 @@ function renderTask(data) {
         <div class="value" id="meta-state">${badge(s.state)}</div>
       </div>
       <div class="info-card">
+        <div class="label">Task Type / Mode</div>
+        <div class="value" style="font-size:13px">
+          <span id="meta-task-type">${escapeHtml(task?.task_type || s.task_type || '-')}</span> / 
+          <span id="meta-launch-mode">${escapeHtml(task?.launch_mode || s.launch_mode || '-')}</span>
+          ${(task?.launch_mode_locked || s.launch_mode_locked) ? '<span title="Locked" style="cursor:help">🔒</span>' : '<span title="Unlocked (prompts at Run)" style="cursor:help">🔓</span>'}
+        </div>
+      </div>
+      <div class="info-card">
         <div class="label">Attempt</div>
         <div class="value" id="meta-attempt">${escapeHtml(String(s.current_attempt || 0))} / ${escapeHtml(String(s.max_attempts || s.effective_max_attempts || '-'))}</div>
       </div>
@@ -1375,8 +1466,10 @@ function renderTask(data) {
         <div class="value" id="meta-decision">${escapeHtml(s.last_decision || '-')}</div>
       </div>
       <div class="info-card">
-        <div class="label">Message</div>
-        <div class="value" id="meta-message" style="font-size:13px">${escapeHtml(s.message || '-')}</div>
+        <div class="label">Run Config (v5.1)</div>
+        <div class="value" id="meta-resolved-view" style="font-size:11px; color:var(--text-muted)">
+          ${s.launch_mode_source ? `Source: ${escapeHtml(s.launch_mode_source)}` : '-'}
+        </div>
       </div>
     </div>
 
@@ -1653,21 +1746,83 @@ function openRunSurfaceModal(defaultSurface, titleText) {
   });
 }
 
+/**
+ * v5.1.4: Resolves launch_mode for task start. (F3)
+ * If locked=true, returns task.launch_mode.
+ * If locked=false, shows modal to choose.
+ */
+async function pickLaunchModeForStart(spec, titleText) {
+  const normalized = normalizeSpecToV51(spec);
+  const nSpec = normalized.spec;
+  
+  if (nSpec.launch_mode_locked === true && nSpec.launch_mode) {
+    return { cancelled: false, launch_mode: nSpec.launch_mode, save_and_lock: false };
+  }
+  
+  // F3: Always show dialog if not locked (or launch_mode missing)
+  const result = await openV51RunDialog(nSpec.launch_mode || 'bridge', titleText);
+  if (!result) return { cancelled: true };
+  
+  return { 
+    cancelled: false, 
+    launch_mode: result.launch_mode, 
+    save_and_lock: result.save_and_lock 
+  };
+}
+
+function openV51RunDialog(defaultMode, titleText) {
+  return new Promise((resolve) => {
+    const old = document.getElementById('run-v51-modal');
+    if (old) old.remove();
+    
+    const title = titleText || 'Run Task (v5.1)';
+    const modalHtml = `
+      <div id="run-v51-modal" class="modal-overlay" onclick="if(event.target===this){ resolve(null); this.remove(); }">
+        <div class="modal-box" style="max-width:480px">
+          <h3 style="margin-top:0">${escapeHtml(title)}</h3>
+          <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px">Task launch mode is not locked. Please select how to run this task:</p>
+          
+          <div style="margin-bottom:20px">
+            <label class="form-label">Launch Mode</label>
+            <select id="run-v51-launch-mode" class="form-select">
+              <option value="bridge" ${defaultMode === 'bridge' ? 'selected' : ''}>bridge (non-visible)</option>
+              <option value="ccb" ${defaultMode === 'ccb' ? 'selected' : ''}>ccb (visible tmux)</option>
+            </select>
+          </div>
+          
+          <div style="display:flex; gap:12px; justify-content:flex-end">
+            <button class="btn" onclick="document.getElementById('run-v51-modal').remove(); resolve(null);">Cancel</button>
+            <button class="btn btn-primary" id="run-v51-once">Run once</button>
+            <button class="btn btn-primary" id="run-v51-save-lock" style="background:var(--accent-blue)">Save &amp; Lock</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    
+    document.getElementById('run-v51-once').onclick = () => {
+      const mode = document.getElementById('run-v51-launch-mode').value;
+      document.getElementById('run-v51-modal').remove();
+      resolve({ launch_mode: mode, save_and_lock: false });
+    };
+    
+    document.getElementById('run-v51-save-lock').onclick = () => {
+      const mode = document.getElementById('run-v51-launch-mode').value;
+      document.getElementById('run-v51-modal').remove();
+      resolve({ launch_mode: mode, save_and_lock: true });
+    };
+  });
+}
+
+// Legacy compat wrapper
 async function pickRunSurfaceForStart(spec, titleText) {
-  const executorType = resolveExecutorTypeFromSpec(spec);
-  if (!executorType || executorType === 'api_call') {
-    return { cancelled: false, runSurface: undefined };
-  }
-  if (executorType === 'multi_agent') {
-    return { cancelled: false, runSurface: 'visual_ccb' };
-  }
-  const configuredDefault = await getConfiguredDefaultRunSurface();
-  if (useDefaultRunSurface) {
-    return { cancelled: false, runSurface: configuredDefault };
-  }
-  const selected = await openRunSurfaceModal(configuredDefault || inferRunSurfaceFromSpec(spec), titleText);
-  if (!selected) return { cancelled: true, runSurface: undefined };
-  return { cancelled: false, runSurface: selected };
+  const result = await pickLaunchModeForStart(spec, titleText);
+  if (result.cancelled) return { cancelled: true };
+  return { 
+    cancelled: false, 
+    runSurface: result.launch_mode === 'ccb' ? 'visual_ccb' : 'bridge',
+    saveAndLock: result.save_and_lock
+  };
 }
 
 // Run Next: set RUN_NEXT (so --continue will advance from PAUSED) then start coordinator
@@ -1677,21 +1832,29 @@ async function doRunNext(e) {
   setButtonLoading(btn, true);
   try {
     const runData = await api(`/task/${encodeURIComponent(currentTaskId)}`).catch(() => ({}));
-    const picked = await pickRunSurfaceForStart(runData.task || {}, `Run Task: ${currentTaskId}`);
+    const picked = await pickLaunchModeForStart(runData.task || {}, `Run Task: ${currentTaskId}`);
     if (picked.cancelled) return;
+    
     await api(`/task/${currentTaskId}/control`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'RUN_NEXT', payload: {} })
     });
-    const result = await api(`/task/${currentTaskId}/run`, {
+    
+    const result = await api(`/run/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+      body: JSON.stringify({ 
+        task_id: currentTaskId,
+        task_snapshot: runData.task,
+        runtime_overrides: { launch_mode: picked.launch_mode },
+        save_and_lock: picked.save_and_lock
+      })
     }).catch(e => ({ error: e?.message || String(e) }));
+    
     if (result && result.error) {
-      if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
-        alert('Task is already running. Pause first if you want to stop it.');
+      if (String(result.error).includes('already running')) {
+        alert('Task is already running.');
         return;
       }
       alert(result.error);
@@ -1710,20 +1873,28 @@ async function doResume(e) {
   setButtonLoading(btn, true);
   try {
     const runData = await api(`/task/${encodeURIComponent(currentTaskId)}`).catch(() => ({}));
-    const picked = await pickRunSurfaceForStart(runData.task || {}, `Resume Task: ${currentTaskId}`);
+    const picked = await pickLaunchModeForStart(runData.task || {}, `Resume Task: ${currentTaskId}`);
     if (picked.cancelled) return;
+    
     await api(`/task/${currentTaskId}/control`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'RESUME', payload: {} })
     });
-    const result = await api(`/task/${currentTaskId}/run`, {
+    
+    const result = await api(`/run/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+      body: JSON.stringify({ 
+        task_id: currentTaskId,
+        task_snapshot: runData.task,
+        runtime_overrides: { launch_mode: picked.launch_mode },
+        save_and_lock: picked.save_and_lock
+      })
     }).catch(e => ({ error: e?.message || String(e) }));
+    
     if (result && result.error) {
-      if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
+      if (String(result.error).includes('already running')) {
         alert('Task is already running.');
         return;
       }
@@ -1744,12 +1915,18 @@ async function doForceRun(e) {
   setButtonLoading(btn, true);
   try {
     const runData = await api(`/task/${encodeURIComponent(currentTaskId)}`).catch(() => ({}));
-    const picked = await pickRunSurfaceForStart(runData.task || {}, `Force Run Task: ${currentTaskId}`);
+    const picked = await pickLaunchModeForStart(runData.task || {}, `Force Run Task: ${currentTaskId}`);
     if (picked.cancelled) return;
-    await api(`/task/${currentTaskId}/run?force=1`, {
+    
+    await api(`/run/create?force=1`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(picked.runSurface ? { run_surface: picked.runSurface } : {})
+      body: JSON.stringify({ 
+        task_id: currentTaskId,
+        task_snapshot: runData.task,
+        runtime_overrides: { launch_mode: picked.launch_mode },
+        save_and_lock: picked.save_and_lock
+      })
     });
     setTimeout(refreshCurrentTaskMeta, 1000);
   } finally {
@@ -2634,6 +2811,8 @@ function syncFormToJson() {
     if (!jsonEl) return;
     const taskId = (document.getElementById('modal-task-id')?.value || '').trim();
     const taskType = document.getElementById('modal-task-type')?.value || '';
+    const launchMode = document.getElementById('modal-launch-mode')?.value || 'bridge';
+    const launchModeLocked = document.getElementById('modal-launch-mode-locked')?.checked === true;
     const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
     const acceptance = (document.getElementById('modal-acceptance')?.value || '').trim().split(/\n/).map(s => s.trim()).filter(Boolean);
     const testCmd = (document.getElementById('modal-test-cmd')?.value || 'true').trim();
@@ -2662,7 +2841,9 @@ function syncFormToJson() {
     const spec = {
       schema_version: 'v1',
       task_id: taskId || 'my_task',
-      task_type: taskType || undefined,
+      task_type: taskType || 'solo',
+      launch_mode: launchMode,
+      launch_mode_locked: launchModeLocked,
       execution_mode: 'auto',
       channel_type: channelType,
       repo_path: repoPath || undefined,
@@ -2682,26 +2863,38 @@ function syncFormToJson() {
       ...(coderModel ? { coder_model: coderModel } : {}),
       ...(judgeModel ? { judge_model: judgeModel } : {})
     };
-    if (_currentExecutorType === 'solo_agent') {
+
+    const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim();
+    const autoPass = parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85');
+    const inspTrigger = parseInt(document.getElementById('modal-inspiration-trigger')?.value || '3', 10);
+
+    spec.agent_config = {
+      max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '5', 10),
+      auto_pass_threshold: autoPass,
+      inspiration_trigger_attempts: inspTrigger,
+      provider: soloProvider || 'claude',
+      knowledge_shards: getSelectedKnowledgeShards()
+    };
+
+    if (taskType === 'copywriting') {
+      spec.collab_roles = {
+        executor: document.getElementById('adapter-coder')?.value || 'claude',
+        reviewer: document.getElementById('adapter-judge')?.value || 'codex'
+      };
+    } else if (taskType === 'solo') {
+      const p = soloProvider || 'claude';
+      spec.collab_roles = { pm: p, designer: p, executor: p, reviewer: p, inspiration: p };
       const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-      const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim();
       if (soloExecutorInstruction) {
         spec.executor_instruction = soloExecutorInstruction;
         spec.goal = soloExecutorInstruction;
       }
-      spec.coder_model = soloProvider || 'claude';
-      spec.judge_model = soloProvider || 'claude';
       spec.coder = 'solo';
       spec.judge = 'solo';
-      spec.agent_config = {
-        ...(spec.agent_config || {}),
-        provider: soloProvider || 'claude'
-      };
+    } else if (taskType === 'multi_agent') {
+      spec.collab_roles = collectCollabRolesFromForm();
     }
-    if (_currentExecutorType === 'multi_agent') {
-      const roles = collectCollabRolesFromForm();
-      if (roles) spec.collab_roles = roles;
-    }
+
     const knowledgeEnabled = document.getElementById('modal-knowledge-enabled')?.checked === true;
     if (knowledgeEnabled) {
       spec.knowledge_enabled = true;
@@ -2709,10 +2902,6 @@ function syncFormToJson() {
       const rp = (document.getElementById('modal-repo-path')?.value || '').trim();
       spec.knowledge_project_path = kp || normalizeKnowledgePath(rp);
       spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
-      spec.agent_config = {
-        ...(spec.agent_config || {}),
-        knowledge_shards: getSelectedKnowledgeShards()
-      };
     }
     jsonEl.value = JSON.stringify(spec, null, 2);
   }, 400);
@@ -2727,10 +2916,24 @@ function syncJsonToForm() {
     const spec = JSON.parse(raw);
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.value = value != null ? value : ''; };
     set('modal-task-id', spec.task_id);
-    if (spec.task_type) document.getElementById('modal-task-type') && (document.getElementById('modal-task-type').value = spec.task_type);
+    if (spec.task_type) {
+      const el = document.getElementById('modal-task-type');
+      if (el) el.value = spec.task_type;
+    }
+    if (spec.launch_mode) {
+      const el = document.getElementById('modal-launch-mode');
+      if (el) el.value = spec.launch_mode;
+    }
+    const lockedEl = document.getElementById('modal-launch-mode-locked');
+    if (lockedEl) lockedEl.checked = spec.launch_mode_locked === true;
+
     set('modal-instruction', spec.goal || spec.instruction);
     set('modal-solo-provider', spec.agent_config?.provider || spec.coder_model || '');
     set('modal-solo-executor-instruction', spec.executor_instruction || '');
+    set('modal-max-iterations', spec.agent_config?.max_attempts || spec.max_attempts || 5);
+    set('modal-auto-pass-threshold', spec.agent_config?.auto_pass_threshold || 0.85);
+    set('modal-inspiration-trigger', spec.agent_config?.inspiration_trigger_attempts || 3);
+
     if (document.getElementById('modal-knowledge-enabled')) document.getElementById('modal-knowledge-enabled').checked = spec.knowledge_enabled !== false;
     set('modal-knowledge-provider', spec.knowledge_provider || spec.agent_config?.provider || 'codex');
     set('modal-knowledge-project', spec.knowledge_project_path || normalizeKnowledgePath(spec.repo_path || ''));
@@ -3043,6 +3246,9 @@ async function openNewSpecModal() {
     hello_world: {
       schema_version: 'v1',
       task_id: 'my_task',
+      task_type: 'solo',
+      launch_mode: 'bridge',
+      launch_mode_locked: false,
       repo_path: 'dummy_repo',
       base_ref: 'main',
       goal: 'Describe what the task should achieve',
@@ -3063,7 +3269,9 @@ async function openNewSpecModal() {
     requirements_doc: {
       schema_version: 'v1',
       task_id: 'req_doc_task',
-      task_type: 'requirements_doc',
+      task_type: 'solo',
+      launch_mode: 'bridge',
+      launch_mode_locked: false,
       repo_path: 'dummy_repo',
       base_ref: 'main',
       goal: 'Write a product requirements document',
@@ -3082,7 +3290,9 @@ async function openNewSpecModal() {
     engineering_impl: {
       schema_version: 'v1',
       task_id: 'eng_impl_task',
-      task_type: 'engineering_impl',
+      task_type: 'solo',
+      launch_mode: 'bridge',
+      launch_mode_locked: false,
       repo_path: 'dummy_repo',
       base_ref: 'main',
       goal: 'Implement the feature described in the requirements',
@@ -3103,23 +3313,59 @@ async function openNewSpecModal() {
   const modalHtml = `
     <div id="spec-modal" class="modal-overlay" onclick="if(event.target===this)closeModal()">
       <div class="modal-box" style="max-width:800px;max-height:90vh;overflow-y:auto">
-        <h3 style="margin-top:0">New Task Spec</h3>
+        <h3 style="margin-top:0">New Task Spec (v5.1.4)</h3>
 
-        <div style="margin-bottom:12px">
-          <label class="form-label">Executor Type (v5)</label>
-          <select id="modal-executor-type" class="form-select" onchange="setExecutorType(this.value); syncFormToJson()">
-            <option value="api_call">API Call — single-flow LLM via CLI proxy</option>
-            <option value="solo_agent">Solo Agent — autonomous agent loop</option>
-            <option value="multi_agent">Multi Agent — collaborative multi-worker</option>
-          </select>
+        <div id="legacy-warning" class="questions-banner" style="display:none; margin-bottom:12px; border-color: var(--accent-red); background: rgba(218,54,51,0.1)">
+          <strong>Legacy Task Detected</strong>
+          <p style="font-size:12px; margin-top:4px">This task uses deprecated fields (executor_type, session_mode, etc.). Saving will normalize it to v5.1.4.</p>
+          <div id="migration-preview" style="font-size:11px; margin-top:8px; opacity:0.8; font-family:monospace"></div>
         </div>
-        <div style="margin-bottom:12px">
-          <label class="form-label">Session Mode (v5)</label>
-          <select id="modal-session-mode" class="form-select" onchange="_currentSessionMode=this.value; syncFormToJson()">
-            <option value="fresh">Fresh — each attempt from scratch</option>
-            <option value="iterative">Iterative — carry context across attempts</option>
-            <option value="continuous" disabled>Continuous — persistent agent session</option>
-          </select>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
+          <div>
+            <label class="form-label">Task Type (v5.1)</label>
+            <select id="modal-task-type" class="form-select" onchange="syncFormToJson(); onTaskTypeChange()">
+              <option value="copywriting">copywriting (single flow)</option>
+              <option value="solo" selected>solo (autonomous agent)</option>
+              <option value="multi_agent">multi_agent (collaborative)</option>
+            </select>
+          </div>
+          <div>
+            <label class="form-label">Launch Mode (v5.1)</label>
+            <select id="modal-launch-mode" class="form-select" onchange="syncFormToJson()">
+              <option value="bridge">bridge (non-visible)</option>
+              <option value="ccb">ccb (visible tmux)</option>
+            </select>
+          </div>
+          <div style="display:flex; align-items:center; padding-top:20px">
+            <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer">
+              <input type="checkbox" id="modal-launch-mode-locked" onchange="syncFormToJson()">
+              <span class="form-label" style="display:inline; margin:0">Mode Locked</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="section-deprecated-fields" style="margin-bottom:12px; opacity:0.6">
+          <details>
+            <summary style="font-size:11px; color:var(--text-muted); cursor:pointer">Deprecated Fields (Legacy v5.0 compat)</summary>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px">
+              <div>
+                <label class="form-label" style="font-size:10px">Executor Type</label>
+                <select id="modal-executor-type" class="form-select" style="font-size:11px" onchange="setExecutorType(this.value); syncFormToJson()">
+                  <option value="api_call">api_call</option>
+                  <option value="solo_agent">solo_agent</option>
+                  <option value="multi_agent">multi_agent</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label" style="font-size:10px">Session Mode</label>
+                <select id="modal-session-mode" class="form-select" style="font-size:11px" onchange="_currentSessionMode=this.value; syncFormToJson()">
+                  <option value="fresh">fresh</option>
+                  <option value="iterative">iterative</option>
+                </select>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div style="margin-bottom:12px">
@@ -3157,7 +3403,7 @@ async function openNewSpecModal() {
                 <tbody>
                   ${COLLAB_ROLES.map(r => {
                     const opts = COLLAB_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
-                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px">${opts}</select></td></tr>`;
+                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px" onchange="syncFormToJson()">${opts}</select></td></tr>`;
                   }).join('')}
                 </tbody>
               </table>
@@ -3193,10 +3439,10 @@ async function openNewSpecModal() {
 
         <div id="section-loop-config" style="margin-bottom:12px;display:none">
           <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-            <strong class="form-label">Agent Loop Config</strong>
+            <strong class="form-label">Agent Loop Config (v5.1)</strong>
             <div style="margin-top:8px;margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Solo agent provider</label>
-              <select id="modal-solo-provider" class="form-select">
+              <label class="form-label" style="font-size:11px">Default provider</label>
+              <select id="modal-solo-provider" class="form-select" onchange="syncFormToJson()">
                 <option value="claude">claude</option>
                 <option value="codex">codex</option>
                 <option value="gemini">gemini</option>
@@ -3204,39 +3450,27 @@ async function openNewSpecModal() {
                 <option value="droid">droid</option>
               </select>
             </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
+              <div>
+                <label class="form-label" style="font-size:11px">max_attempts</label>
+                <input type="number" id="modal-max-iterations" class="form-input" value="5" min="1" max="50" onchange="syncFormToJson()">
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">auto_pass (0-1)</label>
+                <input type="number" id="modal-auto-pass-threshold" class="form-input" value="0.85" min="0" max="1" step="0.05" onchange="syncFormToJson()">
+              </div>
+              <div>
+                <label class="form-label" style="font-size:11px">inspiration trigger</label>
+                <input type="number" id="modal-inspiration-trigger" class="form-input" value="3" min="1" max="10" onchange="syncFormToJson()">
+              </div>
+            </div>
             <div style="margin-top:8px;margin-bottom:8px">
               <label class="form-label" style="font-size:11px">Executor instructions</label>
               <textarea id="modal-solo-executor-instruction" class="form-input" rows="3" placeholder="Instructions sent to the solo executor agent" style="width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
-              <div>
-                <label class="form-label" style="font-size:11px">Max iterations</label>
-                <input type="number" id="modal-max-iterations" class="form-input" value="10" min="1" max="100">
-              </div>
-              <div>
-                <label class="form-label" style="font-size:11px">Auto-pass threshold</label>
-                <input type="number" id="modal-auto-pass-threshold" class="form-input" value="0.85" min="0" max="1" step="0.05">
-              </div>
-            </div>
             <div style="margin-bottom:8px">
               <label class="form-label" style="font-size:11px">Test command</label>
-              <input type="text" id="modal-test-cmd-solo" class="form-input" placeholder="bash run_tests.sh">
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-              <div>
-                <label class="form-label" style="font-size:11px">Approval mode</label>
-                <select id="modal-approval-mode" class="form-select">
-                  <option value="agent_decides">Agent decides when to exit</option>
-                  <option value="step2step">Step-by-step approval</option>
-                </select>
-              </div>
-              <div>
-                <label class="form-label" style="font-size:11px">Session strategy</label>
-                <select id="modal-session-strategy" class="form-select">
-                  <option value="continuous">Continuous session</option>
-                  <option value="fresh_per_step">Fresh session per step</option>
-                </select>
-              </div>
+              <input type="text" id="modal-test-cmd-solo" class="form-input" placeholder="bash run_tests.sh" oninput="syncFormToJson()">
             </div>
           </div>
         </div>
@@ -3399,6 +3633,10 @@ function applyTemplate() {
   // Update task-type selector
   const typeEl = document.getElementById('modal-task-type');
   if (typeEl && tpl.task_type) typeEl.value = tpl.task_type;
+  const launchModeEl = document.getElementById('modal-launch-mode');
+  if (launchModeEl && tpl.launch_mode) launchModeEl.value = tpl.launch_mode;
+  const lockedEl = document.getElementById('modal-launch-mode-locked');
+  if (lockedEl) lockedEl.checked = tpl.launch_mode_locked === true;
   const attemptModeEl = document.getElementById('modal-attempt-context-mode');
   if (attemptModeEl && (tpl.attempt_context_mode === 'iterative' || tpl.attempt_context_mode === 'fresh_each')) attemptModeEl.value = tpl.attempt_context_mode;
   // Update adapter and model selectors
@@ -3477,6 +3715,19 @@ async function saveNewSpec(e) {
   if (execTypeEl) _currentExecutorType = execTypeEl.value;
   const sessionModeEl = document.getElementById('modal-session-mode');
   if (sessionModeEl) _currentSessionMode = sessionModeEl.value;
+
+  const taskTypeVal = document.getElementById('modal-task-type')?.value;
+  const launchModeVal = document.getElementById('modal-launch-mode')?.value;
+  const { task_types, launch_modes } = getV51Schema();
+
+  if (taskTypeVal && !task_types.includes(taskTypeVal)) {
+    if (errEl) errEl.textContent = 'Invalid task_type. Allowed: ' + task_types.join(', ');
+    return;
+  }
+  if (launchModeVal && !launch_modes.includes(launchModeVal)) {
+    if (errEl) errEl.textContent = 'Invalid launch_mode. Allowed: ' + launch_modes.join(', ');
+    return;
+  }
 
   setButtonLoading(btn, true);
   try {
@@ -3672,10 +3923,24 @@ async function saveNewSpec(e) {
       if (spec.knowledge_provider !== undefined) delete spec.knowledge_provider;
     }
 
+    // v5.1.4: Normalize to new fields (F1)
+    const { spec: v51Spec, notes } = normalizeSpecToV51(spec);
+    
+    // Final overrides from UI
+    v51Spec.task_id = taskId;
+    const uiTaskType = document.getElementById('modal-task-type')?.value;
+    if (uiTaskType) v51Spec.task_type = uiTaskType;
+    
+    const uiLaunchMode = document.getElementById('modal-launch-mode')?.value;
+    if (uiLaunchMode) v51Spec.launch_mode = uiLaunchMode;
+    
+    const uiLaunchModeLocked = document.getElementById('modal-launch-mode-locked')?.checked;
+    if (uiLaunchModeLocked !== undefined) v51Spec.launch_mode_locked = uiLaunchModeLocked;
+
     const res = await fetch('/api/task_specs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: taskId, spec })
+      body: JSON.stringify({ task_id: taskId, spec: v51Spec })
     });
     const result = await res.json();
     if (!res.ok) {
@@ -3730,47 +3995,73 @@ async function openEditSpecModal(taskId) {
   // Pre-load rubric if task_type known
   if (spec.task_type) await loadRubric(spec.task_type);
 
-  const thresholdsHtml = spec.task_type
-    ? buildThresholdsUI(spec.task_type, spec.rubric_thresholds)
+  // v5.1.4: Normalize for preview (F2)
+  const isLegacy = isLegacyTask(spec);
+  const normalized = normalizeSpecToV51(spec);
+  const nSpec = normalized.spec;
+
+  const thresholdsHtml = nSpec.task_type
+    ? buildThresholdsUI(nSpec.task_type, nSpec.rubric_thresholds)
     : '';
 
   const modalHtml = `
     <div id="spec-modal" class="modal-overlay" onclick="if(event.target===this)closeModal()">
       <div class="modal-box" style="max-width:800px;max-height:90vh;overflow-y:auto">
-        <h3 style="margin-top:0">Edit Task Spec: ${escapeHtml(taskId)}</h3>
+        <h3 style="margin-top:0">Edit Task Spec: ${escapeHtml(taskId)} (v5.1.4)</h3>
 
-        <div id="section-mode-v5" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <strong class="form-label">Execution Mode (v5)</strong>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
-            <div>
-              <label class="form-label" style="font-size:11px">Executor Type</label>
-              <select id="modal-executor-type" class="form-select" onchange="setExecutorType(this.value)">
-                <option value="api_call" ${editExecutorType === 'api_call' ? 'selected' : ''}>API Call — single-flow LLM via CLI proxy</option>
-                <option value="solo_agent" ${editExecutorType === 'solo_agent' ? 'selected' : ''}>Solo Agent — autonomous agent loop</option>
-                <option value="multi_agent" ${editExecutorType === 'multi_agent' ? 'selected' : ''}>Multi Agent — collaborative multi-worker</option>
-              </select>
-            </div>
-            <div>
-              <label class="form-label" style="font-size:11px">Session Mode</label>
-              <select id="modal-session-mode" class="form-select" onchange="_currentSessionMode=this.value;updateSessionModeConstraints()">
-                <option value="fresh" ${editSessionMode === 'fresh' ? 'selected' : ''}>Fresh — each attempt from scratch</option>
-                <option value="iterative" ${editSessionMode === 'iterative' ? 'selected' : ''}>Iterative — carry context across attempts</option>
-                <option value="continuous" ${editSessionMode === 'continuous' ? 'selected' : ''}>Continuous — persistent agent session</option>
-              </select>
-            </div>
+        <div id="legacy-warning" class="questions-banner" style="display:${isLegacy ? 'block' : 'none'}; margin-bottom:12px; border-color: var(--accent-red); background: rgba(218,54,51,0.1)">
+          <strong>Legacy Task Detected</strong>
+          <p style="font-size:12px; margin-top:4px">This task uses deprecated fields. Saving will normalize it to v5.1.4.</p>
+          <div id="migration-preview" style="font-size:11px; margin-top:8px; opacity:0.8; font-family:monospace">
+            ${normalized.notes.map(n => `• ${escapeHtml(n)}`).join('<br>')}
           </div>
         </div>
 
-        <div style="margin-bottom:12px">
-          <label class="form-label">Task Type (A4)</label>
-          <select id="modal-task-type" class="form-select" onchange="onTaskTypeChange()">
-            <option value="">— none —</option>
-            <option value="requirements_doc" ${spec.task_type === 'requirements_doc' ? 'selected' : ''}>requirements_doc</option>
-            <option value="engineering_impl" ${(spec.task_type === 'engineering_impl' || spec.task_type === 'engineering_implementation') ? 'selected' : ''}>engineering_impl</option>
-            <option value="douyin_script" ${spec.task_type === 'douyin_script' ? 'selected' : ''}>douyin_script</option>
-            <option value="storyboard" ${spec.task_type === 'storyboard' ? 'selected' : ''}>storyboard</option>
-            <option value="paid_mini_drama" ${spec.task_type === 'paid_mini_drama' ? 'selected' : ''}>paid_mini_drama</option>
-          </select>
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
+          <div>
+            <label class="form-label">Task Type (v5.1)</label>
+            <select id="modal-task-type" class="form-select" onchange="syncFormToJson(); onTaskTypeChange()">
+              <option value="copywriting" ${nSpec.task_type === 'copywriting' ? 'selected' : ''}>copywriting</option>
+              <option value="solo" ${nSpec.task_type === 'solo' ? 'selected' : ''}>solo</option>
+              <option value="multi_agent" ${nSpec.task_type === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
+            </select>
+          </div>
+          <div>
+            <label class="form-label">Launch Mode (v5.1)</label>
+            <select id="modal-launch-mode" class="form-select" onchange="syncFormToJson()">
+              <option value="bridge" ${nSpec.launch_mode === 'bridge' ? 'selected' : ''}>bridge</option>
+              <option value="ccb" ${nSpec.launch_mode === 'ccb' ? 'selected' : ''}>ccb</option>
+            </select>
+          </div>
+          <div style="display:flex; align-items:center; padding-top:20px">
+            <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer">
+              <input type="checkbox" id="modal-launch-mode-locked" ${nSpec.launch_mode_locked ? 'checked' : ''} onchange="syncFormToJson()">
+              <span class="form-label" style="display:inline; margin:0">Mode Locked</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="section-deprecated-fields" style="margin-bottom:12px; opacity:0.6">
+          <details>
+            <summary style="font-size:11px; color:var(--text-muted); cursor:pointer">Deprecated Fields (Legacy v5.0 compat)</summary>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px">
+              <div>
+                <label class="form-label" style="font-size:10px">Executor Type</label>
+                <select id="modal-executor-type" class="form-select" style="font-size:11px" onchange="setExecutorType(this.value); syncFormToJson()">
+                  <option value="api_call" ${editExecutorType === 'api_call' ? 'selected' : ''}>api_call</option>
+                  <option value="solo_agent" ${editExecutorType === 'solo_agent' ? 'selected' : ''}>solo_agent</option>
+                  <option value="multi_agent" ${editExecutorType === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label" style="font-size:10px">Session Mode</label>
+                <select id="modal-session-mode" class="form-select" style="font-size:11px" onchange="_currentSessionMode=this.value; syncFormToJson()">
+                  <option value="fresh" ${editSessionMode === 'fresh' ? 'selected' : ''}>fresh</option>
+                  <option value="iterative" ${editSessionMode === 'iterative' ? 'selected' : ''}>iterative</option>
+                </select>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div id="section-attempt-context" style="margin-bottom:12px">
@@ -3790,7 +4081,7 @@ async function openEditSpecModal(taskId) {
                 <tbody>
                   ${COLLAB_ROLES_EDIT.map(r => {
                     const opts = COLLAB_PROVIDERS_EDIT.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
-                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px">${opts}</select></td></tr>`;
+                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px" onchange="syncFormToJson()">${opts}</select></td></tr>`;
                   }).join('')}
                 </tbody>
               </table>

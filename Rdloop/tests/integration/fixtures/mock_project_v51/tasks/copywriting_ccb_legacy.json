@@ -1,0 +1,23 @@
+{
+  "schema_version": "v5",
+  "task_id": "copywriting_ccb_legacy",
+  "executor_type": "api_call",
+  "session_mode": "iterative",
+  "run_surface": "visual_ccb",
+  "repo_path": "__REPO__",
+  "goal": "Draft concise release copy",
+  "acceptance": "Clear value proposition and concise language",
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "judge_enabled": true,
+  "agent_config": {
+    "max_attempts": 1,
+    "auto_pass_threshold": 0.8,
+    "knowledge_shards": [],
+    "provider": "claude"
+  },
+  "collab_roles": {
+    "executor": "claude",
+    "reviewer": "claude"
+  }
+}

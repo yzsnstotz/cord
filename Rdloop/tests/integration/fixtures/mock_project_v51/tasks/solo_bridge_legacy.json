@@ -1,0 +1,25 @@
+{
+  "schema_version": "v5",
+  "task_id": "solo_bridge_legacy",
+  "executor_type": "solo_agent",
+  "session_mode": "continuous",
+  "run_surface": "bridge",
+  "repo_path": "__REPO__",
+  "goal": "Implement a tiny utility with one provider across all roles",
+  "acceptance": "Flow completes without role routing errors",
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "judge_enabled": true,
+  "agent_config": {
+    "max_attempts": 1,
+    "auto_pass_threshold": 0.85,
+    "knowledge_shards": [],
+    "provider": "claude"
+  },
+  "collab_roles": {
+    "pm": "claude",
+    "designer": "claude",
+    "executor": "claude",
+    "reviewer": "claude"
+  }
+}

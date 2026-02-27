@@ -1,0 +1,9 @@
+{
+  "task_id": "copy_legacy",
+  "executor_type": "api_call",
+  "session_mode": "fresh",
+  "workflow_mode": "single",
+  "execution_mode": "semi-auto",
+  "goal": "write release copy",
+  "acceptance": "300 words"
+}

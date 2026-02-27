@@ -1,0 +1,8 @@
+{
+  "task_id": "multi_legacy",
+  "executor_type": "multi_agent",
+  "session_mode": "continuous",
+  "execution_mode": "auto",
+  "goal": "integrate payment",
+  "acceptance": "e2e pass"
+}

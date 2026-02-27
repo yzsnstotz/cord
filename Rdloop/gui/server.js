@@ -481,10 +481,10 @@ app.get('/api/tasks', (req, res) => {
         return null;
       }
       const taskJson = readJSON(path.join(OUT_DIR, taskId, 'task.json'));
-      const run_surface = taskJson?.run_surface === 'visual_ccb'
-        ? 'visual_ccb'
-        : ((taskJson?.execution_mode === 'semi-auto') ? 'visual_ccb' : 'bridge');
-      const execution_mode = run_surface === 'visual_ccb' ? 'semi-auto' : 'auto';
+      const task_type = taskJson?.task_type || mapLegacyExecutorTypeToTaskType(taskJson?.executor_type) || 'solo';
+      const launch_mode = taskJson?.launch_mode || inferLaunchModeFromLegacy(taskJson);
+      const launch_mode_locked = taskJson?.launch_mode_locked ?? false;
+      
       return {
         task_id: taskId,
         state,
@@ -492,8 +492,9 @@ app.get('/api/tasks', (req, res) => {
         last_decision: status?.last_decision || '',
         message: status?.message || '',
         updated_at: updatedAt,
-        run_surface,
-        execution_mode,
+        task_type,
+        launch_mode,
+        launch_mode_locked,
         _rank: stateRank(state)
       };
     }).filter(Boolean);
@@ -580,6 +581,13 @@ app.get('/api/task/:taskId', validateTaskId, (req, res) => {
   }
   const finalSummary = readJSON(path.join(taskDir, 'final_summary.json'));
   const events = readEvents(path.join(taskDir, 'events.jsonl'));
+
+  if (status) {
+    status.task_type = taskJson?.task_type || mapLegacyExecutorTypeToTaskType(taskJson?.executor_type) || 'solo';
+    status.launch_mode = taskJson?.launch_mode || inferLaunchModeFromLegacy(taskJson);
+    status.launch_mode_locked = taskJson?.launch_mode_locked ?? false;
+    status.launch_mode_source = 'task_json'; // Default for existing tasks
+  }
 
   // Scan attempts
   const attempts = [];
@@ -908,6 +916,78 @@ app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
   res.json({ ok: true, nonce: control.nonce });
 });
 
+// POST /api/run/create — §API Contract (v5.1.*)
+app.post('/api/run/create', requireWritable, (req, res) => {
+  const { task_id, task_snapshot, runtime_overrides, save_and_lock } = req.body || {};
+  if (!task_id || !isValidTaskId(task_id)) {
+    return res.status(400).json({ error: 'Invalid task_id' });
+  }
+  const taskDir = path.join(OUT_DIR, task_id);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task instance directory not found' });
+  }
+
+  // Ghost process / lock check
+  const force = req.query.force === '1';
+  const lockDir = path.join(taskDir, '.lockdir');
+  if (!force && fs.existsSync(lockDir)) {
+    return res.status(409).json({ error: 'Task is already running (lockdir exists)' });
+  }
+
+  const taskJsonPath = path.join(taskDir, 'task.json');
+  let taskJson = readJSON(taskJsonPath) || {};
+
+  // Resolve launch_mode
+  let finalLaunchMode = runtime_overrides?.launch_mode || task_snapshot?.launch_mode || taskJson.launch_mode;
+  let launchModeSource = runtime_overrides?.launch_mode ? 'runtime_override' : 'task_json';
+
+  if (!finalLaunchMode) {
+    return res.status(400).json({ error: 'launch_mode is required but missing in both snapshot and overrides' });
+  }
+
+  // Save & Lock logic (F3)
+  if (save_and_lock) {
+    taskJson.launch_mode = finalLaunchMode;
+    taskJson.launch_mode_locked = true;
+    atomicWriteJSON(taskJsonPath, taskJson);
+    launchModeSource = 'task_json'; // now it's in the json
+  } else {
+    // If not saving, we still need to tell coordinator which mode to use.
+    // In current Cord implementation, coordinator reads task.json.
+    // We bridge this by applying temporary override to task.json if modes differ.
+    if (finalLaunchMode && finalLaunchMode !== taskJson.launch_mode) {
+      applyRunSurfaceOverrideToTaskJson(taskJsonPath, finalLaunchMode === 'ccb' ? 'visual_ccb' : 'bridge');
+    }
+  }
+
+  // Spawn coordinator
+  const guiDir = path.join(taskDir, 'gui');
+  if (!fs.existsSync(guiDir)) fs.mkdirSync(guiDir, { recursive: true });
+  const logFile = path.join(guiDir, 'run.log');
+  const logFd = fs.openSync(logFile, 'a');
+
+  const child = spawn('bash', [COORDINATOR, '--continue', task_id], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    cwd: path.resolve(__dirname, '..'),
+    env: getCoordinatorEnv()
+  });
+
+  fs.writeFileSync(path.join(guiDir, 'runner.pid'), String(child.pid));
+  child.unref();
+
+  res.json({
+    run_id: crypto.randomUUID(),
+    resolved_task_view: {
+      task_id,
+      task_type: task_snapshot?.task_type || taskJson.task_type || 'solo',
+      launch_mode: finalLaunchMode,
+      launch_mode_locked: save_and_lock ? true : (task_snapshot?.launch_mode_locked ?? taskJson.launch_mode_locked ?? false),
+      launch_mode_source
+    }
+  });
+});
+
 // POST /api/task/:taskId/run — trigger coordinator
 app.post('/api/task/:taskId/run', requireWritable, validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
@@ -1104,6 +1184,74 @@ app.get('/api/tasks/:taskId/status', validateTaskId, (req, res) => {
   if (status.state) status.state = normalizeState(status.state);
   if (status.updated_at) status.updated_at = normalizeUpdatedAt(status.updated_at);
   res.json(status);
+});
+
+// GET /api/task/:taskId/panes — v5.1 pane state view from task_state.json sessions/panes.
+app.get('/api/task/:taskId/panes', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  const taskJson = readJSON(path.join(taskDir, 'task.json')) || {};
+  const fallbackLaunchMode = taskJson.launch_mode || 'ccb';
+  const taskState = readJSON(path.join(taskDir, 'task_state.json')) || {};
+
+  let panes = [];
+  if (Array.isArray(taskState.panes)) {
+    panes = taskState.panes.map(p => ({
+      pane: p.pane || '',
+      status: p.status || 'waiting',
+      session_id: p.session_id || '',
+      launch_mode: p.launch_mode || fallbackLaunchMode
+    }));
+  } else if (taskState.sessions && typeof taskState.sessions === 'object') {
+    panes = Object.entries(taskState.sessions).map(([pane, sid]) => ({
+      pane,
+      status: 'unknown',
+      session_id: sid,
+      launch_mode: fallbackLaunchMode
+    }));
+  }
+
+  res.json({ task_id: taskId, panes });
+});
+
+// POST /api/task/:taskId/launch-mode — v5.1 launch_mode selector, atomic write.
+app.post('/api/task/:taskId/launch-mode', requireWritable, validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  const launchMode = String(body.launch_mode || '').trim().toLowerCase();
+  if (!['ccb', 'bridge'].includes(launchMode)) {
+    return res.status(400).json({ error: 'launch_mode must be ccb or bridge' });
+  }
+  const lockProvided = body.launch_mode_locked !== undefined;
+  if (lockProvided && typeof body.launch_mode_locked !== 'boolean') {
+    return res.status(400).json({ error: 'launch_mode_locked must be boolean' });
+  }
+
+  const taskPath = path.join(taskDir, 'task.json');
+  const task = readJSON(taskPath);
+  if (!task || typeof task !== 'object') {
+    return res.status(500).json({ error: 'Failed to read task.json' });
+  }
+  task.launch_mode = launchMode;
+  if (lockProvided) task.launch_mode_locked = body.launch_mode_locked;
+
+  try {
+    atomicWriteJSON(taskPath, task);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write task.json: ${err.message}` });
+  }
+
+  auditLog({ action: 'launch_mode_select', task_id: taskId, launch_mode: launchMode, locked: task.launch_mode_locked === true });
+  res.json({ ok: true, task_id: taskId, launch_mode: task.launch_mode, launch_mode_locked: task.launch_mode_locked === true });
 });
 
 // POST /api/tasks/:taskId/record-hidden — record task as removed from sidebar (for _deleted folder)
@@ -3621,9 +3769,120 @@ function validateTaskSpecId(id) {
   return VALID_TASK_ID.test(id);
 }
 
+function mapLegacyExecutorTypeToTaskType(executorType) {
+  switch (executorType) {
+    case 'api_call': return 'copywriting';
+    case 'solo_agent': return 'solo';
+    case 'multi_agent': return 'multi_agent';
+    default: return '';
+  }
+}
+
+// GET /api/task/schema/v5.1 — §API Contract (must match v5.1.* spec)
+app.get('/api/task/schema/v5.1', (req, res) => {
+  res.json({
+    version: 'v5.1',
+    enums: {
+      task_type: ['copywriting', 'solo', 'multi_agent'],
+      launch_mode: ['ccb', 'bridge']
+    },
+    required: ['task_type', 'launch_mode', 'launch_mode_locked']
+  });
+});
+
+// POST /api/task/normalize/v5.1 — UI-level migration preview (F2)
+app.post('/api/task/normalize/v5.1', (req, res) => {
+  const { task_json } = req.body || {};
+  if (!task_json || typeof task_json !== 'object') {
+    return res.status(400).json({ error: 'task_json object is required' });
+  }
+  const result = normalizeTaskV51FromLegacy(task_json);
+  res.json({
+    normalized_task: result.spec,
+    mapping_notes: result.warnings.join('; ') || 'Already v5.1 compliant.'
+  });
+});
+
+function mapLegacyExecutorTypeToTaskType(execType) {
+  switch (execType) {
+    case 'api_call': return 'copywriting';
+    case 'solo_agent': return 'solo';
+    case 'multi_agent': return 'multi_agent';
+    default: return '';
+  }
+}
+
+function mapLegacyWorkflowModeToTaskType(workflowMode) {
+  switch (workflowMode) {
+    case 'single': return 'copywriting';
+    case 'solo': return 'solo';
+    case 'collab': return 'multi_agent';
+    default: return '';
+  }
+}
+
+function inferLaunchModeFromLegacy(spec) {
+  if (!spec) return 'bridge';
+  if (spec.run_surface === 'visual_ccb' || spec.execution_mode === 'semi-auto' || spec.channel_type === 'ccb') {
+    return 'ccb';
+  }
+  if (spec.run_surface === 'bridge' || spec.execution_mode === 'auto' || spec.channel_type === 'coding-agent-cli' || spec.channel_type === 'cliapi-proxy') {
+    return 'bridge';
+  }
+  return 'bridge'; // default
+}
+
+function normalizeTaskV51FromLegacy(spec) {
+  const out = { ...(spec || {}) };
+  const warnings = [];
+  const deprecations = [];
+
+  const legacyFields = ['executor_type', 'workflow_mode', 'session_mode', 'channel_type', 'run_surface', 'execution_mode'];
+  for (const f of legacyFields) {
+    if (out[f] !== undefined) {
+      deprecations.push({ field: f, message: 'deprecated in v5.1' });
+    }
+  }
+
+  if (!out.task_type) {
+    let mapped = '';
+    if (out.executor_type) {
+      mapped = mapLegacyExecutorTypeToTaskType(String(out.executor_type).trim());
+      if (mapped) warnings.push(`executor_type='${out.executor_type}' mapped to task_type='${mapped}'`);
+    } else if (out.workflow_mode) {
+      mapped = mapLegacyWorkflowModeToTaskType(String(out.workflow_mode).trim());
+      if (mapped) warnings.push(`workflow_mode='${out.workflow_mode}' mapped to task_type='${mapped}'`);
+    }
+    if (mapped) out.task_type = mapped;
+  }
+
+  if (!out.launch_mode) {
+    let mapped = '';
+    if (out.run_surface === 'visual_ccb' || out.execution_mode === 'semi-auto' || out.channel_type === 'ccb') {
+      mapped = 'ccb';
+    } else if (out.run_surface === 'bridge' || out.execution_mode === 'auto' || out.channel_type === 'coding-agent-cli' || out.channel_type === 'cliapi-proxy') {
+      mapped = 'bridge';
+    }
+    if (mapped) {
+      out.launch_mode = mapped;
+      warnings.push(`legacy execution fields mapped to launch_mode='${mapped}'`);
+    }
+  }
+
+  if (!out.task_type) out.task_type = 'solo';
+  if (!out.launch_mode) out.launch_mode = 'bridge';
+  if (out.launch_mode_locked === undefined) {
+    out.launch_mode_locked = false;
+    warnings.push('launch_mode_locked defaulted to false');
+  }
+
+  return { spec: out, warnings, deprecations };
+}
+
 // A3-1/A3-2: Validate task spec data — JSON already parsed; optional schema-style checks
-function validateTaskSpecData(spec) {
+function validateTaskSpecData(spec, options = {}) {
   const errors = [];
+  const v51Strict = options.v51Strict === true;
   if (!spec || typeof spec !== 'object') {
     return { valid: false, errors: ['spec must be an object'] };
   }
@@ -3633,8 +3892,19 @@ function validateTaskSpecData(spec) {
   if (spec.max_attempts !== undefined && (typeof spec.max_attempts !== 'number' || spec.max_attempts < 1 || spec.max_attempts > 50)) {
     errors.push('max_attempts: must be number between 1 and 50');
   }
-  if (spec.task_type && !['requirements_doc', 'engineering_impl', 'douyin_script', 'storyboard', 'paid_mini_drama', ''].includes(spec.task_type)) {
+  const allowedTaskTypes = v51Strict
+    ? ['copywriting', 'solo', 'multi_agent']
+    : ['requirements_doc', 'engineering_impl', 'douyin_script', 'storyboard', 'paid_mini_drama', 'copywriting', 'solo', 'multi_agent', ''];
+  if (v51Strict && !spec.task_type) {
+    errors.push('task_type: required');
+  } else if (spec.task_type && !allowedTaskTypes.includes(spec.task_type)) {
     errors.push('task_type: invalid enum value');
+  }
+  if (spec.launch_mode !== undefined && !['ccb', 'bridge'].includes(spec.launch_mode)) {
+    errors.push('launch_mode: must be ccb or bridge');
+  }
+  if (spec.launch_mode_locked !== undefined && typeof spec.launch_mode_locked !== 'boolean') {
+    errors.push('launch_mode_locked: must be boolean');
   }
   if (spec.scoring_mode && !['rubric_analytic', 'holistic_impression', ''].includes(spec.scoring_mode)) {
     errors.push('scoring_mode: invalid enum value');
@@ -3654,42 +3924,6 @@ function validateTaskSpecData(spec) {
   if (spec.workflow_mode !== undefined && !['single', 'solo', 'collab'].includes(spec.workflow_mode)) {
     errors.push('workflow_mode: must be single, solo, or collab');
   }
-  // v5.0 validation
-  if (spec.executor_type !== undefined && !['api_call', 'solo_agent', 'multi_agent'].includes(spec.executor_type)) {
-    errors.push('executor_type: must be api_call, solo_agent, or multi_agent');
-  }
-  if (spec.session_mode !== undefined && !['fresh', 'iterative', 'continuous'].includes(spec.session_mode)) {
-    errors.push('session_mode: must be fresh, iterative, or continuous');
-  }
-  // v5.0 constraint: api_call cannot use continuous; solo_agent/multi_agent cannot use fresh/iterative
-  if (spec.executor_type === 'api_call' && spec.session_mode === 'continuous') {
-    errors.push('session_mode: api_call does not support continuous');
-  }
-  if ((spec.executor_type === 'solo_agent' || spec.executor_type === 'multi_agent') && (spec.session_mode === 'fresh' || spec.session_mode === 'iterative')) {
-    errors.push('session_mode: ' + spec.executor_type + ' only supports continuous');
-  }
-  if (spec.executor_type === 'multi_agent' && spec.run_surface === 'bridge') {
-    errors.push('run_surface: multi_agent only supports visual_ccb');
-  }
-  if (spec.executor_type === 'solo_agent') {
-    const effectiveRunSurface = spec.run_surface || (spec.execution_mode === 'semi-auto' ? 'visual_ccb' : 'bridge');
-    if (effectiveRunSurface === 'bridge') {
-      const providerRaw = String(
-        (spec.coder_model != null ? spec.coder_model : (spec.agent_config && spec.agent_config.provider)) || ''
-      ).toLowerCase();
-      const providerResolved = providerRaw.includes('codex') ? 'codex'
-        : providerRaw.includes('cursor') ? 'cursor'
-        : providerRaw.includes('antigravity') ? 'antigravity'
-        : providerRaw.includes('claude') ? 'claude'
-        : providerRaw.includes('gemini') ? 'gemini'
-        : providerRaw.includes('opencode') ? 'opencode'
-        : providerRaw.includes('droid') ? 'droid'
-        : '';
-      if (providerResolved && !['claude', 'codex', 'cursor', 'antigravity', 'gemini'].includes(providerResolved)) {
-        errors.push('solo_agent bridge judge unsupported for provider: ' + providerResolved + ' (supported: claude, codex, cursor, antigravity, gemini)');
-      }
-    }
-  }
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
   if (spec.collab_roles !== undefined && spec.collab_roles !== null) {
     if (typeof spec.collab_roles !== 'object' || Array.isArray(spec.collab_roles)) {
@@ -3700,6 +3934,28 @@ function validateTaskSpecData(spec) {
         if (provider !== undefined && provider !== null && !COLLAB_PROVIDERS.includes(normalizedProvider)) {
           errors.push('collab_roles.' + role + ': must be one of ' + COLLAB_PROVIDERS.join(', '));
         }
+      }
+    }
+  }
+
+  // v5.1 task_type matrix checks
+  if (spec.task_type === 'copywriting') {
+    const roles = spec.collab_roles || {};
+    if (!roles.executor || !roles.reviewer) {
+      errors.push('task_type=copywriting requires collab_roles.executor and collab_roles.reviewer');
+    }
+    const invalidRoles = Object.keys(roles).filter(r => !['executor', 'reviewer'].includes(r));
+    if (invalidRoles.length > 0) {
+      errors.push('task_type=copywriting only allows executor/reviewer in collab_roles');
+    }
+  }
+  if (spec.task_type === 'solo') {
+    const roles = spec.collab_roles || {};
+    const providers = Object.values(roles).map(v => normalizeProviderAlias(v)).filter(Boolean);
+    if (providers.length > 1) {
+      const uniq = [...new Set(providers)];
+      if (uniq.length > 1) {
+        errors.push('task_type=solo requires the same provider for all collab_roles');
       }
     }
   }
@@ -3772,14 +4028,16 @@ app.post('/api/task_specs', requireWritable, (req, res) => {
   if (!spec || typeof spec !== 'object') {
     return res.status(400).json({ error: 'spec object is required' });
   }
-  const validation = validateTaskSpecData(spec);
+  const normalized = normalizeTaskV51FromLegacy(spec);
+  const normalizedSpec = normalized.spec;
+  const validation = validateTaskSpecData(normalizedSpec);
   if (!validation.valid) {
     return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
   }
 
   // Normalize task_type alias
-  if (spec.task_type === 'engineering_implementation') {
-    spec.task_type = 'engineering_impl';
+  if (normalizedSpec.task_type === 'engineering_implementation') {
+    normalizedSpec.task_type = 'engineering_impl';
   }
 
   // Choose save directory: tasks/ preferred, fallback to examples/
@@ -3801,7 +4059,7 @@ app.post('/api/task_specs', requireWritable, (req, res) => {
     return res.status(409).json({ error: `Task spec '${task_id}' already exists` });
   }
 
-  const data = { ...spec, task_id, created_at: spec.created_at || new Date().toISOString() };
+  const data = { ...normalizedSpec, task_id, created_at: normalizedSpec.created_at || new Date().toISOString() };
   if (data.repo_path) ensureRepoPathExists(data.repo_path);
 
   try {
@@ -3811,7 +4069,7 @@ app.post('/api/task_specs', requireWritable, (req, res) => {
   }
 
   auditLog({ action: 'task_spec_create', task_id, source_dir: path.basename(saveDir) });
-  res.json({ ok: true, task_id, source_dir: path.basename(saveDir) });
+  res.json({ ok: true, task_id, source_dir: path.basename(saveDir), warnings: normalized.warnings || [] });
 });
 
 // PUT /api/task_specs/:taskId — update an existing task spec (A2-5), A3 validation
@@ -3824,14 +4082,16 @@ app.put('/api/task_specs/:taskId', requireWritable, (req, res) => {
   if (!spec || typeof spec !== 'object') {
     return res.status(400).json({ error: 'spec object is required' });
   }
-  const validation = validateTaskSpecData(spec);
+  const normalized = normalizeTaskV51FromLegacy(spec);
+  const normalizedSpec = normalized.spec;
+  const validation = validateTaskSpecData(normalizedSpec);
   if (!validation.valid) {
     return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
   }
 
   // Normalize task_type alias
-  if (spec.task_type === 'engineering_implementation') {
-    spec.task_type = 'engineering_impl';
+  if (normalizedSpec.task_type === 'engineering_implementation') {
+    normalizedSpec.task_type = 'engineering_impl';
   }
 
   const found = findTaskSpec(taskId);
@@ -3839,7 +4099,7 @@ app.put('/api/task_specs/:taskId', requireWritable, (req, res) => {
     return res.status(404).json({ error: 'Task spec not found' });
   }
 
-  const data = { ...spec, task_id: taskId };
+  const data = { ...normalizedSpec, task_id: taskId };
   if (data.repo_path) ensureRepoPathExists(data.repo_path);
   try {
     atomicWriteJSON(found.filepath, data);
@@ -3848,7 +4108,7 @@ app.put('/api/task_specs/:taskId', requireWritable, (req, res) => {
   }
 
   auditLog({ action: 'task_spec_update', task_id: taskId, source_dir: path.basename(found.dir) });
-  res.json({ ok: true, task_id: taskId });
+  res.json({ ok: true, task_id: taskId, warnings: normalized.warnings || [] });
 });
 
 // DELETE /api/task_specs/:taskId — soft-delete to trash/ (A2-4)
@@ -3879,6 +4139,41 @@ app.delete('/api/task_specs/:taskId', requireWritable, (req, res) => {
 
   auditLog({ action: 'task_spec_delete', task_id: taskId, trash_path: trashPath });
   res.json({ ok: true, task_id: taskId, trash_path: trashPath });
+});
+
+// POST /api/tasks — v5.1 upsert task spec using task_type + launch_mode validation.
+app.post('/api/tasks', requireWritable, (req, res) => {
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  const taskId = String(body.task_id || '').trim();
+  if (!taskId || !validateTaskSpecId(taskId)) {
+    return res.status(400).json({ error: 'Invalid or missing task_id' });
+  }
+
+  const normalized = normalizeTaskV51FromLegacy(body);
+  const spec = normalized.spec;
+  const validation = validateTaskSpecData(spec, { v51Strict: true });
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+
+  const filepath = path.join(TASKS_DIR, `${taskId}.json`);
+  if (!filepath.startsWith(TASKS_DIR + path.sep)) {
+    return res.status(400).json({ error: 'Path traversal detected' });
+  }
+  if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
+
+  const existing = readJSON(filepath) || {};
+  const merged = { ...existing, ...spec, task_id: taskId };
+  if (!merged.created_at) merged.created_at = new Date().toISOString();
+
+  try {
+    atomicWriteJSON(filepath, merged);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write task spec: ${err.message}` });
+  }
+
+  auditLog({ action: 'task_upsert', task_id: taskId, warnings: normalized.warnings || [] });
+  res.json({ ok: true, task_id: taskId, warnings: normalized.warnings || [] });
 });
 
 // ── Solo Agent Progress API ──────────────────────────────────────────────────
