@@ -80,11 +80,7 @@ fi
   BRIDGE_DIR="$BRIDGE_DIR" \
   BRIDGE_SESSION_ID="$ATTEMPT_ID" \
   CLAUDE_CMD="$claude_cmd" \
-    node "$BRIDGE_INDEX" \
-      --bridge-dir "$BRIDGE_DIR" \
-      --session-id "$ATTEMPT_ID" \
-      --claude-cmd "$claude_cmd" \
-      -- -p "$instruction" --cwd "$worktree_dir" 2>&1
+    bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$ATTEMPT_ID' --claude-cmd '$claude_cmd' -- -p \"\$1\"" _ "$instruction" 2>&1
 
   echo "[CODER][claude-bridge] $(date -u +%Y-%m-%dT%H:%M:%SZ) Claude CLI bridge finished"
 } > "${attempt_dir}/coder/run.log" 2>&1

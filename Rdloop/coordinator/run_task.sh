@@ -1681,14 +1681,22 @@ run_attempt() {
       if [ "$executor_provider" = "mock" ]; then
         coder_type="mock"
       else
-        if [ "$run_surface" = "visual_ccb" ]; then coder_type="ccb"; else coder_type="bridge"; fi
+        if [ "$run_surface" = "visual_ccb" ]; then
+          coder_type="ccb"
+        else
+          coder_type=$(resolve_nonvisual_coder_type_v51 "$executor_provider")
+        fi
       fi
       if [ "$judge_enabled_flag" = "false" ]; then
         judge_type="none"
       elif [ "$reviewer_provider" = "mock" ]; then
         judge_type="mock"
       else
-        if [ "$run_surface" = "visual_ccb" ]; then judge_type="ccb"; else judge_type="bridge"; fi
+        if [ "$run_surface" = "visual_ccb" ]; then
+          judge_type="ccb"
+        else
+          judge_type=$(resolve_nonvisual_judge_type_v51 "$reviewer_provider")
+        fi
       fi
       ;;
     solo_agent)
@@ -1714,8 +1722,12 @@ run_attempt() {
           coder_type="ccb"
           if [ "$judge_enabled_flag" = "false" ]; then judge_type="none"; else judge_type="ccb"; fi
         else
-          coder_type="bridge"
-          if [ "$judge_enabled_flag" = "false" ]; then judge_type="none"; else judge_type="bridge"; fi
+          coder_type=$(resolve_nonvisual_coder_type_v51 "$solo_provider")
+          if [ "$judge_enabled_flag" = "false" ]; then
+            judge_type="none"
+          else
+            judge_type=$(resolve_nonvisual_judge_type_v51 "$reviewer_provider")
+          fi
         fi
       fi
       ;;
@@ -1723,14 +1735,22 @@ run_attempt() {
       if [ "$executor_provider" = "mock" ]; then
         coder_type="mock"
       else
-        if [ "$run_surface" = "visual_ccb" ]; then coder_type="ccb"; else coder_type="bridge"; fi
+        if [ "$run_surface" = "visual_ccb" ]; then
+          coder_type="ccb"
+        else
+          coder_type=$(resolve_nonvisual_coder_type_v51 "$executor_provider")
+        fi
       fi
       if [ "$judge_enabled_flag" = "false" ]; then
         judge_type="none"
       elif [ "$reviewer_provider" = "mock" ]; then
         judge_type="mock"
       else
-        if [ "$run_surface" = "visual_ccb" ]; then judge_type="ccb"; else judge_type="bridge"; fi
+        if [ "$run_surface" = "visual_ccb" ]; then
+          judge_type="ccb"
+        else
+          judge_type=$(resolve_nonvisual_judge_type_v51 "$reviewer_provider")
+        fi
       fi
       ;;
   esac
@@ -1862,20 +1882,20 @@ run_attempt() {
   else
     local c_s_epoch; c_s_epoch=$(date +%s)
     local coder_session_id="" coder_req_code=""
-    if [ "$coder_script_suffix" = "ccb" ] || [ "$coder_script_suffix" = "bridge" ]; then
+    if [ "$run_surface" = "visual_ccb" ] || [ "$run_surface" = "bridge" ]; then
       coder_session_id="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "$att_num")"
       write_event_ext "session_id_assigned" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\",\"attempt\":${att_num}}"
-      if [ "$coder_script_suffix" = "ccb" ]; then
+      if [ "$run_surface" = "visual_ccb" ]; then
         coder_req_code="$("$REQ_CODE_GEN" "$coder_session_id")"
         write_event_ext "req_code_assigned" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\",\"attempt\":${att_num}}"
         write_event_ext "ccb_call" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\"}"
       else
-        write_event_ext "bridge_call" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\"}"
+        write_event_ext "bridge_call" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\",\"provider\":\"${ccb_coder_provider}\"}"
       fi
     fi
     local coder_channel_name="local"
-    [ "$coder_script_suffix" = "ccb" ] && coder_channel_name="ccb"
-    [ "$coder_script_suffix" = "bridge" ] && coder_channel_name="bridge"
+    [ "$run_surface" = "visual_ccb" ] && coder_channel_name="ccb"
+    [ "$run_surface" = "bridge" ] && coder_channel_name="bridge"
     local coder_dispatch_provider="${ccb_coder_provider:-$coder_type}"
     write_agent_dispatch_log "coder" "executor" "$coder_channel_name" "$coder_script" "$ifile" "$coder_session_id" "$coder_req_code" "$coder_dispatch_provider" "coder_execution"
     # timeout
@@ -2170,20 +2190,20 @@ PY
   # B4-7: run.log records Judge temperature=0 (deterministic output)
   log_info "Judge run with temperature=0 (B4-7)"
   local judge_session_id="" judge_req_code=""
-  if [ "$judge_script_suffix" = "ccb" ] || [ "$judge_script_suffix" = "bridge" ]; then
+  if [ "$run_surface" = "visual_ccb" ] || [ "$run_surface" = "bridge" ]; then
     judge_session_id="$("$SESSION_ID_GEN" "$TASK_ID" "reviewer" "$att_num")"
     write_event_ext "session_id_assigned" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\",\"attempt\":${att_num}}"
-    if [ "$judge_script_suffix" = "ccb" ]; then
+    if [ "$run_surface" = "visual_ccb" ]; then
       judge_req_code="$("$REQ_CODE_GEN" "$judge_session_id")"
       write_event_ext "req_code_assigned" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\",\"attempt\":${att_num}}"
       write_event_ext "ccb_call" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\"}"
     else
-      write_event_ext "bridge_call" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\"}"
+      write_event_ext "bridge_call" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\",\"provider\":\"${ccb_judge_provider}\"}"
     fi
   fi
   local judge_channel_name="local"
-  [ "$judge_script_suffix" = "ccb" ] && judge_channel_name="ccb"
-  [ "$judge_script_suffix" = "bridge" ] && judge_channel_name="bridge"
+  [ "$run_surface" = "visual_ccb" ] && judge_channel_name="ccb"
+  [ "$run_surface" = "bridge" ] && judge_channel_name="bridge"
   local judge_dispatch_provider="${ccb_judge_provider:-$judge_type}"
   write_agent_dispatch_log "judge" "reviewer" "$judge_channel_name" "$judge_script" "$jrequest" "$judge_session_id" "$judge_req_code" "$judge_dispatch_provider" "judge_execution"
 
@@ -2596,6 +2616,50 @@ normalize_provider_v51() {
   esac
 }
 
+resolve_nonvisual_coder_type_v51() {
+  local provider
+  provider=$(normalize_provider_v51 "${1:-}")
+  case "$provider" in
+    codex) echo "codex_cli" ;;
+    gemini) echo "antigravity-cli" ;;
+    cursor) echo "cursor_cli" ;;
+    bridge|claude|"") echo "bridge" ;;
+    *) echo "bridge" ;;
+  esac
+}
+
+resolve_nonvisual_judge_type_v51() {
+  local provider
+  provider=$(normalize_provider_v51 "${1:-}")
+  case "$provider" in
+    codex) echo "codex_cli" ;;
+    gemini) echo "antigravity-cli" ;;
+    cursor) echo "cursor_cli" ;;
+    bridge|claude|"") echo "bridge" ;;
+    *) echo "bridge" ;;
+  esac
+}
+
+resolve_role_adapter_suffix_v51() {
+  local provider="${1:-}" launch_mode="${2:-}"
+  provider=$(normalize_provider_v51 "$provider")
+  if [ "$provider" = "mock" ]; then
+    echo "mock"
+    return 0
+  fi
+  if [ "$launch_mode" = "ccb" ]; then
+    echo "ccb"
+    return 0
+  fi
+  case "$provider" in
+    codex) echo "codex" ;;
+    gemini) echo "antigravity" ;;
+    cursor) echo "cursor" ;;
+    bridge|claude|"") echo "bridge" ;;
+    *) echo "bridge" ;;
+  esac
+}
+
 resolve_launch_mode_v51() {
   local locked launch_mode waited cfg mode_from_cfg
   locked=$(json_read "$TASK_JSON" "launch_mode_locked" "false")
@@ -2725,12 +2789,8 @@ run_role_action_v51() {
   prompt_path=$(build_role_instruction_v51 "$role" "$role_dir" "$context" "$task_type" "$provider")
   timeout_s=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
 
-  role_script_suffix="$launch_mode"
+  role_script_suffix=$(resolve_role_adapter_suffix_v51 "$provider" "$launch_mode")
   role_script="${LIB_DIR}/call_coder_${role_script_suffix}.sh"
-  if [ "$provider" = "mock" ]; then
-    role_script_suffix="mock"
-    role_script="${LIB_DIR}/call_coder_mock.sh"
-  fi
   if [ ! -f "$role_script" ]; then
     enter_paused "PAUSED_ROLE_FAILED" \
       "Role ${role} adapter missing: ${role_script}" \

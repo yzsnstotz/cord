@@ -9,6 +9,35 @@ RUN_TASK="${RDLOOP_ROOT}/coordinator/run_task.sh"
 PASS=0; FAIL=0; TOTAL=0
 TMPDIR=$(mktemp -d)
 trap "rm -rf '$TMPDIR'" EXIT
+MOCK_BIN="${TMPDIR}/bin"
+mkdir -p "$MOCK_BIN"
+
+cat > "${MOCK_BIN}/codex" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "exec" ]; then
+  shift || true
+  for a in "$@"; do
+    if [ "$a" = "--ephemeral" ]; then
+      echo "[mock-codex-coder] ok"
+      exit 0
+    fi
+  done
+  cat <<'JSON'
+{
+  "schema_version": "v1",
+  "decision": "PASS",
+  "reasons": ["mock codex judge pass"],
+  "next_instructions": "",
+  "questions_for_user": []
+}
+JSON
+  exit 0
+fi
+echo "mock codex: unsupported args: $*" >&2
+exit 2
+EOS
+chmod +x "${MOCK_BIN}/codex"
 
 assert_ok() {
   local label="$1"
@@ -60,7 +89,7 @@ run_case() {
 JSON
 
   set +e
-  RDLOOP_OUT_DIR="${TMPDIR}/out" RDLOOP_WORKTREES_DIR="${TMPDIR}/wt" bash "$RUN_TASK" "$spec" >"${TMPDIR}/${task_id}.log" 2>&1
+  PATH="${MOCK_BIN}:$PATH" RDLOOP_OUT_DIR="${TMPDIR}/out" RDLOOP_WORKTREES_DIR="${TMPDIR}/wt" bash "$RUN_TASK" "$spec" >"${TMPDIR}/${task_id}.log" 2>&1
   local rc=$?
   set -e
   assert_ok "${task_id} run rc=0" bash -lc '[ "'$rc'" = "0" ]'
@@ -144,7 +173,7 @@ import json
 n=0
 for line in open("'$events'", encoding="utf-8"):
   e=json.loads(line)
-  if e.get("type")=="ccb_call":
+  if e.get("type")=="ccb_call" and e.get("role") in ("pm","designer"):
     assert e.get("session_id") and e.get("req_code")
     n+=1
 assert n=='$expected_role_starts'
@@ -155,7 +184,7 @@ import json
 n=0
 for line in open("'$events'", encoding="utf-8"):
   e=json.loads(line)
-  if e.get("type")=="bridge_call":
+  if e.get("type")=="bridge_call" and e.get("role") in ("pm","designer"):
     assert e.get("session_id")
     n+=1
 assert n=='$expected_role_starts'
@@ -208,12 +237,85 @@ PY'
   fi
 }
 
+run_bridge_codex_case() {
+  local task_id="solo_bridge_codex"
+  local spec="${TMPDIR}/${task_id}.json"
+  local repo_path="${TMPDIR}/repo_${task_id}"
+  mkdir -p "$repo_path"
+  git -C "$repo_path" init -q
+  git -C "$repo_path" checkout -q -b main
+  echo "seed" > "${repo_path}/README.md"
+  git -C "$repo_path" add README.md
+  git -C "$repo_path" -c user.name=rdloop-test -c user.email=rdloop-test@example.com commit -q -m "init"
+
+  cat > "$spec" <<JSON
+{
+  "schema_version": "v51",
+  "task_id": "${task_id}",
+  "task_type": "solo",
+  "launch_mode": "bridge",
+  "launch_mode_locked": true,
+  "collab_roles": {"pm":"codex","designer":"codex","executor":"codex","reviewer":"codex"},
+  "agent_config": {"provider":"codex"},
+  "repo_path": "${repo_path}",
+  "base_ref": "main",
+  "goal": "test",
+  "acceptance": "ok",
+  "test_cmd": "true",
+  "max_attempts": 1
+}
+JSON
+
+  set +e
+  PATH="${MOCK_BIN}:$PATH" RDLOOP_OUT_DIR="${TMPDIR}/out" RDLOOP_WORKTREES_DIR="${TMPDIR}/wt" bash "$RUN_TASK" "$spec" >"${TMPDIR}/${task_id}.log" 2>&1
+  local rc=$?
+  set -e
+  assert_ok "${task_id} run rc=0" bash -lc '[ "'$rc'" = "0" ]'
+
+  local tdir="${TMPDIR}/out/${task_id}"
+  local events="${tdir}/events.jsonl"
+  local status="${tdir}/status.json"
+  assert_ok "${task_id} status READY_FOR_REVIEW" bash -lc 'grep -q "READY_FOR_REVIEW" "'$status'"'
+  assert_ok "${task_id} role adapters use codex (not bridge)" bash -lc 'python3 - <<PY
+import json
+scripts=[]
+for line in open("'$events'", encoding="utf-8"):
+  e=json.loads(line)
+  if e.get("type")=="role_action_started":
+    scripts.append(e.get("script",""))
+assert scripts and all(s.endswith("call_coder_codex.sh") for s in scripts), scripts
+PY'
+  assert_ok "${task_id} executor/reviewer use codex_cli in attempt" bash -lc 'python3 - <<PY
+import json
+coder_ok=False
+judge_ok=False
+for line in open("'$events'", encoding="utf-8"):
+  e=json.loads(line)
+  if e.get("type")=="CODER_STARTED":
+    coder_ok = "coder=codex_cli" in e.get("summary","")
+  if e.get("type")=="JUDGE_STARTED":
+    judge_ok = "judge=codex_cli" in e.get("summary","")
+assert coder_ok and judge_ok, (coder_ok, judge_ok)
+PY'
+  assert_ok "${task_id} bridge channel still emits provider-tagged bridge_call" bash -lc 'python3 - <<PY
+import json
+n=0
+for line in open("'$events'", encoding="utf-8"):
+  e=json.loads(line)
+  if e.get("type")=="bridge_call":
+    if e.get("provider")=="codex":
+      n += 1
+assert n >= 2, n
+PY'
+}
+
 echo "=== Test Suite: run_task_routing_v51 ==="
 for tt in copywriting solo multi_agent; do
   for lm in ccb bridge; do
     run_case "$tt" "$lm"
   done
 done
+run_bridge_codex_case
 
 # missing task_type should fail in v51 signature
 bad="${TMPDIR}/missing_task_type.json"

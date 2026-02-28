@@ -88,23 +88,12 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
 
   if [ -n "$tout" ]; then
     raw_out="${attempt_dir}/judge/raw_out.txt"
-    $tout "$judge_timeout" \
-      node "$BRIDGE_INDEX" \
-        --bridge-dir "$BRIDGE_DIR" \
-        --session-id "${session_id}" \
-        -- -p "$full_instruction" \
-           --cwd "$worktree_dir" \
-           --dangerously-skip-permissions 2>"${attempt_dir}/judge/bridge_stderr.txt" | tee "$raw_out"
+    $tout "$judge_timeout" bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '${session_id}' -- -p \"\$1\" --dangerously-skip-permissions 2>'${attempt_dir}/judge/bridge_stderr.txt'" _ "$full_instruction" | tee "$raw_out"
     rc=$?
     [ "$rc" = "124" ] && echo "TIMEOUT" >> "$run_log"
   else
     raw_out="${attempt_dir}/judge/raw_out.txt"
-    node "$BRIDGE_INDEX" \
-      --bridge-dir "$BRIDGE_DIR" \
-      --session-id "${session_id}" \
-      -- -p "$full_instruction" \
-         --cwd "$worktree_dir" \
-         --dangerously-skip-permissions 2>"${attempt_dir}/judge/bridge_stderr.txt" | tee "$raw_out"
+    bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '${session_id}' -- -p \"\$1\" --dangerously-skip-permissions 2>'${attempt_dir}/judge/bridge_stderr.txt'" _ "$full_instruction" | tee "$raw_out"
     rc=$?
   fi
 

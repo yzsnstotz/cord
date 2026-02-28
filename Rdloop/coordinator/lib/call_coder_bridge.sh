@@ -58,22 +58,11 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
   echo "[CODER][auto/bridge] timeout: ${timeout_s}s"
 
   if [ -n "$tout" ]; then
-    $tout "$timeout_s" \
-      node "$BRIDGE_INDEX" \
-        --bridge-dir "$BRIDGE_DIR" \
-        --session-id "$session_id" \
-        -- -p "$full_instruction" \
-           --cwd "$worktree_dir" \
-           --dangerously-skip-permissions 2>&1
+    $tout "$timeout_s" bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$session_id' -- -p \"\$1\" --dangerously-skip-permissions" _ "$full_instruction" 2>&1
     rc=$?
     [ "$rc" = "124" ] && echo "TIMEOUT" >> "$run_log"
   else
-    node "$BRIDGE_INDEX" \
-      --bridge-dir "$BRIDGE_DIR" \
-      --session-id "$session_id" \
-      -- -p "$full_instruction" \
-         --cwd "$worktree_dir" \
-         --dangerously-skip-permissions 2>&1
+    bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$session_id' -- -p \"\$1\" --dangerously-skip-permissions" _ "$full_instruction" 2>&1
     rc=$?
   fi
 

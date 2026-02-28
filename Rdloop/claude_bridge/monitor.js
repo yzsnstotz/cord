@@ -49,9 +49,15 @@ class ClaudeMonitor {
     this.proc.stderr.on('data', (chunk) => this._onOutput(chunk, 'stderr'));
 
     this.proc.on('close', (code) => {
-      this.exitCode = code;
-      this._log(`Claude CLI exited with code ${code}`);
-      this._onExit(code);
+      const normalizedCode = Number.isInteger(code) ? code : 1;
+      this.exitCode = normalizedCode;
+      this._log(`Claude CLI exited with code ${normalizedCode}`);
+      this._onExit(normalizedCode).finally(() => {
+        const state = this.ipc.readState();
+        if (!state || (state.status !== 'limited' && state.status !== 'resuming')) {
+          process.exitCode = normalizedCode;
+        }
+      });
     });
 
     this.proc.on('error', (err) => {
@@ -62,6 +68,7 @@ class ClaudeMonitor {
         error: err.message
       });
       this.ipc.appendEvent('error', { error: err.message });
+      process.exitCode = 1;
     });
 
     return this;

@@ -9,6 +9,10 @@
 let currentTaskId = null;
 let currentAttempt = null;
 let promptCenterSelectedTarget = '';
+const LIFECYCLE_STEP_BATCH = 30;
+const LIFECYCLE_STEP_MAX = 500;
+let lifecycleLogsByTask = {};
+let lifecycleVisibleCountByTask = {};
 
 // B1-1: activeTab persisted in sessionStorage
 let activeTab = sessionStorage.getItem('rdloop_activeTab') || 'coordinator';
@@ -1482,6 +1486,7 @@ async function refreshCurrentTaskMeta() {
   try {
     const data = await api(`/task/${currentTaskId}`);
     updateTaskMeta(data);
+    refreshLifecycleSteps(currentTaskId);
   } catch { /* silently skip */ }
 }
 
@@ -1529,6 +1534,172 @@ function updateTaskMeta(data) {
       questionsContainer.innerHTML = '';
     }
   }
+}
+
+function formatLifecycleTime(ts) {
+  if (!ts || typeof ts !== 'string') return '--:--:--';
+  return ts.length >= 19 ? ts.substring(11, 19) : ts;
+}
+
+function safeLifecycleText(value, maxLen = 220) {
+  if (value == null) return '';
+  const raw = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!raw) return '';
+  return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
+}
+
+function lifecycleReadableEventName(log) {
+  const et = String(log?.event_type || log?.what_happened || '').trim();
+  const role = log?.details?.role || log?.delivery?.to || log?.delivery?.role || '';
+  const fromRole = log?.details?.from || log?.delivery?.from || '';
+  const toRole = log?.details?.to || log?.delivery?.to || '';
+  const launchMode = log?.details?.launch_mode || log?.details?.launchMode || '';
+  const modeLocked = log?.details?.locked;
+  const reqCode = log?.delivery?.req_code || log?.details?.req_code || '';
+  const sessionId = log?.delivery?.session_id || log?.details?.session_id || '';
+
+  switch (et) {
+    case 'launch_mode_selected':
+      return `Launch mode selected: ${launchMode || '-'}${modeLocked === true ? ' (locked)' : (modeLocked === false ? ' (unlocked)' : '')}`;
+    case 'knowledge_inject':
+      return `Knowledge injected ${fromRole ? `from ${fromRole}` : ''}${toRole ? ` to ${toRole}` : ''}`.trim();
+    case 'session_id_assigned':
+      return `Session assigned${role ? ` for ${role}` : ''}${sessionId ? `: ${sessionId}` : ''}`;
+    case 'req_code_assigned':
+      return `Request code assigned${reqCode ? `: ${reqCode}` : ''}`;
+    case 'role_start':
+      return `${role || 'role'} started${launchMode ? ` via ${launchMode}` : ''}`;
+    case 'role_end':
+      return `${role || 'role'} finished`;
+    case 'role_transition':
+      return `Role transition: ${fromRole || '?'} -> ${toRole || '?'}`;
+    case 'handoff_pointer_written':
+      return `Handoff pointer written: ${fromRole || '?'} -> ${toRole || '?'}`;
+    case 'bridge_call':
+      return `Bridge call dispatched${role ? ` to ${role}` : ''}`;
+    case 'ccb_call':
+      return `CCB call dispatched${role ? ` to ${role}` : ''}${reqCode ? ` (${reqCode})` : ''}`;
+    case 'coder_dispatch':
+      return 'Coder dispatched';
+    case 'judge_dispatch':
+      return 'Judge dispatched';
+    case 'command_executed':
+      return `Command executed (${safeLifecycleText(log?.delivery?.content || '', 120)})`;
+    case 'CONTROL_ACTION_REQUESTED':
+      return `Control action requested: ${log?.details?.action || '-'}`;
+    case 'CONTROL_RESUME_APPLIED':
+      return 'Control resume applied';
+    case 'CONTROL_RUN_NEXT_APPLIED':
+      return 'Control run-next applied';
+    case 'CONTROL_EDIT_INSTRUCTION_APPLIED':
+      return 'Control edit-instruction applied';
+    case 'CONTROL_PAUSE_REQUESTED':
+    case 'CONTROL_PAUSE_AT_CHECKPOINT':
+      return 'Control pause requested';
+    case 'USER_INPUT_RECEIVED':
+      return `User input received${log?.details?.len != null ? ` (${log.details.len} chars)` : ''}`;
+    case 'USER_INPUT_CONSUMED':
+      return `User input consumed${log?.details?.consumed_count != null ? ` (${log.details.consumed_count} entries)` : ''}`;
+    default:
+      return et || 'lifecycle_event';
+  }
+}
+
+function lifecycleReadableSummary(log) {
+  const parts = [];
+  const actor = log?.triggered_by?.actor || '';
+  const source = log?.triggered_by?.source || '';
+  const channel = log?.channel?.name || '';
+  const next = log?.next || {};
+  const nextTo = next.to || next.target || next.state || '';
+  const rc = log?.details?.rc;
+  const msg = log?.details?.summary || log?.details?.message || '';
+
+  if (actor || source) parts.push(`trigger: ${[actor, source].filter(Boolean).join('/')}`);
+  if (channel) parts.push(`channel: ${channel}`);
+  if (nextTo) parts.push(`next: ${safeLifecycleText(nextTo, 80)}`);
+  if (rc != null) parts.push(`rc=${rc}`);
+  if (msg) parts.push(safeLifecycleText(msg, 180));
+
+  return parts.join(' · ');
+}
+
+function renderLifecycleSteps(taskId, logs) {
+  const panel = document.getElementById('lifecycle-steps');
+  const countEl = document.getElementById('lifecycle-count');
+  const moreBtn = document.getElementById('lifecycle-more-btn');
+  const resetBtn = document.getElementById('lifecycle-reset-btn');
+  if (!panel) return;
+
+  const all = Array.isArray(logs) ? logs.slice() : [];
+  all.sort((a, b) => String(b?.ts || '').localeCompare(String(a?.ts || '')));
+
+  const visibleCount = Math.min(
+    LIFECYCLE_STEP_MAX,
+    Math.max(LIFECYCLE_STEP_BATCH, lifecycleVisibleCountByTask[taskId] || LIFECYCLE_STEP_BATCH)
+  );
+  lifecycleVisibleCountByTask[taskId] = visibleCount;
+  const shown = all.slice(0, visibleCount);
+
+  if (countEl) {
+    countEl.textContent = `${shown.length}/${all.length}`;
+  }
+  if (moreBtn) {
+    moreBtn.style.display = shown.length < all.length ? 'inline-flex' : 'none';
+  }
+  if (resetBtn) {
+    resetBtn.style.display = shown.length > LIFECYCLE_STEP_BATCH ? 'inline-flex' : 'none';
+  }
+
+  if (shown.length === 0) {
+    panel.innerHTML = `<div class="lifecycle-empty">No lifecycle steps yet.</div>`;
+    return;
+  }
+
+  panel.innerHTML = shown.map((log, idx) => {
+    const rawType = String(log?.event_type || log?.what_happened || '');
+    const title = lifecycleReadableEventName(log);
+    const summary = lifecycleReadableSummary(log);
+    const content = safeLifecycleText(log?.delivery?.content || '', 220);
+    return `
+      <div class="lifecycle-step">
+        <span class="ts">${escapeHtml(formatLifecycleTime(log?.ts))}</span>
+        <span class="type">${escapeHtml(rawType || 'event')}</span>
+        <span class="summary">${escapeHtml(title)}</span>
+        ${summary ? `<div class="lifecycle-meta">${escapeHtml(summary)}</div>` : ''}
+        ${content ? `<div class="lifecycle-content">${escapeHtml(content)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+async function refreshLifecycleSteps(taskId) {
+  if (!taskId) return;
+  const panel = document.getElementById('lifecycle-steps');
+  if (!panel) return;
+  const requestTaskId = taskId;
+  try {
+    const data = await api(`/tasks/${encodeURIComponent(taskId)}/lifecycle?tail=${LIFECYCLE_STEP_MAX}`);
+    if (requestTaskId !== currentTaskId) return;
+    lifecycleLogsByTask[taskId] = Array.isArray(data?.logs) ? data.logs : [];
+    renderLifecycleSteps(taskId, lifecycleLogsByTask[taskId]);
+  } catch (e) {
+    if (requestTaskId !== currentTaskId) return;
+    panel.innerHTML = `<div class="lifecycle-empty" style="color:#f85149">Failed to load lifecycle steps: ${escapeHtml(e?.message || String(e))}</div>`;
+  }
+}
+
+function showMoreLifecycleSteps() {
+  if (!currentTaskId) return;
+  const cur = lifecycleVisibleCountByTask[currentTaskId] || LIFECYCLE_STEP_BATCH;
+  lifecycleVisibleCountByTask[currentTaskId] = Math.min(LIFECYCLE_STEP_MAX, cur + LIFECYCLE_STEP_BATCH);
+  renderLifecycleSteps(currentTaskId, lifecycleLogsByTask[currentTaskId] || []);
+}
+
+function resetLifecycleSteps() {
+  if (!currentTaskId) return;
+  lifecycleVisibleCountByTask[currentTaskId] = LIFECYCLE_STEP_BATCH;
+  renderLifecycleSteps(currentTaskId, lifecycleLogsByTask[currentTaskId] || []);
 }
 
 // Select and load task (full render only on task change)
@@ -1665,7 +1836,16 @@ function renderTask(data) {
 
     <div id="attempt-detail"></div>
 
-    <h3>Timeline (${escapeHtml(String((timeline || []).length))} events)</h3>
+    <h3>Lifecycle Steps (<span id="lifecycle-count">0/0</span>)</h3>
+    <div class="lifecycle-controls">
+      <button id="lifecycle-more-btn" class="btn" type="button" onclick="showMoreLifecycleSteps()">Show ${LIFECYCLE_STEP_BATCH} more</button>
+      <button id="lifecycle-reset-btn" class="btn" type="button" onclick="resetLifecycleSteps()">Reset to ${LIFECYCLE_STEP_BATCH}</button>
+    </div>
+    <div id="lifecycle-steps" class="lifecycle-steps">
+      <div class="lifecycle-empty">Loading lifecycle steps...</div>
+    </div>
+
+    <h3>Raw Timeline (${escapeHtml(String((timeline || []).length))} events)</h3>
     <div class="timeline">
       ${(timeline || []).slice().reverse().slice(0, 50).map(e => `
         <div class="timeline-item">
@@ -1680,6 +1860,11 @@ function renderTask(data) {
 
   // K7-1: apply read-only state to write-action buttons in task panel
   updateReadOnlyBanner();
+
+  if (!lifecycleVisibleCountByTask[currentTaskId]) {
+    lifecycleVisibleCountByTask[currentTaskId] = LIFECYCLE_STEP_BATCH;
+  }
+  refreshLifecycleSteps(currentTaskId);
 
   // Immediately load the active tab's log
   const logName = TAB_LOG_MAP[activeTab];
