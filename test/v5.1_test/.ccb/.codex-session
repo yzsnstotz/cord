@@ -1,0 +1,21 @@
+{
+  "session_id": "ai-1772246268-20454",
+  "ccb_project_id": "a5966dbddcbab442ae1fe03da9a0f7424b1b3f43221ae3bec22a680ee82345e6",
+  "runtime_dir": "/var/folders/fy/_vc547vx0t75yjmxm8bbfwb40000gn/T/claude-ai-yzliu/ai-1772246268-20454/codex",
+  "input_fifo": "/var/folders/fy/_vc547vx0t75yjmxm8bbfwb40000gn/T/claude-ai-yzliu/ai-1772246268-20454/codex/input.fifo",
+  "output_fifo": "/var/folders/fy/_vc547vx0t75yjmxm8bbfwb40000gn/T/claude-ai-yzliu/ai-1772246268-20454/codex/output.fifo",
+  "terminal": "tmux",
+  "tmux_session": null,
+  "pane_id": "%96",
+  "pane_title_marker": "CCB-Codex",
+  "tmux_log": "/var/folders/fy/_vc547vx0t75yjmxm8bbfwb40000gn/T/claude-ai-yzliu/ai-1772246268-20454/codex/bridge_output.log",
+  "work_dir": "/Users/yzliu/work/Cord/test/v5.1_test",
+  "work_dir_norm": "/Users/yzliu/work/Cord/test/v5.1_test",
+  "start_dir": "/Users/yzliu/work/Cord/test/v5.1_test",
+  "active": true,
+  "started_at": "2026-02-28 11:37:49",
+  "codex_start_cmd": "codex resume 019ca21c-04ea-7b70-9881-d6f655fd96db",
+  "start_cmd": "export CCB_MANAGED=1; export CCB_PARENT_PID=20454; export CCB_RUN_DIR=/Users/yzliu/.cache/ccb/projects/a5966dbddcbab442; export PATH=/Users/yzliu/work/Cord/CCB/bin:/Users/yzliu/.local/bin:/Users/yzliu/bin:/Users/yzliu/work/Cord/CCB:/Users/yzliu/work/Cord/CCB/bin:/Users/yzliu/work/Cord/Rdloop/gui/node_modules/.bin:/Users/yzliu/work/Cord/Rdloop/node_modules/.bin:/Users/yzliu/work/Cord/node_modules/.bin:/Users/yzliu/work/node_modules/.bin:/Users/yzliu/node_modules/.bin:/Users/node_modules/.bin:/node_modules/.bin:/Users/yzliu/.local/share/fnm/node-versions/v24.13.1/installation/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin:/Users/yzliu/.local/bin:/Users/yzliu/.antigravity/antigravity/bin:/Users/yzliu/.local/state/fnm_multishells/93676_1772149511217/bin:/Users/yzliu/.local/share/fnm:/Users/yzliu/.opencode/bin:/Users/yzliu/.local/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/opt/homebrew/bin:/Users/yzliu/.local/bin:/Users/yzliu/work/Cord/Rdloop/gui/node_modules/.bin:/Users/yzliu/work/Cord/Rdloop/node_modules/.bin:/Users/yzliu/work/Cord/node_modules/.bin:/Users/yzliu/work/node_modules/.bin:/Users/yzliu/node_modules/.bin:/Users/node_modules/.bin:/node_modules/.bin:/Users/yzliu/.local/share/fnm/node-versions/v24.13.1/installation/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin:/Users/yzliu/.antigravity/antigravity/bin:/Users/yzliu/.local/state/fnm_multishells/39009_1772090287886/bin:/Users/yzliu/.local/share/fnm:/Users/yzliu/Library/pnpm:/Users/yzliu/.opencode/bin; codex -c disable_paste_burst=true -c trust_level=\"trusted\" -c approval_policy=\"never\" -c sandbox_mode=\"danger-full-access\"",
+  "codex_session_path": "/Users/yzliu/.codex/sessions/2026/02/28/rollout-2026-02-28T11-37-51-019ca21c-04ea-7b70-9881-d6f655fd96db.jsonl",
+  "codex_session_id": "019ca21c-04ea-7b70-9881-d6f655fd96db"
+}

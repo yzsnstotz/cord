@@ -76,7 +76,7 @@ body {
 
 .sidebar-toggle {
   position: absolute;
-  left: 310px;
+  left: 10px;
   bottom: 20px;
   z-index: 100;
   width: 32px;

@@ -12,6 +12,7 @@ const OUT_DIR = process.env.RDLOOP_OUT_DIR
   : path.resolve(__dirname, '..', 'out');
 const COORDINATOR = path.resolve(__dirname, '..', 'coordinator', 'run_task.sh');
 const TASKS_DIR = path.resolve(__dirname, '..', 'tasks');
+const TEMPLATES_DIR = path.resolve(__dirname, '..', 'templates');
 const EXAMPLES_DIR = path.resolve(__dirname, '..', 'examples');
 const COORDINATOR_LIB = path.resolve(__dirname, '..', 'coordinator', 'lib');
 const RUBRIC_PATH = path.resolve(__dirname, '..', 'schemas', 'judge_rubric.json');
@@ -1033,13 +1034,14 @@ app.post('/api/run/create', requireWritable, (req, res) => {
     taskJson.launch_mode_locked = true;
     atomicWriteJSON(taskJsonPath, taskJson);
     launchModeSource = 'task_json'; // now it's in the json
-  } else {
-    // If not saving, we still need to tell coordinator which mode to use.
-    // In current Cord implementation, coordinator reads task.json.
-    // We bridge this by applying temporary override to task.json if modes differ.
-    if (finalLaunchMode && finalLaunchMode !== taskJson.launch_mode) {
-      applyRunSurfaceOverrideToTaskJson(taskJsonPath, finalLaunchMode === 'ccb' ? 'visual_ccb' : 'bridge');
-    }
+  }
+  // Coordinator routing is based on launch_mode (v5.1), so always sync launch_mode at run time.
+  const launchModeOverride = applyRunSurfaceOverrideToTaskJson(
+    taskJsonPath,
+    finalLaunchMode === 'ccb' ? 'visual_ccb' : 'bridge'
+  );
+  if (!launchModeOverride.ok) {
+    return res.status(400).json({ error: launchModeOverride.error || 'Invalid launch mode override' });
   }
 
   // Spawn coordinator
@@ -3867,6 +3869,116 @@ function validateTaskSpecId(id) {
   return VALID_TASK_ID.test(id);
 }
 
+function ensureTemplatesDir() {
+  if (!fs.existsSync(TEMPLATES_DIR)) {
+    fs.mkdirSync(TEMPLATES_DIR, { recursive: true });
+  }
+}
+
+function templateFilePath(templateId) {
+  if (!templateId) return null;
+  const normalized = String(templateId || '').trim();
+  if (!validateTaskSpecId(normalized)) return null;
+  return path.join(TEMPLATES_DIR, `${normalized}.json`);
+}
+
+function listTemplates() {
+  try {
+    ensureTemplatesDir();
+    const entries = [];
+    const files = fs.readdirSync(TEMPLATES_DIR).filter(f => f.endsWith('.json'));
+    for (const file of files) {
+      const templateId = file.replace(/\.json$/, '');
+      const filepath = path.join(TEMPLATES_DIR, file);
+      const data = readJSON(filepath);
+      let updatedAt = null;
+      try {
+        const stat = fs.statSync(filepath);
+        updatedAt = stat.mtime.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      } catch {}
+      entries.push({
+        template_id: templateId,
+        updated_at: updatedAt,
+        task_type: data?.task_type || null,
+        scoring_mode: data?.scoring_mode || null,
+        spec: data || null
+      });
+    }
+    return entries;
+  } catch (err) {
+    return [];
+  }
+}
+
+function readTemplate(templateId) {
+  const filepath = templateFilePath(templateId);
+  if (!filepath || !fs.existsSync(filepath)) return null;
+  return readJSON(filepath);
+}
+
+function writeTemplate(templateId, data) {
+  const filepath = templateFilePath(templateId);
+  if (!filepath) return null;
+  ensureTemplatesDir();
+  atomicWriteJSON(filepath, data);
+  return filepath;
+}
+
+function ensureTemplatesDir() {
+  if (!fs.existsSync(TEMPLATES_DIR)) {
+    fs.mkdirSync(TEMPLATES_DIR, { recursive: true });
+  }
+}
+
+function templateFilePath(templateId) {
+  if (!templateId) return null;
+  const normalized = String(templateId || '').trim();
+  if (!validateTaskSpecId(normalized)) return null;
+  return path.join(TEMPLATES_DIR, `${normalized}.json`);
+}
+
+function listTemplates() {
+  try {
+    ensureTemplatesDir();
+    const entries = [];
+    const files = fs.readdirSync(TEMPLATES_DIR).filter(f => f.endsWith('.json'));
+    for (const file of files) {
+      const templateId = file.replace(/\\.json$/, '');
+      const filepath = path.join(TEMPLATES_DIR, file);
+      const data = readJSON(filepath);
+      let updatedAt = null;
+      try {
+        const stat = fs.statSync(filepath);
+        updatedAt = stat.mtime.toISOString().replace(/\\.\\d{3}Z$/, 'Z');
+      } catch {}
+      entries.push({
+        template_id: templateId,
+        updated_at: updatedAt,
+        task_type: data?.task_type || null,
+        scoring_mode: data?.scoring_mode || null,
+        spec: data || null
+      });
+    }
+    return entries;
+  } catch (err) {
+    return [];
+  }
+}
+
+function readTemplate(templateId) {
+  const filepath = templateFilePath(templateId);
+  if (!filepath || !fs.existsSync(filepath)) return null;
+  return readJSON(filepath);
+}
+
+function writeTemplate(templateId, data) {
+  const filepath = templateFilePath(templateId);
+  if (!filepath) return null;
+  ensureTemplatesDir();
+  atomicWriteJSON(filepath, data);
+  return filepath;
+}
+
 function mapLegacyExecutorTypeToTaskType(executorType) {
   switch (executorType) {
     case 'api_call': return 'copywriting';
@@ -4468,6 +4580,266 @@ app.post('/api/task_specs/:taskId/copy', requireWritable, (req, res) => {
 });
 
 // ============================================================
+// A2-6: Template management
+// ============================================================
+
+app.get('/api/templates', (req, res) => {
+  try {
+    const templates = listTemplates();
+    res.json({ templates });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/templates/:templateId', (req, res) => {
+  const templateId = req.params.templateId;
+  if (!validateTaskSpecId(templateId)) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  const spec = readTemplate(templateId);
+  if (!spec) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  res.json({ template_id: templateId, spec });
+});
+
+app.post('/api/templates', requireWritable, (req, res) => {
+  const { template_id, spec } = req.body || {};
+  const desiredId = (template_id || spec?.task_id || '').trim();
+  if (!desiredId || !validateTaskSpecId(desiredId)) {
+    return res.status(400).json({ error: 'Invalid or missing template_id' });
+  }
+  if (!spec || typeof spec !== 'object') {
+    return res.status(400).json({ error: 'spec object is required' });
+  }
+  const normalized = normalizeTaskV51FromLegacy(spec);
+  const normalizedSpec = normalized.spec;
+  const validation = validateTaskSpecData(normalizedSpec);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+  const filepath = templateFilePath(desiredId);
+  if (!filepath) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  if (fs.existsSync(filepath)) {
+    return res.status(409).json({ error: `Template '${desiredId}' already exists` });
+  }
+  const data = {
+    ...normalizedSpec,
+    task_id: desiredId,
+    created_at: normalizedSpec.created_at || new Date().toISOString()
+  };
+  try {
+    writeTemplate(desiredId, data);
+    auditLog({ action: 'template_create', template_id: desiredId });
+    res.json({ ok: true, template_id: desiredId, warnings: normalized.warnings || [] });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to write template: ${err.message}` });
+  }
+});
+
+app.put('/api/templates/:templateId', requireWritable, (req, res) => {
+  const templateId = req.params.templateId;
+  if (!validateTaskSpecId(templateId)) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  const { spec } = req.body || {};
+  if (!spec || typeof spec !== 'object') {
+    return res.status(400).json({ error: 'spec object is required' });
+  }
+  const existingPath = templateFilePath(templateId);
+  if (!existingPath || !fs.existsSync(existingPath)) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  const normalized = normalizeTaskV51FromLegacy(spec);
+  const normalizedSpec = normalized.spec;
+  const validation = validateTaskSpecData(normalizedSpec);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+  const data = {
+    ...normalizedSpec,
+    task_id: templateId,
+    created_at: normalizedSpec.created_at || readJSON(existingPath)?.created_at || new Date().toISOString()
+  };
+  try {
+    writeTemplate(templateId, data);
+    auditLog({ action: 'template_update', template_id: templateId });
+    res.json({ ok: true, template_id: templateId, warnings: normalized.warnings || [] });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to write template: ${err.message}` });
+  }
+});
+
+app.post('/api/templates/:templateId/generate', requireWritable, (req, res) => {
+  const templateId = req.params.templateId;
+  if (!validateTaskSpecId(templateId)) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  const { task_id } = req.body || {};
+  if (!task_id || !validateTaskSpecId(task_id)) {
+    return res.status(400).json({ error: 'Invalid or missing task_id' });
+  }
+  const templateSpec = readTemplate(templateId);
+  if (!templateSpec) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  const normalized = normalizeTaskV51FromLegacy(templateSpec);
+  const spec = { ...normalized.spec, task_id };
+  if (!spec.launch_mode) spec.launch_mode = 'bridge';
+  if (typeof spec.launch_mode_locked !== 'boolean') spec.launch_mode_locked = false;
+  const validation = validateTaskSpecData(spec, { v51Strict: true });
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+  if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const filepath = path.join(TASKS_DIR, `${task_id}.json`);
+  if (fs.existsSync(filepath)) {
+    return res.status(409).json({ error: `Task spec '${task_id}' already exists` });
+  }
+  const data = { ...spec, created_at: new Date().toISOString() };
+  try {
+    atomicWriteJSON(filepath, data);
+    auditLog({ action: 'template_generate_task', template_id: templateId, task_id, file_path: filepath });
+    res.json({ ok: true, task_id, file_path: filepath });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to generate task: ${err.message}` });
+  }
+});
+
+// ============================================================
+// A2-6: Template management
+// ============================================================
+
+app.get('/api/templates', (req, res) => {
+  try {
+    const templates = listTemplates();
+    res.json({ templates });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/templates/:templateId', (req, res) => {
+  const templateId = req.params.templateId;
+  if (!validateTaskSpecId(templateId)) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  const spec = readTemplate(templateId);
+  if (!spec) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  res.json({ template_id: templateId, spec });
+});
+
+app.post('/api/templates', requireWritable, (req, res) => {
+  const { template_id, spec } = req.body || {};
+  const desiredId = (template_id || spec?.task_id || '').trim();
+  if (!desiredId || !validateTaskSpecId(desiredId)) {
+    return res.status(400).json({ error: 'Invalid or missing template_id' });
+  }
+  if (!spec || typeof spec !== 'object') {
+    return res.status(400).json({ error: 'spec object is required' });
+  }
+  const normalized = normalizeTaskV51FromLegacy(spec);
+  const normalizedSpec = normalized.spec;
+  const validation = validateTaskSpecData(normalizedSpec);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+  const filepath = templateFilePath(desiredId);
+  if (!filepath) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  if (fs.existsSync(filepath)) {
+    return res.status(409).json({ error: `Template '${desiredId}' already exists` });
+  }
+  const data = {
+    ...normalizedSpec,
+    task_id: desiredId,
+    created_at: normalizedSpec.created_at || new Date().toISOString()
+  };
+  try {
+    writeTemplate(desiredId, data);
+    auditLog({ action: 'template_create', template_id: desiredId });
+    res.json({ ok: true, template_id: desiredId, warnings: normalized.warnings || [] });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to write template: ${err.message}` });
+  }
+});
+
+app.put('/api/templates/:templateId', requireWritable, (req, res) => {
+  const templateId = req.params.templateId;
+  if (!validateTaskSpecId(templateId)) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  const { spec } = req.body || {};
+  if (!spec || typeof spec !== 'object') {
+    return res.status(400).json({ error: 'spec object is required' });
+  }
+  const existingPath = templateFilePath(templateId);
+  if (!existingPath || !fs.existsSync(existingPath)) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  const normalized = normalizeTaskV51FromLegacy(spec);
+  const normalizedSpec = normalized.spec;
+  const validation = validateTaskSpecData(normalizedSpec);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+  const data = {
+    ...normalizedSpec,
+    task_id: templateId,
+    created_at: normalizedSpec.created_at || readJSON(existingPath)?.created_at || new Date().toISOString()
+  };
+  try {
+    writeTemplate(templateId, data);
+    auditLog({ action: 'template_update', template_id: templateId });
+    res.json({ ok: true, template_id: templateId, warnings: normalized.warnings || [] });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to write template: ${err.message}` });
+  }
+});
+
+app.post('/api/templates/:templateId/generate', requireWritable, (req, res) => {
+  const templateId = req.params.templateId;
+  if (!validateTaskSpecId(templateId)) {
+    return res.status(400).json({ error: 'Invalid template_id' });
+  }
+  const { task_id } = req.body || {};
+  if (!task_id || !validateTaskSpecId(task_id)) {
+    return res.status(400).json({ error: 'Invalid or missing task_id' });
+  }
+  const templateSpec = readTemplate(templateId);
+  if (!templateSpec) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  const normalized = normalizeTaskV51FromLegacy(templateSpec);
+  const spec = { ...normalized.spec, task_id };
+  if (!spec.launch_mode) spec.launch_mode = 'bridge';
+  if (typeof spec.launch_mode_locked !== 'boolean') spec.launch_mode_locked = false;
+  const validation = validateTaskSpecData(spec, { v51Strict: true });
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+  if (!fs.existsSync(TASKS_DIR)) fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const filepath = path.join(TASKS_DIR, `${task_id}.json`);
+  if (fs.existsSync(filepath)) {
+    return res.status(409).json({ error: `Task spec '${task_id}' already exists` });
+  }
+  const data = { ...spec, created_at: new Date().toISOString() };
+  try {
+    atomicWriteJSON(filepath, data);
+    auditLog({ action: 'template_generate_task', template_id: templateId, task_id, file_path: filepath });
+    res.json({ ok: true, task_id, file_path: filepath });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to generate task: ${err.message}` });
+  }
+});
+
+// ============================================================
 // D1/D2: Prompt directory management
 // ============================================================
 
@@ -4520,6 +4892,9 @@ function applyRunSurfaceOverrideToTaskJson(taskPath, requestedRunSurface) {
     return { ok: false, error: 'multi_agent only supports visual_ccb run surface' };
   }
 
+  const launchMode = requestedRunSurface === 'visual_ccb' ? 'ccb' : 'bridge';
+  task.launch_mode = launchMode;
+  if (typeof task.launch_mode_locked !== 'boolean') task.launch_mode_locked = false;
   task.run_surface = requestedRunSurface;
   task.execution_mode = requestedRunSurface === 'visual_ccb' ? 'semi-auto' : 'auto';
 

@@ -1,0 +1,12 @@
+{
+  "pid": 78834,
+  "host": "127.0.0.1",
+  "connect_host": "127.0.0.1",
+  "port": 61570,
+  "token": "0f1cf54eafc033237e928440404d05c5",
+  "started_at": "2026-02-28 13:04:41",
+  "python": "/Library/Developer/CommandLineTools/usr/bin/python3",
+  "parent_pid": null,
+  "managed": false,
+  "work_dir": "/Users/yzliu/work/Cord/Rdloop"
+}

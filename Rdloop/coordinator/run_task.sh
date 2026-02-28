@@ -520,6 +520,85 @@ PY
   write_task_lifecycle_log "${stage}_dispatch" "$payload"
 }
 
+write_agent_response_log() {
+  local stage="$1" role="$2" channel_name="$3" script_path="$4"
+  local content_path="$5" session_id="${6:-}" req_code="${7:-}"
+  local provider="${8:-}" next_target="${9:-}" rc="${10:-}"
+  [ -n "$content_path" ] || return 0
+  [ -f "$content_path" ] || return 0
+  local payload
+  payload=$(python3 - "$stage" "$role" "$channel_name" "$script_path" "$content_path" "$session_id" "$req_code" "$provider" "$next_target" "$rc" <<'PY'
+import json, os, sys
+stage, role, channel_name, script_path, content_path, session_id, req_code, provider, next_target, rc = sys.argv[1:11]
+details = {"stage": stage}
+if rc != "":
+    try:
+        details["rc"] = int(rc)
+    except Exception:
+        details["rc"] = rc
+print(json.dumps({
+  "event_type": f"{stage}_response",
+  "triggered_by": {"actor": role or "agent", "source": os.path.basename(script_path) if script_path else "adapter"},
+  "channel": {"name": channel_name, "direction": "inbound"},
+  "delivery": {
+    "from": role,
+    "to": "coordinator",
+    "content_path": content_path,
+    "session_id": session_id,
+    "req_code": req_code,
+    "provider": provider
+  },
+  "executed_by": {
+    "component": os.path.basename(script_path) if script_path else "",
+    "script_path": script_path
+  },
+  "next": {"target": next_target or "coordinator"},
+  "details": details
+}))
+PY
+)
+  write_task_lifecycle_log "${stage}_response" "$payload"
+}
+
+write_coordinator_simple_event() {
+  local happened="$1" channel_name="${2:-coordinator}" direction="${3:-internal}" next_target="${4:-}"
+  local summary="${5:-}" cmd="${6:-}" rc="${7:-}" repo_path="${8:-}" worktree_path="${9:-}" content_path="${10:-}"
+  local payload
+  payload=$(python3 - "$happened" "$channel_name" "$direction" "$next_target" "$summary" "$cmd" "$rc" "$repo_path" "$worktree_path" "$content_path" <<'PY'
+import json, sys
+happened, channel_name, direction, next_target, summary, cmd, rc_raw, repo_path, worktree_path, content_path = sys.argv[1:11]
+details = {}
+if summary:
+    details["summary"] = summary
+if cmd:
+    details["command"] = cmd
+if rc_raw != "":
+    try:
+        details["rc"] = int(rc_raw)
+    except Exception:
+        details["rc"] = rc_raw
+if repo_path:
+    details["repo_path"] = repo_path
+if worktree_path:
+    details["worktree_path"] = worktree_path
+delivery = {}
+if content_path:
+    delivery["content_path"] = content_path
+next_obj = {"target": next_target} if next_target else {}
+print(json.dumps({
+  "event_type": happened,
+  "triggered_by": {"actor": "coordinator", "source": "run_task.sh"},
+  "channel": {"name": channel_name, "direction": direction},
+  "delivery": delivery,
+  "executed_by": {"component": "run_task.sh", "function": "write_coordinator_simple_event"},
+  "next": next_obj,
+  "details": details
+}))
+PY
+)
+  write_task_lifecycle_log "$happened" "$payload"
+}
+
 write_event() {
   local att="$1" etype="$2" summary="$3"
   local att_dir="${4:-}" wt_dir="${5:-}"
@@ -933,8 +1012,10 @@ acquire_lock() {
     hostname > "${LOCK_DIR}/host" 2>/dev/null || true
     now_iso > "${LOCK_DIR}/started_at"
     LOCK_ACQUIRED=1
+    write_coordinator_simple_event "lock_acquired" "lock" "internal" "coordinator_run" "lock directory acquired" "" "0" "" "" "${LOCK_DIR}"
     return 0
   else
+    write_coordinator_simple_event "lock_busy" "lock" "internal" "wait_or_exit" "lock directory already held" "" "1" "" "" "${LOCK_DIR}"
     return 1
   fi
 }
@@ -942,7 +1023,11 @@ acquire_lock() {
 release_lock() {
   if [ "$LOCK_ACQUIRED" = "1" ] && [ -d "${LOCK_DIR:-}" ]; then
     local lp=""; [ -f "${LOCK_DIR}/pid" ] && lp=$(cat "${LOCK_DIR}/pid" 2>/dev/null || echo "")
-    if [ "$lp" = "$$" ]; then rm -rf "$LOCK_DIR"; LOCK_ACQUIRED=0; fi
+    if [ "$lp" = "$$" ]; then
+      write_coordinator_simple_event "lock_released" "lock" "internal" "" "lock directory released" "" "0" "" "" "${LOCK_DIR}"
+      rm -rf "$LOCK_DIR"
+      LOCK_ACQUIRED=0
+    fi
   fi
 }
 
@@ -1199,7 +1284,12 @@ print(json.dumps(d))
 check_guardrails() {
   local wt="$1" bref="$2"
   local changed; changed=$(git -C "$wt" diff --name-only "${bref}...HEAD" 2>/dev/null || echo "")
-  [ -z "$changed" ] && return 0
+  local changed_count=0
+  changed_count=$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [ -z "$changed" ]; then
+    write_coordinator_simple_event "guardrails_checked" "policy" "internal" "attempt_continue" "guardrails passed (no changed files)" "git -C <wt> diff --name-only <base_ref>...HEAD" "0" "" "$wt" ""
+    return 0
+  fi
   # allowed_paths
   local ap; ap=$(json_read "$TASK_JSON" "allowed_paths" "[]")
   local has_ap; has_ap=$(python3 -c "import json,sys;print('y' if len(json.loads(sys.argv[1]))>0 else 'n')" "$ap" 2>/dev/null || echo "n")
@@ -1213,6 +1303,7 @@ for f in fs:
 print('')
 " "$ap" "$changed" 2>/dev/null || echo "")
     if [ -n "$viol" ]; then
+      write_coordinator_simple_event "guardrails_violation" "policy" "internal" "pause_task" "allowed_paths violation: ${viol}" "allowed_paths check" "1" "" "$wt" ""
       enter_paused "PAUSED_ALLOWED_PATHS" "File '${viol}' outside allowed_paths" \
         "[\"File ${viol} is outside allowed_paths. Please review.\"]"
       NORMAL_EXIT=1; exit 0
@@ -1231,11 +1322,13 @@ for f in fs:
 print('')
 " "$fg" "$changed" 2>/dev/null || echo "")
     if [ -n "$viol" ]; then
+      write_coordinator_simple_event "guardrails_violation" "policy" "internal" "pause_task" "forbidden_globs violation: ${viol}" "forbidden_globs check" "1" "" "$wt" ""
       enter_paused "PAUSED_FORBIDDEN_GLOBS" "File '${viol}' matches forbidden_globs" \
         "[\"File ${viol} matches forbidden_globs. Please review.\"]"
       NORMAL_EXIT=1; exit 0
     fi
   fi
+  write_coordinator_simple_event "guardrails_checked" "policy" "internal" "attempt_continue" "guardrails passed (changed_count=${changed_count})" "allowed_paths+forbidden_globs checks" "0" "" "$wt" ""
   return 0
 }
 
@@ -1247,6 +1340,7 @@ setup_worktree() {
   local pad; pad=$(printf "%03d" "$att_num")
   local wt="${WORKTREES_DIR}/${TASK_ID}/attempt_${pad}"
   [ -z "$bref" ] && bref="main"
+  write_coordinator_simple_event "worktree_setup_started" "git" "internal" "worktree_prepare" "prepare worktree for attempt ${att_num}" "" "" "$repo" "$wt" ""
   if [ -z "$repo" ]; then
     enter_paused "PAUSED_NOT_GIT_REPO" "repo_path is empty" \
       "[\"Set repo_path to a directory.\"]"
@@ -1259,6 +1353,7 @@ setup_worktree() {
         "[\"Check path permissions or choose another folder.\"]"
       NORMAL_EXIT=1; exit 0
     }
+    write_coordinator_simple_event "worktree_repo_created" "filesystem" "internal" "git_repo_check" "created missing repo directory" "mkdir -p <repo_path>" "0" "$repo" "" ""
   fi
   if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$repo" init >/dev/null 2>&1 || {
@@ -1266,6 +1361,7 @@ setup_worktree() {
         "[\"Check write permission and git availability, then run next.\"]"
       NORMAL_EXIT=1; exit 0
     }
+    write_coordinator_simple_event "git_repo_initialized" "git" "internal" "git_head_check" "initialized git repository" "git -C <repo_path> init" "0" "$repo" "" ""
   fi
   # Ensure a usable base ref exists for worktree creation.
   if ! git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1; then
@@ -1276,6 +1372,7 @@ setup_worktree() {
         "[\"Check git config/permissions and run next.\"]"
       NORMAL_EXIT=1; exit 0
     }
+    write_coordinator_simple_event "git_repo_initialized" "git" "internal" "git_base_ref" "created initial commit for empty repository" "git -C <repo_path> commit --allow-empty" "0" "$repo" "" ""
   fi
   if ! git -C "$repo" show-ref --verify --quiet "refs/heads/${bref}"; then
     git -C "$repo" branch "$bref" HEAD >/dev/null 2>&1 || true
@@ -1291,27 +1388,58 @@ setup_worktree() {
   # Try git worktree add first
   local wt_ok=0
   local tout=""
+  local worktree_add_rc=1
   command -v timeout >/dev/null 2>&1 && tout="timeout"
   [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
   if [ -n "$tout" ]; then
-    $tout 15 git -C "$repo" worktree add --detach "$wt" "$bref" >/dev/null 2>&1 && wt_ok=1
+    set +e
+    $tout 15 git -C "$repo" worktree add --detach "$wt" "$bref" >/dev/null 2>&1
+    worktree_add_rc=$?
+    set -e
   else
-    git -C "$repo" worktree add --detach "$wt" "$bref" >/dev/null 2>&1 && wt_ok=1
+    set +e
+    git -C "$repo" worktree add --detach "$wt" "$bref" >/dev/null 2>&1
+    worktree_add_rc=$?
+    set -e
+  fi
+  if [ "$worktree_add_rc" = "0" ]; then
+    wt_ok=1
+    write_coordinator_simple_event "worktree_created" "git" "internal" "attempt_workspace" "worktree added from base_ref ${bref}" "git -C <repo_path> worktree add --detach <wt> <base_ref>" "0" "$repo" "$wt" ""
+  else
+    write_coordinator_simple_event "worktree_created" "git" "internal" "attempt_workspace" "worktree add failed; fallback will be used" "git -C <repo_path> worktree add --detach <wt> <base_ref>" "$worktree_add_rc" "$repo" "$wt" ""
   fi
 
   if [ "$wt_ok" = "0" ]; then
     # Fallback: export tracked files only (avoid copying heavy runtime dirs like out/)
     mkdir -p "$wt"
-    git -C "$repo" archive "$bref" | tar -x -C "$wt" >/dev/null 2>&1 || {
+    local archive_rc=1
+    local copy_rc=0
+    set +e
+    git -C "$repo" archive "$bref" | tar -x -C "$wt" >/dev/null 2>&1
+    archive_rc=$?
+    set -e
+    if [ "$archive_rc" != "0" ]; then
       # Last resort: copy repo tree when archive is unavailable.
-      cp -R "$repo"/. "$wt"/ 2>/dev/null || true
-    }
+      set +e
+      cp -R "$repo"/. "$wt"/ 2>/dev/null
+      copy_rc=$?
+      set -e
+    fi
+    write_coordinator_simple_event "worktree_archive_fallback" "git" "internal" "attempt_workspace" "archive_rc=${archive_rc} copy_rc=${copy_rc}" "git archive | tar (fallback cp -R)" "${archive_rc}" "$repo" "$wt" ""
     # Ensure standalone git repo for downstream git diff/log commands.
     [ -f "${wt}/.git" ] && rm -f "${wt}/.git"
-    git -C "$wt" init >/dev/null 2>&1 || true
-    git -C "$wt" add -A >/dev/null 2>&1 || true
-    git -C "$wt" commit -m "worktree init" --allow-empty >/dev/null 2>&1 || true
+    local wt_init_rc=0 wt_add_rc=0 wt_commit_rc=0
+    set +e
+    git -C "$wt" init >/dev/null 2>&1
+    wt_init_rc=$?
+    git -C "$wt" add -A >/dev/null 2>&1
+    wt_add_rc=$?
+    git -C "$wt" commit -m "worktree init" --allow-empty >/dev/null 2>&1
+    wt_commit_rc=$?
+    set -e
+    write_coordinator_simple_event "worktree_fallback_initialized" "git" "internal" "attempt_workspace" "init_rc=${wt_init_rc} add_rc=${wt_add_rc} commit_rc=${wt_commit_rc}" "git -C <wt> init && add && commit --allow-empty" "${wt_init_rc}" "$repo" "$wt" ""
   fi
+  write_coordinator_simple_event "worktree_ready" "git" "internal" "attempt_workspace" "worktree prepared for attempt ${att_num}" "" "0" "$repo" "$wt" ""
   echo "$wt"
 }
 
@@ -1319,12 +1447,15 @@ setup_worktree() {
 ensure_api_call_git_env() {
   local repo="$1" bref="$2"
   local git_ops="${RDLOOP_ROOT}/tools/git_ops.sh"
+  write_coordinator_simple_event "git_env_bootstrap_started" "git" "internal" "git_env_bootstrap" "bootstrap api_call git environment" "git_ops.sh create-branches" "" "$repo" "" ""
   if [ ! -f "$git_ops" ]; then
     log_error "git_ops.sh not found: ${git_ops}"
+    write_coordinator_simple_event "git_env_bootstrap_finished" "git" "internal" "pause_or_retry" "git_ops missing" "git_ops.sh create-branches" "1" "$repo" "" ""
     return 1
   fi
   if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     log_error "repo_path is not a git repo for git_ops bootstrap: ${repo}"
+    write_coordinator_simple_event "git_env_bootstrap_finished" "git" "internal" "pause_or_retry" "repo is not a git repository" "git -C <repo_path> rev-parse --git-dir" "1" "$repo" "" ""
     return 1
   fi
 
@@ -1362,9 +1493,11 @@ with open(sys.argv[5],"w",encoding="utf-8") as f:
   rm -f "$spec_file" 2>/dev/null || true
   if [ "$rc" -ne 0 ]; then
     log_error "git_ops bootstrap failed (rc=${rc}): ${out}"
+    write_coordinator_simple_event "git_env_bootstrap_finished" "git" "internal" "pause_or_retry" "git_ops create-branches failed (rc=${rc})" "git_ops.sh create-branches <spec>" "$rc" "$repo" "" ""
     return "$rc"
   fi
   [ -n "$out" ] && log_info "git_ops bootstrap output: ${out}"
+  write_coordinator_simple_event "git_env_bootstrap_finished" "git" "internal" "worktree_discovery" "git_ops create-branches succeeded" "git_ops.sh create-branches <spec>" "0" "$repo" "" ""
   return 0
 }
 
@@ -1383,6 +1516,7 @@ copy_artifacts() {
     [ -f "${dst}/attempt_${pad}/${f}" ] && cp "${dst}/attempt_${pad}/${f}" "${dst}/${f}" 2>/dev/null || true
   done
   log_info "Artifacts copied from worktree to ${dst}/ (attempt ${att_num})"
+  write_coordinator_simple_event "artifact_copy_completed" "filesystem" "internal" "task_artifacts" "copied artifacts for attempt ${att_num}" "cp -R <worktree>/artifacts -> out/<task>/artifacts" "0" "" "$wt" "${dst}/attempt_${pad}"
 }
 
 ##############################################################################
@@ -1935,6 +2069,11 @@ run_attempt() {
       extract_req_payload_segment "$coder_req_code" "${att_dir}/coder/stdout.log" "${att_dir}/coder/req_payload.txt" "executor"
     fi
     [ -f "${att_dir}/coder/stderr.log" ] || : > "${att_dir}/coder/stderr.log"
+    local coder_response_path=""
+    [ -f "${att_dir}/coder/req_payload.txt" ] && coder_response_path="${att_dir}/coder/req_payload.txt"
+    [ -z "$coder_response_path" ] && [ -f "${att_dir}/coder/stdout.log" ] && coder_response_path="${att_dir}/coder/stdout.log"
+    [ -z "$coder_response_path" ] && [ -f "${att_dir}/coder/run.log" ] && coder_response_path="${att_dir}/coder/run.log"
+    write_agent_response_log "coder" "executor" "$coder_channel_name" "$coder_script" "$coder_response_path" "$coder_session_id" "$coder_req_code" "$coder_dispatch_provider" "coordinator" "$coder_rc"
     write_commands_log "$att_num" "coder:${coder_type}" "$coder_rc" "$c_secs" "$cmd_log"
   fi
   c_fin=$(now_iso)
@@ -2052,9 +2191,21 @@ run_attempt() {
   check_control_pause "AFTER_TEST"
 
   # ---- GIT EVIDENCE ----
-  git -C "$wt" diff "${base_ref}...HEAD" > "${att_dir}/diff.patch" 2>/dev/null || echo "" > "${att_dir}/diff.patch"
-  git -C "$wt" diff --stat "${base_ref}...HEAD" > "${att_dir}/diff.stat" 2>/dev/null || echo "" > "${att_dir}/diff.stat"
-  git -C "$wt" rev-parse HEAD > "${att_dir}/head_commit.txt" 2>/dev/null || echo "" > "${att_dir}/head_commit.txt"
+  local git_diff_patch_rc=0 git_diff_stat_rc=0 git_head_rc=0
+  set +e
+  git -C "$wt" diff "${base_ref}...HEAD" > "${att_dir}/diff.patch" 2>/dev/null
+  git_diff_patch_rc=$?
+  git -C "$wt" diff --stat "${base_ref}...HEAD" > "${att_dir}/diff.stat" 2>/dev/null
+  git_diff_stat_rc=$?
+  git -C "$wt" rev-parse HEAD > "${att_dir}/head_commit.txt" 2>/dev/null
+  git_head_rc=$?
+  set -e
+  [ "$git_diff_patch_rc" = "0" ] || echo "" > "${att_dir}/diff.patch"
+  [ "$git_diff_stat_rc" = "0" ] || echo "" > "${att_dir}/diff.stat"
+  [ "$git_head_rc" = "0" ] || echo "" > "${att_dir}/head_commit.txt"
+  local git_evidence_rc=0
+  [ "$git_head_rc" = "0" ] || git_evidence_rc=1
+  write_coordinator_simple_event "git_evidence_collected" "git" "internal" "evidence_bundle" "diff_patch_rc=${git_diff_patch_rc} diff_stat_rc=${git_diff_stat_rc} head_rc=${git_head_rc}" "git diff; git diff --stat; git rev-parse HEAD" "$git_evidence_rc" "$repo" "$wt" "${att_dir}/head_commit.txt"
   local hc; hc=$(cat "${att_dir}/head_commit.txt" 2>/dev/null || echo "")
 
   # Guardrails
@@ -2264,6 +2415,13 @@ PY
     fi
     j_retries=$(( j_retries + 1 ))
   done
+
+  local judge_response_path=""
+  [ -f "${att_dir}/judge/verdict.json" ] && judge_response_path="${att_dir}/judge/verdict.json"
+  [ -z "$judge_response_path" ] && [ -f "${att_dir}/judge/req_payload.txt" ] && judge_response_path="${att_dir}/judge/req_payload.txt"
+  [ -z "$judge_response_path" ] && [ -f "${att_dir}/judge/stdout.log" ] && judge_response_path="${att_dir}/judge/stdout.log"
+  [ -z "$judge_response_path" ] && [ -f "${att_dir}/judge/run.log" ] && judge_response_path="${att_dir}/judge/run.log"
+  write_agent_response_log "judge" "reviewer" "$judge_channel_name" "$judge_script" "$judge_response_path" "$judge_session_id" "$judge_req_code" "$judge_dispatch_provider" "coordinator" "$judge_rc"
 
   j_fin=$(now_iso)
   write_event "$att_num" "JUDGE_FINISHED" "rc=${judge_rc} valid=${jvalid} retries=${j_retries}" "$att_dir" "$wt"
@@ -2787,7 +2945,14 @@ run_role_action_v51() {
   role_dir="${TASK_DIR}/roles/${role}-$(printf '%02d' "$pane_idx")"
   mkdir -p "${role_dir}/coder"
   prompt_path=$(build_role_instruction_v51 "$role" "$role_dir" "$context" "$task_type" "$provider")
-  timeout_s=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
+  timeout_s=$(json_read "$TASK_JSON" "role_timeout_seconds" "")
+  if [ -z "$timeout_s" ]; then
+    timeout_s=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
+    local role_timeout_cap="${RDLOOP_ROLE_TIMEOUT_CAP_SECONDS:-180}"
+    if [[ "$timeout_s" =~ ^[0-9]+$ ]] && [[ "$role_timeout_cap" =~ ^[0-9]+$ ]] && [ "$timeout_s" -gt "$role_timeout_cap" ]; then
+      timeout_s="$role_timeout_cap"
+    fi
+  fi
 
   role_script_suffix=$(resolve_role_adapter_suffix_v51 "$provider" "$launch_mode")
   role_script="${LIB_DIR}/call_coder_${role_script_suffix}.sh"
@@ -2832,6 +2997,12 @@ run_role_action_v51() {
 
   [ -f "${role_dir}/coder/rc.txt" ] && role_rc=$(cat "${role_dir}/coder/rc.txt" 2>/dev/null || echo "$role_rc")
   [ -f "${role_dir}/coder/stdout.log" ] || [ ! -f "${role_dir}/coder/run.log" ] || cp "${role_dir}/coder/run.log" "${role_dir}/coder/stdout.log" 2>/dev/null || true
+
+  local role_response_path=""
+  [ -f "${role_dir}/coder/req_payload.txt" ] && role_response_path="${role_dir}/coder/req_payload.txt"
+  [ -z "$role_response_path" ] && [ -f "${role_dir}/coder/stdout.log" ] && role_response_path="${role_dir}/coder/stdout.log"
+  [ -z "$role_response_path" ] && [ -f "${role_dir}/coder/run.log" ] && role_response_path="${role_dir}/coder/run.log"
+  write_agent_response_log "role_${role}" "$role" "$launch_mode" "$role_script" "$role_response_path" "$session_id" "$req_code" "$provider" "coordinator" "$role_rc"
 
   write_event_ext "role_action_finished" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"rc\":${role_rc},\"path\":\"${role_dir}\"}"
   if [ "$role_rc" != "0" ]; then
@@ -2887,7 +3058,12 @@ role_transition_v51() {
 
   repo_path=$(json_read "$TASK_JSON" "repo_path" "")
   if [ -n "$repo_path" ] && [ -d "$repo_path" ]; then
-    bash "$GIT_OPS_BIN" role-commit --task "$TASK_ID" --role "$from_role" --session-id "$from_sid" --attempt-id "$from_idx" --message "phase complete" --repo "$repo_path" >/dev/null 2>&1 || true
+    local role_commit_rc=0
+    set +e
+    bash "$GIT_OPS_BIN" role-commit --task "$TASK_ID" --role "$from_role" --session-id "$from_sid" --attempt-id "$from_idx" --message "phase complete" --repo "$repo_path" >/dev/null 2>&1
+    role_commit_rc=$?
+    set -e
+    write_coordinator_simple_event "git_role_commit" "git" "internal" "role_transition" "role=${from_role} session_id=${from_sid}" "git_ops.sh role-commit" "$role_commit_rc" "$repo_path" "" ""
     commit_sha=$(get_commit_sha "$repo_path")
   fi
   write_event_ext "role_commit" "{\"task_id\":\"${TASK_ID}\",\"role\":\"${from_role}\",\"commit_sha\":\"${commit_sha}\",\"timestamp\":\"$(now_iso)\",\"session_id\":\"${from_sid}\"}"
@@ -3009,10 +3185,19 @@ cmd_reset() {
   # Clean worktrees
   local wtb="${WORKTREES_DIR}/${tid}"
   if [ -d "$wtb" ]; then
+    local removed_count=0 remove_fail_count=0
     local rp=""; [ -f "$TASK_JSON" ] && rp=$(json_read "$TASK_JSON" "repo_path" "")
     if [ -n "$rp" ] && [ -d "$rp" ]; then
-      for w in "${wtb}"/attempt_*; do [ -d "$w" ] && { git -C "$rp" worktree remove --force "$w" 2>/dev/null || true; }; done
+      for w in "${wtb}"/attempt_*; do
+        [ -d "$w" ] || continue
+        if git -C "$rp" worktree remove --force "$w" 2>/dev/null; then
+          removed_count=$(( removed_count + 1 ))
+        else
+          remove_fail_count=$(( remove_fail_count + 1 ))
+        fi
+      done
     fi
+    write_coordinator_simple_event "reset_worktree_cleanup" "git" "internal" "task_reset" "removed=${removed_count} failed=${remove_fail_count}" "git -C <repo_path> worktree remove --force <worktree>" "$remove_fail_count" "$rp" "$wtb" ""
     rm -rf "$wtb"
   fi
   local ma=3; [ -f "$TASK_JSON" ] && ma=$(json_read "$TASK_JSON" "max_attempts" "3")
@@ -3096,6 +3281,7 @@ ensure_status_on_lock_fail() {
   local ca; ca=$(json_read "${TASK_DIR}/status.json" "current_attempt" "0")
   local st; st=$(json_read "${TASK_DIR}/status.json" "state" "RUNNING")
   write_status "$st" "$ca" "$ma" "false" "" "already running" '[]' "" "" "null" ""
+  write_coordinator_simple_event "lock_fail_status_written" "lock" "internal" "status_update" "status refreshed while lock is held by another process" "" "0" "" "" "${TASK_DIR}/status.json"
 }
 
 ##############################################################################

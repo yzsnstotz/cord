@@ -30,7 +30,6 @@ function updateSidebarUI() {
     sidebar.classList.toggle('collapsed', sidebarCollapsed);
   }
   if (toggle) {
-    toggle.style.left = sidebarCollapsed ? '10px' : '310px';
     const svg = toggle.querySelector('svg');
     if (svg) {
       svg.style.transform = sidebarCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
@@ -127,20 +126,6 @@ const TEMPLATES = {
     forbidden_globs: ['**/.env', '**/secrets*']
   }
 };
-
-function renderTemplates() {
-  const list = document.getElementById('template-list');
-  if (!list) return;
-  list.innerHTML = Object.entries(TEMPLATES).map(([id, tpl]) => `
-    <div class="task-item" onclick="openNewSpecModalWithTemplate('${id}')">
-      <div class="task-id">${escapeHtml(id)}</div>
-      <div class="task-meta">
-        <span class="task-state-tag">${escapeHtml(tpl.task_type)}</span>
-        <span style="font-size:11px;color:#8b949e">Template</span>
-      </div>
-    </div>
-  `).join('');
-}
 
 async function openNewSpecModalWithTemplate(templateId) {
   await openNewSpecModal();
@@ -2416,37 +2401,57 @@ let selectedSpecTaskId = null;
 
 // Load task specs list (A1-2: task_id, task_type, scoring_mode, updated_at; click → detail)
 async function loadTaskSpecs() {
-  const data = await api('/task_specs');
-  const specs = data.specs || [];
-  const container = document.getElementById('task-specs-list');
-  if (!container) return;
+  const list = document.getElementById('template-list');
+  if (!list) return;
 
-  if (specs.length === 0) {
-    container.innerHTML = '<div style="padding:8px;color:#8b949e;font-size:12px">No task specs found.</div>';
-    return;
-  }
+  let specs = [];
+  try {
+    const data = await api('/task_specs');
+    specs = data.specs || [];
+  } catch (e) {}
 
-  container.innerHTML = specs.map(s => `
-    <div class="task-item ${s.task_id === selectedSpecTaskId ? 'active' : ''}" style="padding:8px 12px;cursor:pointer"
-         onclick="showSpecDetail('${escapeHtml(s.task_id)}')">
+  let html = '';
+
+  // Render hardcoded templates first
+  html += Object.entries(TEMPLATES).map(([id, tpl]) => `
+    <div class="task-item" style="cursor:default">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <div class="task-id" style="font-size:12px">${escapeHtml(s.task_id)}</div>
-          <div style="font-size:11px;color:#8b949e">
-            ${escapeHtml(s.task_type || 'no type')} · ${escapeHtml(s.scoring_mode || '')} · ${escapeHtml(s.updated_at ? s.updated_at.slice(0, 19) + 'Z' : '')}
+        <div onclick="openNewSpecModalWithTemplate('${id}')" style="cursor:pointer;flex:1;min-width:0">
+          <div class="task-id" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(id)} <span style="font-size:10px;color:#8b949e">(tpl)</span></div>
+          <div class="task-meta">
+            <span class="task-state-tag">${escapeHtml(tpl.task_type || 'solo')}</span>
+            <span style="font-size:11px;color:#8b949e">Built-in</span>
           </div>
         </div>
-        <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
-          <button class="btn write-action" style="padding:3px 8px;font-size:11px"
+        <button class="btn btn-primary write-action" style="padding:2px 6px;font-size:10px;margin-left:4px"
+          onclick="generateTaskFromTemplate('${id}')">Generate</button>
+      </div>
+    </div>
+  `).join('');
+
+  // Render loaded specs
+  html += specs.map(s => `
+    <div class="task-item ${s.task_id === selectedSpecTaskId ? 'active' : ''}" style="padding:10px 12px;cursor:default">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div onclick="showSpecDetail('${escapeHtml(s.task_id)}')" style="cursor:pointer;flex:1;min-width:0">
+          <div class="task-id" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.task_id)}</div>
+          <div style="font-size:11px;color:#8b949e">
+            ${escapeHtml(s.task_type || 'no type')} · ${escapeHtml(s.updated_at ? s.updated_at.slice(5, 16).replace('T', ' ') : '')}
+          </div>
+        </div>
+        <div style="display:flex;gap:4px;flex-shrink:0;align-items:center">
+          <button class="btn btn-primary write-action" style="padding:2px 6px;font-size:10px"
+            onclick="generateTaskFromTemplate('${escapeHtml(s.task_id)}')">Generate</button>
+          <button class="btn write-action" style="padding:2px 6px;font-size:10px"
             onclick="openEditSpecModal('${escapeHtml(s.task_id)}')">Edit</button>
-          <button class="btn write-action" style="padding:3px 8px;font-size:11px"
-            onclick="copySpec('${escapeHtml(s.task_id)}')">Copy</button>
-          <button class="btn btn-danger write-action" style="padding:3px 8px;font-size:11px"
-            onclick="deleteSpec('${escapeHtml(s.task_id)}')">Del</button>
+          <button class="btn btn-danger write-action" style="padding:2px 6px;font-size:10px"
+            onclick="deleteSpec('${escapeHtml(s.task_id)}')">×</button>
         </div>
       </div>
     </div>
   `).join('');
+
+  list.innerHTML = html;
   updateReadOnlyBanner();
 }
 
@@ -2535,37 +2540,72 @@ async function loadAdapters() {
   }
 }
 
-// A6-1: Save current adapter selection as default (rdloop.config.json)
-async function saveAdaptersAsDefault() {
-  const coderEl = document.getElementById('adapter-coder');
-  const judgeEl = document.getElementById('adapter-judge');
-  const coderModelEl = document.getElementById('adapter-coder-model');
-  const judgeModelEl = document.getElementById('adapter-judge-model');
-  const default_coder = coderEl ? coderEl.value : null;
-  const default_judge = judgeEl ? judgeEl.value : null;
-  const default_coder_model = coderModelEl && coderModelEl.value ? coderModelEl.value : null;
-  const default_judge_model = judgeModelEl && judgeModelEl.value ? judgeModelEl.value : null;
+/**
+ * Prompt for a template name and save current form state as a new spec (template).
+ */
+async function makeCurrentAsTemplate() {
+  const tplName = prompt('Enter a name for this template (alphanumeric, underscore, hyphen):');
+  if (!tplName) return;
+  if (!/^[A-Za-z0-9_-]+$/.test(tplName)) {
+    alert('Invalid template name.');
+    return;
+  }
+  
+  // Use existing saveNewSpec logic but with the new template name as taskId
+  const originalTaskIdEl = document.getElementById('modal-task-id');
+  const originalVal = originalTaskIdEl.value;
+  originalTaskIdEl.value = tplName;
   try {
-    const res = await fetch('/api/config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        default_coder: default_coder || null,
-        default_judge: default_judge || null,
-        default_coder_model: default_coder_model || null,
-        default_judge_model: default_judge_model || null
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      alert('Failed to save default: ' + (data.error || ''));
+    await saveNewSpec();
+    const notice = document.getElementById('task-specs-notice');
+    if (notice) notice.textContent = 'Template saved: ' + tplName;
+    setTimeout(() => { if (notice) notice.textContent = ''; }, 3000);
+  } finally {
+    originalTaskIdEl.value = originalVal;
+  }
+}
+
+/**
+ * Generate a new task instance from a template (built-in or saved spec).
+ */
+async function generateTaskFromTemplate(templateId) {
+  let baseSpec = {};
+  if (TEMPLATES[templateId]) {
+    baseSpec = TEMPLATES[templateId];
+  } else {
+    try {
+      const data = await api(`/task_specs/${encodeURIComponent(templateId)}`);
+      baseSpec = data.spec || {};
+    } catch (e) {
+      alert('Failed to load base spec: ' + e.message);
       return;
     }
-    const notice = document.getElementById('task-specs-notice');
-    if (notice) notice.textContent = 'Default adapters saved.';
-    setTimeout(() => { if (notice) notice.textContent = ''; }, 3000);
+  }
+
+  const newTaskId = prompt('Enter new Task ID for the instance:', 'task_' + new Date().getTime().toString().slice(-6));
+  if (!newTaskId) return;
+  if (!/^[A-Za-z0-9_-]+$/.test(newTaskId)) {
+    alert('Invalid Task ID.');
+    return;
+  }
+
+  const spec = { ...baseSpec, task_id: newTaskId, created_at: new Date().toISOString() };
+  
+  try {
+    const res = await fetch('/api/task_specs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: newTaskId, spec })
+    });
+    const result = await res.json();
+    if (!res.ok) {
+      alert('Generation failed: ' + (result.error || 'Validation failed'));
+      return;
+    }
+    alert('Task generated: ' + newTaskId);
+    loadTaskSpecs();
   } catch (e) {
-    alert('Failed to save default: ' + (e.message || ''));
+    alert('Save failed: ' + (e.message || String(e)));
   }
 }
 
@@ -3158,7 +3198,6 @@ function syncFormToJson() {
       launch_mode: launchMode,
       launch_mode_locked: launchModeLocked,
       execution_mode: 'auto',
-      channel_type: channelType,
       repo_path: repoPath || undefined,
       base_ref: baseRef || 'main',
       goal: instruction || '',
@@ -3170,11 +3209,7 @@ function syncFormToJson() {
       attempt_context_mode: document.getElementById('modal-attempt-context-mode')?.value || 'fresh_each',
       constraints,
       allowed_paths: allowedPaths,
-      forbidden_globs: forbiddenGlobs,
-      coder,
-      judge,
-      ...(coderModel ? { coder_model: coderModel } : {}),
-      ...(judgeModel ? { judge_model: judgeModel } : {})
+      forbidden_globs: forbiddenGlobs
     };
 
     const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim();
@@ -3189,11 +3224,16 @@ function syncFormToJson() {
       knowledge_shards: getSelectedKnowledgeShards()
     };
 
+    // Role-based model selection (F1 redesign)
     if (taskType === 'copywriting') {
       spec.collab_roles = {
-        executor: document.getElementById('adapter-coder')?.value || 'claude',
-        reviewer: document.getElementById('adapter-judge')?.value || 'codex'
+        executor: document.getElementById('collab-role-executor')?.value || 'claude',
+        reviewer: document.getElementById('collab-role-reviewer')?.value || 'codex'
       };
+      spec.coder = 'cliapi-proxy';
+      spec.judge = 'cliapi-proxy';
+      spec.coder_model = spec.collab_roles.executor;
+      spec.judge_model = spec.collab_roles.reviewer;
     } else if (taskType === 'solo') {
       const p = soloProvider || 'claude';
       spec.collab_roles = { pm: p, designer: p, executor: p, reviewer: p, inspiration: p };
@@ -3204,8 +3244,15 @@ function syncFormToJson() {
       }
       spec.coder = 'solo';
       spec.judge = 'solo';
+      spec.coder_model = p;
+      spec.judge_model = p;
     } else if (taskType === 'multi_agent') {
       spec.collab_roles = collectCollabRolesFromForm();
+      spec.coder = 'ccb';
+      spec.judge = 'ccb';
+      // In multi-agent, top-level model usually means default or executor
+      spec.coder_model = spec.collab_roles.executor || 'codex';
+      spec.judge_model = spec.collab_roles.reviewer || 'codex';
     }
 
     const knowledgeEnabled = document.getElementById('modal-knowledge-enabled')?.checked === true;
@@ -3232,6 +3279,7 @@ function syncJsonToForm() {
     if (spec.task_type) {
       const el = document.getElementById('modal-task-type');
       if (el) el.value = spec.task_type;
+      onTaskTypeChange();
     }
     if (spec.launch_mode) {
       const el = document.getElementById('modal-launch-mode');
@@ -3246,6 +3294,14 @@ function syncJsonToForm() {
     set('modal-max-iterations', spec.agent_config?.max_attempts || spec.max_attempts || 5);
     set('modal-auto-pass-threshold', spec.agent_config?.auto_pass_threshold || 0.85);
     set('modal-inspiration-trigger', spec.agent_config?.inspiration_trigger_attempts || 3);
+
+    // Sync collab roles back to UI selectors
+    if (spec.collab_roles) {
+      Object.entries(spec.collab_roles).forEach(([role, model]) => {
+        const el = document.getElementById('collab-role-' + role);
+        if (el) el.value = model;
+      });
+    }
 
     if (document.getElementById('modal-knowledge-enabled')) document.getElementById('modal-knowledge-enabled').checked = spec.knowledge_enabled !== false;
     set('modal-knowledge-provider', spec.knowledge_provider || spec.agent_config?.provider || 'codex');
@@ -3365,6 +3421,12 @@ async function onTaskTypeChange() {
   const sel = document.getElementById('modal-task-type');
   if (!sel) return;
   const taskType = sel.value;
+  
+  // Sync executor_type for UI logic
+  if (taskType === 'solo') setExecutorType('solo_agent');
+  else if (taskType === 'multi_agent') setExecutorType('multi_agent');
+  else if (taskType === 'copywriting') setExecutorType('api_call');
+
   const container = document.getElementById('rubric-thresholds-container');
   if (!container) return;
 
@@ -3403,9 +3465,9 @@ function setExecutorType(type) {
     const el = document.getElementById(id);
     if (el) el.style.display = show ? '' : 'none';
   };
-  showIf('section-adapter-grid', type !== 'solo_agent');
-  showIf('collab-config-wrap', type === 'multi_agent');
-  showIf('section-repo-git', type !== 'api_call' || true);
+  showIf('section-role-models', true); // Always show, contains 'Make it Template'
+  showIf('collab-config-wrap', false); // legacy wrap
+  showIf('section-repo-git', true);
   showIf('section-loop-config', type === 'solo_agent');
   showIf('section-knowledge', true);
   showIf('section-observation', type === 'solo_agent');
@@ -3414,6 +3476,18 @@ function setExecutorType(type) {
   showIf('section-channel-type', false);
   showIf('section-attempt-context', type === 'api_call');
   onRunSurfaceChange();
+  
+  // Update role row visibility (F1 redesign)
+  document.querySelectorAll('.role-row').forEach(row => {
+    const role = row.dataset.role;
+    if (type === 'solo_agent') {
+      row.style.display = (role === 'executor' || role === 'inspiration') ? '' : 'none';
+    } else if (type === 'api_call') {
+      row.style.display = (role === 'executor' || role === 'reviewer') ? '' : 'none';
+    } else {
+      row.style.display = '';
+    }
+  });
 }
 
 function updateSessionModeConstraints() {
@@ -3754,29 +3828,21 @@ async function openNewSpecModal() {
           </details>
         </div>
 
-        <div id="section-channel-type" style="margin-bottom:12px;display:none">
-          <label class="form-label">Execution channel (v3.3)</label>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <select id="adapter-channel-type" class="form-select" style="width:auto" onchange="onChannelTypeChange()">
-              ${CHANNEL_TYPES.map(c => `<option value="${escapeHtml(c.value)}" ${c.value === defaultChannel ? 'selected' : ''}>${escapeHtml(c.label)} — ${escapeHtml(c.tag)}</option>`).join('')}
-            </select>
-            <span id="adapter-channel-tag" style="font-size:11px;color:#8b949e"></span>
+        <div id="section-role-models" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <strong class="form-label" style="margin:0">Model Selection (per role)</strong>
+            <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="makeCurrentAsTemplate()">Make it Template</button>
           </div>
-        </div>
-
-        <div id="section-adapter-grid" style="margin-bottom:12px">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-            <div>
-              <label class="form-label">Coder Adapter (A5)</label>
-              <div id="coder-adapter-selector">${buildAdapterSelector('coder', defaultCoder, defaultCoderModel, defaultChannel)}</div>
-            </div>
-            <div>
-              <label class="form-label">Judge Adapter (A5)</label>
-              <div id="judge-adapter-selector">${buildAdapterSelector('judge', defaultJudge, defaultJudgeModel, defaultChannel)}</div>
-            </div>
-          </div>
-          <div style="margin-bottom:12px">
-            <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
+          <div id="collab-roles-table" style="font-size:12px">
+            <table style="width:100%;border-collapse:collapse">
+              <thead><tr><th style="text-align:left;padding-bottom:4px">Role</th><th style="text-align:left;padding-bottom:4px">Model / Provider</th></tr></thead>
+              <tbody>
+                ${COLLAB_ROLES.map(r => {
+                  const opts = COLLAB_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
+                  return `<tr class="role-row" data-role="${escapeHtml(r.key)}"><td style="padding:4px 0">${escapeHtml(r.label)}</td><td style="padding:4px 0"><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="width:100%" onchange="syncFormToJson()">${opts}</select></td></tr>`;
+                }).join('')}
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -4201,28 +4267,22 @@ async function openEditSpecModal(taskId) {
           </details>
         </div>
 
-        <div id="section-channel-type" style="margin-bottom:12px">
-          <label class="form-label">Execution channel (v3.3)</label>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <select id="adapter-channel-type" class="form-select" style="width:auto" onchange="onChannelTypeChange()">
-              ${CHANNEL_TYPES.map(c => `<option value="${escapeHtml(c.value)}" ${c.value === editChannel ? 'selected' : ''}>${escapeHtml(c.label)} — ${escapeHtml(c.tag)}</option>`).join('')}
-            </select>
-            <span id="adapter-channel-tag" style="font-size:11px;color:#8b949e"></span>
+        <div id="section-role-models" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <strong class="form-label" style="margin:0">Model Selection (per role)</strong>
+            <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="makeCurrentAsTemplate()">Make it Template</button>
           </div>
-        </div>
-
-        <div id="section-adapter-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-          <div>
-            <label class="form-label">Coder Adapter (A5)</label>
-            <div id="coder-adapter-selector">${buildAdapterSelector('coder', coderAdapterForSelector, spec.coder_model, editChannel)}</div>
+          <div id="collab-roles-table" style="font-size:12px">
+            <table style="width:100%;border-collapse:collapse">
+              <thead><tr><th style="text-align:left;padding-bottom:4px">Role</th><th style="text-align:left;padding-bottom:4px">Model / Provider</th></tr></thead>
+              <tbody>
+                ${COLLAB_ROLES_EDIT.map(r => {
+                  const opts = COLLAB_PROVIDERS_EDIT.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
+                  return `<tr class="role-row" data-role="${escapeHtml(r.key)}"><td style="padding:4px 0">${escapeHtml(r.label)}</td><td style="padding:4px 0"><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="width:100%" onchange="syncFormToJson()">${opts}</select></td></tr>`;
+                }).join('')}
+              </tbody>
+            </table>
           </div>
-          <div>
-            <label class="form-label">Judge Adapter (A5)</label>
-            <div id="judge-adapter-selector">${buildAdapterSelector('judge', judgeAdapterForSelector, spec.judge_model, editChannel)}</div>
-          </div>
-        </div>
-        <div style="margin-bottom:12px">
-          <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
         </div>
 
         <div id="section-loop-config" style="margin-bottom:12px;display:none">
@@ -4833,34 +4893,6 @@ function renderPromptCenterPanel() {
     </div>`;
   refreshPromptCenter();
   updateReadOnlyBanner();
-}
-
-// ================================================================
-// Sidebar: add Task Specs section
-// ================================================================
-function renderSpecsSection() {
-  const sidebar = document.getElementById('sidebar');
-  if (!sidebar) return;
-
-  // Check if already rendered
-  if (document.getElementById('specs-section')) return;
-
-  const section = document.createElement('div');
-  section.id = 'specs-section';
-  section.innerHTML = `
-    <div style="padding:12px 12px 4px;display:flex;justify-content:space-between;align-items:center">
-      <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px">Task Specs</div>
-      <button class="btn write-action" style="padding:2px 8px;font-size:11px" onclick="openNewSpecModal()">+ New</button>
-    </div>
-    <div id="task-specs-notice" style="padding:0 12px;font-size:11px;color:#58a6ff;min-height:14px"></div>
-    <div id="task-specs-list" style="max-height:220px;overflow-y:auto;border-bottom:1px solid #30363d"></div>
-    <div style="padding:4px 12px 12px;font-size:11px;color:#8b949e;font-style:italic">
-      Specs from tasks/ and examples/
-    </div>
-  `;
-
-  sidebar.appendChild(section);
-  loadTaskSpecs();
 }
 
 // ================================================================
@@ -5627,8 +5659,7 @@ async function refreshSimulatorPanelContent(force = false) {
 // Initial load (K7-1: load health for read_only first so banner and button state are correct)
 loadHealth().then(() => {
   loadTasks();
-  renderTemplates();
-  renderSpecsSection();
+  loadTaskSpecs();
   updateReadOnlyBanner();
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsPanel);
   document.getElementById('nav-tasks')?.addEventListener('click', () => switchView('tasks'));
