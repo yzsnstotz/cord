@@ -485,6 +485,7 @@ app.get('/api/tasks', (req, res) => {
     const dirs = fs.readdirSync(OUT_DIR).filter(d => {
       if (!TASK_LIST_ID.test(d)) return false;
       if (d.startsWith('_')) return false;
+      if (d.startsWith('template_')) return false;
       const p = path.join(OUT_DIR, d);
       try { return fs.statSync(p).isDirectory(); } catch { return false; }
     });
@@ -1020,29 +1021,135 @@ app.post('/api/run/create', requireWritable, (req, res) => {
   const taskJsonPath = path.join(taskDir, 'task.json');
   let taskJson = readJSON(taskJsonPath) || {};
 
-  // Resolve launch_mode
-  let finalLaunchMode = runtime_overrides?.launch_mode || task_snapshot?.launch_mode || taskJson.launch_mode;
-  let launchModeSource = runtime_overrides?.launch_mode ? 'runtime_override' : 'task_json';
+  const requestedLaunchMode = String(runtime_overrides?.launch_mode || '').trim().toLowerCase();
+  const snapshotLaunchMode = String(task_snapshot?.launch_mode || '').trim().toLowerCase();
+  const taskJsonLaunchMode = String(taskJson?.launch_mode || '').trim().toLowerCase();
+
+  appendTaskLifecycleLog(task_id, {
+    what_happened: 'run_create_requested',
+    event_type: 'RUN_CREATE_REQUESTED',
+    triggered_by: { actor: 'user', source: 'http', author: 'gui' },
+    channel: { name: 'http', direction: 'inbound' },
+    delivery: {
+      from: 'gui',
+      to: 'gui_server',
+      content: {
+        runtime_overrides: runtime_overrides || {},
+        save_and_lock: save_and_lock === true
+      }
+    },
+    executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+    next: { target: 'run_create_resolve' },
+    details: {
+      requested_launch_mode: requestedLaunchMode || '',
+      snapshot_launch_mode: snapshotLaunchMode || '',
+      task_json_launch_mode: taskJsonLaunchMode || '',
+      task_json_locked: taskJson?.launch_mode_locked === true,
+      snapshot_provider: normalizeProviderAlias(task_snapshot?.agent_config?.provider || ''),
+      task_json_provider: normalizeProviderAlias(taskJson?.agent_config?.provider || '')
+    }
+  });
+
+  let finalLaunchMode = '';
+  let launchModeSource = '';
+  if (requestedLaunchMode) {
+    finalLaunchMode = requestedLaunchMode;
+    launchModeSource = 'runtime_override';
+  } else if (taskJsonLaunchMode) {
+    finalLaunchMode = taskJsonLaunchMode;
+    launchModeSource = 'task_json';
+  } else if (snapshotLaunchMode) {
+    finalLaunchMode = snapshotLaunchMode;
+    launchModeSource = 'task_snapshot';
+  }
 
   if (!finalLaunchMode) {
+    appendTaskLifecycleLog(task_id, {
+      what_happened: 'run_create_rejected',
+      event_type: 'RUN_CREATE_REJECTED',
+      triggered_by: { actor: 'gui_server', source: '/api/run/create' },
+      channel: { name: 'http', direction: 'outbound' },
+      delivery: { from: 'gui_server', to: 'gui', content: { error: 'launch_mode_missing' } },
+      executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+      next: { target: 'client_error' },
+      details: { requested_launch_mode: requestedLaunchMode || '', snapshot_launch_mode: snapshotLaunchMode || '', task_json_launch_mode: taskJsonLaunchMode || '' }
+    });
     return res.status(400).json({ error: 'launch_mode is required but missing in both snapshot and overrides' });
   }
+  if (!['ccb', 'bridge'].includes(finalLaunchMode)) {
+    appendTaskLifecycleLog(task_id, {
+      what_happened: 'run_create_rejected',
+      event_type: 'RUN_CREATE_REJECTED',
+      triggered_by: { actor: 'gui_server', source: '/api/run/create' },
+      channel: { name: 'http', direction: 'outbound' },
+      delivery: { from: 'gui_server', to: 'gui', content: { error: 'launch_mode_invalid' } },
+      executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+      next: { target: 'client_error' },
+      details: { resolved_launch_mode: finalLaunchMode, launch_mode_source: launchModeSource }
+    });
+    return res.status(400).json({ error: 'launch_mode must be ccb or bridge' });
+  }
+
+  appendTaskLifecycleLog(task_id, {
+    what_happened: 'run_create_launch_mode_resolved',
+    event_type: 'RUN_CREATE_LAUNCH_MODE_RESOLVED',
+    triggered_by: { actor: 'gui_server', source: '/api/run/create' },
+    channel: { name: 'internal', direction: 'internal' },
+    delivery: { from: 'gui_server', to: 'task_json' },
+    executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+    next: { target: 'task_json_sync' },
+    details: { launch_mode: finalLaunchMode, launch_mode_source: launchModeSource }
+  });
 
   // Save & Lock logic (F3)
   if (save_and_lock) {
     taskJson.launch_mode = finalLaunchMode;
     taskJson.launch_mode_locked = true;
     atomicWriteJSON(taskJsonPath, taskJson);
-    launchModeSource = 'task_json'; // now it's in the json
+    launchModeSource = 'task_json'; // persisted in task.json
   }
   // Coordinator routing is based on launch_mode (v5.1), so always sync launch_mode at run time.
+  const requestedRunSurface = finalLaunchMode === 'ccb' ? 'visual_ccb' : 'bridge';
   const launchModeOverride = applyRunSurfaceOverrideToTaskJson(
     taskJsonPath,
-    finalLaunchMode === 'ccb' ? 'visual_ccb' : 'bridge'
+    requestedRunSurface
   );
   if (!launchModeOverride.ok) {
+    appendTaskLifecycleLog(task_id, {
+      what_happened: 'run_create_override_failed',
+      event_type: 'RUN_CREATE_OVERRIDE_FAILED',
+      triggered_by: { actor: 'gui_server', source: '/api/run/create' },
+      channel: { name: 'filesystem', direction: 'internal' },
+      delivery: { from: 'gui_server', to: 'task_json', content_path: taskJsonPath },
+      executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+      next: { target: 'client_error' },
+      details: {
+        launch_mode: finalLaunchMode,
+        requested_run_surface: requestedRunSurface,
+        error: launchModeOverride.error || 'override_failed'
+      }
+    });
     return res.status(400).json({ error: launchModeOverride.error || 'Invalid launch mode override' });
   }
+  taskJson = readJSON(taskJsonPath) || taskJson;
+  appendTaskLifecycleLog(task_id, {
+    what_happened: 'run_create_override_applied',
+    event_type: 'RUN_CREATE_OVERRIDE_APPLIED',
+    triggered_by: { actor: 'gui_server', source: '/api/run/create' },
+    channel: { name: 'filesystem', direction: 'internal' },
+    delivery: { from: 'gui_server', to: 'task_json', content_path: taskJsonPath },
+    executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+    next: { target: 'coordinator_spawn' },
+    details: {
+      launch_mode: finalLaunchMode,
+      launch_mode_source: launchModeSource,
+      requested_run_surface: requestedRunSurface,
+      override_applied: launchModeOverride.applied === true,
+      override_reason: launchModeOverride.reason || '',
+      task_json_launch_mode: String(taskJson.launch_mode || '').trim().toLowerCase(),
+      task_json_locked: taskJson.launch_mode_locked === true
+    }
+  });
 
   // Spawn coordinator
   const guiDir = path.join(taskDir, 'gui');
@@ -1059,6 +1166,17 @@ app.post('/api/run/create', requireWritable, (req, res) => {
 
   fs.writeFileSync(path.join(guiDir, 'runner.pid'), String(child.pid));
   child.unref();
+
+  appendTaskLifecycleLog(task_id, {
+    what_happened: 'run_create_spawned',
+    event_type: 'RUN_CREATE_SPAWNED',
+    triggered_by: { actor: 'gui_server', source: '/api/run/create' },
+    channel: { name: 'process', direction: 'outbound' },
+    delivery: { from: 'gui_server', to: 'coordinator', content: { pid: child.pid } },
+    executed_by: { component: 'gui_server', endpoint: '/api/run/create' },
+    next: { target: 'coordinator_main' },
+    details: { pid: child.pid, launch_mode: finalLaunchMode, launch_mode_source: launchModeSource, save_and_lock: save_and_lock === true }
+  });
 
   res.json({
     run_id: crypto.randomUUID(),
@@ -4042,6 +4160,69 @@ function inferLaunchModeFromLegacy(spec) {
   return 'bridge'; // default
 }
 
+function pickAllowedProvider(candidates, fallbackProvider) {
+  for (const raw of (candidates || [])) {
+    const normalized = normalizeProviderAlias(raw);
+    if (ALLOWED_PROVIDERS.includes(normalized)) return normalized;
+  }
+  return fallbackProvider;
+}
+
+function canonicalizeRoleConfigForV51(spec, warnings = []) {
+  const out = { ...(spec || {}) };
+  const taskType = String(out.task_type || '').trim();
+  const roleKeys = ['pm', 'designer', 'executor', 'reviewer', 'inspiration'];
+  const safeAgentConfig = (out.agent_config && typeof out.agent_config === 'object' && !Array.isArray(out.agent_config))
+    ? { ...out.agent_config }
+    : {};
+  const rawRoles = (out.collab_roles && typeof out.collab_roles === 'object' && !Array.isArray(out.collab_roles))
+    ? out.collab_roles
+    : {};
+  const normalizedRoles = {};
+  for (const [k, v] of Object.entries(rawRoles)) {
+    const nv = normalizeProviderAlias(v);
+    if (ALLOWED_PROVIDERS.includes(nv)) normalizedRoles[k] = nv;
+  }
+
+  if (taskType === 'solo') {
+    const soloProvider = pickAllowedProvider([
+      safeAgentConfig.provider,
+      normalizedRoles.pm,
+      normalizedRoles.executor,
+      normalizedRoles.designer,
+      normalizedRoles.reviewer,
+      normalizedRoles.inspiration
+    ], 'codex');
+    out.collab_roles = { pm: soloProvider, designer: soloProvider, executor: soloProvider, reviewer: soloProvider, inspiration: soloProvider };
+    safeAgentConfig.provider = soloProvider;
+    warnings.push(`solo provider normalized to '${soloProvider}' across all collab_roles`);
+  } else if (taskType === 'copywriting') {
+    const executorProvider = pickAllowedProvider([normalizedRoles.executor, safeAgentConfig.provider], 'codex');
+    const reviewerProvider = pickAllowedProvider([normalizedRoles.reviewer, executorProvider], executorProvider);
+    const inspirationProvider = pickAllowedProvider([normalizedRoles.inspiration, executorProvider], executorProvider);
+    out.collab_roles = { executor: executorProvider, reviewer: reviewerProvider, inspiration: inspirationProvider };
+    safeAgentConfig.provider = pickAllowedProvider([safeAgentConfig.provider, executorProvider], executorProvider);
+  } else if (taskType === 'multi_agent') {
+    const fallbackProvider = pickAllowedProvider([
+      safeAgentConfig.provider,
+      normalizedRoles.pm,
+      normalizedRoles.executor,
+      normalizedRoles.reviewer,
+      normalizedRoles.inspiration
+    ], 'codex');
+    const nextRoles = {};
+    for (const key of roleKeys) {
+      const preferred = (key === 'reviewer' || key === 'inspiration') ? normalizedRoles.executor : normalizedRoles.pm;
+      nextRoles[key] = pickAllowedProvider([normalizedRoles[key], preferred, fallbackProvider], fallbackProvider);
+    }
+    out.collab_roles = nextRoles;
+    safeAgentConfig.provider = pickAllowedProvider([safeAgentConfig.provider, fallbackProvider], fallbackProvider);
+  }
+
+  out.agent_config = safeAgentConfig;
+  return out;
+}
+
 function normalizeTaskV51FromLegacy(spec) {
   const out = { ...(spec || {}) };
   const warnings = [];
@@ -4080,13 +4261,17 @@ function normalizeTaskV51FromLegacy(spec) {
   }
 
   if (!out.task_type) out.task_type = 'solo';
+  if (out.task_type) out.task_type = String(out.task_type).trim();
   if (!out.launch_mode) out.launch_mode = 'bridge';
+  if (out.launch_mode) out.launch_mode = String(out.launch_mode).trim().toLowerCase();
   if (out.launch_mode_locked === undefined) {
     out.launch_mode_locked = false;
     warnings.push('launch_mode_locked defaulted to false');
   }
 
-  return { spec: out, warnings, deprecations };
+  const canonicalized = canonicalizeRoleConfigForV51(out, warnings);
+
+  return { spec: canonicalized, warnings, deprecations };
 }
 
 // A3-1/A3-2: Validate task spec data — JSON already parsed; optional schema-style checks
@@ -4355,11 +4540,17 @@ app.delete('/api/task_specs/:taskId', requireWritable, (req, res) => {
 app.post('/api/tasks', requireWritable, (req, res) => {
   const body = (req.body && typeof req.body === 'object') ? req.body : {};
   const taskId = String(body.task_id || '').trim();
+  const specInput = body.spec || body; // Support both {task_id, spec} and direct spec payload
+
   if (!taskId || !validateTaskSpecId(taskId)) {
     return res.status(400).json({ error: 'Invalid or missing task_id' });
   }
 
-  const normalized = normalizeTaskV51FromLegacy(body);
+  if (taskId.startsWith('template_')) {
+    return res.status(400).json({ error: "Task IDs starting with 'template_' are reserved for blueprints. Use /api/task_specs instead." });
+  }
+
+  const normalized = normalizeTaskV51FromLegacy(specInput);
   const spec = normalized.spec;
   const validation = validateTaskSpecData(spec, { v51Strict: true });
   if (!validation.valid) {
@@ -4876,7 +5067,7 @@ function resolvePromptRef(name, opts = {}) {
 }
 
 function applyRunSurfaceOverrideToTaskJson(taskPath, requestedRunSurface) {
-  if (!requestedRunSurface) return { ok: true, applied: false };
+  if (!requestedRunSurface) return { ok: true, applied: false, reason: 'not_requested' };
   if (!['bridge', 'visual_ccb'].includes(requestedRunSurface)) {
     return { ok: false, error: 'run_surface must be bridge or visual_ccb' };
   }
@@ -4884,9 +5075,10 @@ function applyRunSurfaceOverrideToTaskJson(taskPath, requestedRunSurface) {
   if (!task || typeof task !== 'object') {
     return { ok: false, error: 'Failed to read task.json' };
   }
+  const beforeLaunchMode = String(task.launch_mode || '').trim().toLowerCase();
   const executorType = task.executor_type || '';
   if (executorType === 'api_call') {
-    return { ok: true, applied: false };
+    return { ok: true, applied: false, reason: 'executor_type_api_call' };
   }
   if (executorType === 'multi_agent' && requestedRunSurface !== 'visual_ccb') {
     return { ok: false, error: 'multi_agent only supports visual_ccb run surface' };
@@ -4920,7 +5112,14 @@ function applyRunSurfaceOverrideToTaskJson(taskPath, requestedRunSurface) {
   } catch (err) {
     return { ok: false, error: `Failed to write task.json: ${err.message}` };
   }
-  return { ok: true, applied: true };
+  return {
+    ok: true,
+    applied: true,
+    requested_run_surface: requestedRunSurface,
+    previous_launch_mode: beforeLaunchMode,
+    final_launch_mode: task.launch_mode,
+    launch_mode_locked: task.launch_mode_locked === true
+  };
 }
 
 // Atomic write for plain text files (D1/D2 — temp → fsync → rename)
@@ -5305,11 +5504,29 @@ app.get('/api/prompts', (req, res) => {
 
 // GET /api/prompts/:name — read a prompt file (D1)
 app.get('/api/prompts/:name', (req, res) => {
-  const resolved = resolvePromptRef(req.params.name, { forWrite: false });
-  if (!resolved) {
-    return res.status(400).json({ error: 'Invalid prompt file name' });
+  const taskId = req.query.task_id;
+  const promptName = req.params.name;
+  
+  let filepath = '';
+  let isTaskScoped = false;
+
+  if (taskId && isValidTaskId(taskId)) {
+    const taskDir = path.join(OUT_DIR, taskId);
+    const taskPromptPath = path.join(taskDir, 'prompts', promptName);
+    if (fs.existsSync(taskPromptPath)) {
+      filepath = taskPromptPath;
+      isTaskScoped = true;
+    }
   }
-  const { name, filepath } = resolved;
+
+  if (!filepath) {
+    const resolved = resolvePromptRef(promptName, { forWrite: false });
+    if (!resolved) {
+      return res.status(400).json({ error: 'Invalid prompt file name' });
+    }
+    filepath = resolved.filepath;
+  }
+
   if (!fs.existsSync(filepath)) {
     return res.status(404).json({ error: 'Prompt not found' });
   }
@@ -5317,7 +5534,7 @@ app.get('/api/prompts/:name', (req, res) => {
     const content = fs.readFileSync(filepath, 'utf8');
     let updated_at = null;
     try { updated_at = fs.statSync(filepath).mtime.toISOString().replace(/\.\d{3}Z$/, 'Z'); } catch {}
-    res.json({ name, content, updated_at });
+    res.json({ name: promptName, content, updated_at, task_scoped: isTaskScoped });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -5325,15 +5542,32 @@ app.get('/api/prompts/:name', (req, res) => {
 
 // PUT /api/prompts/:name — save a prompt file (D1/D2). K7-1: READ_ONLY blocks; K7-2: overwrite confirmed by client.
 app.put('/api/prompts/:name', requireWritable, (req, res) => {
-  const resolved = resolvePromptRef(req.params.name, { forWrite: true });
-  if (!resolved) {
-    return res.status(400).json({ error: 'Invalid prompt file name' });
-  }
-  const { name, filepath } = resolved;
+  const taskId = req.query.task_id;
+  const promptName = req.params.name;
   const { content } = req.body;
   if (typeof content !== 'string') {
     return res.status(400).json({ error: 'content must be a string' });
   }
+
+  let filepath = '';
+  if (taskId && isValidTaskId(taskId)) {
+    const taskDir = path.join(OUT_DIR, taskId);
+    // Note: for NEW tasks that haven't been saved to out/ yet, this will fail.
+    // User must save the task spec first.
+    if (!fs.existsSync(taskDir)) {
+      return res.status(404).json({ error: 'Task instance directory not found. Please save the task first before editing its specific prompts.' });
+    }
+    const promptsDir = path.join(taskDir, 'prompts');
+    if (!fs.existsSync(promptsDir)) fs.mkdirSync(promptsDir, { recursive: true });
+    filepath = path.join(promptsDir, promptName);
+  } else {
+    const resolved = resolvePromptRef(promptName, { forWrite: true });
+    if (!resolved) {
+      return res.status(400).json({ error: 'Invalid prompt file name' });
+    }
+    filepath = resolved.filepath;
+  }
+
   // Backup existing file with timestamp (D1 optional versioning)
   let backup_path = null;
   if (fs.existsSync(filepath)) {
@@ -5343,12 +5577,12 @@ app.put('/api/prompts/:name', requireWritable, (req, res) => {
   }
   try {
     atomicWriteText(filepath, content);
-    auditLog({ action: 'prompt_save', name, size: content.length, backup: backup_path });
+    auditLog({ action: 'prompt_save', name: promptName, task_id: taskId || null, size: content.length, backup: backup_path });
     let updated_at = null;
     try { updated_at = fs.statSync(filepath).mtime.toISOString().replace(/\.\d{3}Z$/, 'Z'); } catch {}
-    res.json({ ok: true, name, updated_at, backup: backup_path ? path.basename(backup_path) : null });
+    res.json({ ok: true, name: promptName, updated_at, task_scoped: !!taskId, backup: backup_path ? path.basename(backup_path) : null });
   } catch (err) {
-    auditLog({ action: 'prompt_save_failed', name, error: err.message });
+    auditLog({ action: 'prompt_save_failed', name: promptName, task_id: taskId || null, error: err.message });
     res.status(500).json({ error: err.message });
   }
 });

@@ -2015,22 +2015,21 @@ run_attempt() {
     coder_rc=1
   else
     local c_s_epoch; c_s_epoch=$(date +%s)
-    local coder_session_id="" coder_req_code=""
-    if [ "$run_surface" = "visual_ccb" ] || [ "$run_surface" = "bridge" ]; then
+    local coder_channel_name="" coder_session_id="" coder_req_code=""
+    coder_channel_name=$(channel_name_for_adapter_suffix "$coder_script_suffix")
+    if [ "$coder_channel_name" = "ccb" ] || [ "$coder_channel_name" = "bridge" ]; then
       coder_session_id="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "$att_num")"
       write_event_ext "session_id_assigned" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\",\"attempt\":${att_num}}"
-      if [ "$run_surface" = "visual_ccb" ]; then
+      if [ "$coder_channel_name" = "ccb" ]; then
         coder_req_code="$("$REQ_CODE_GEN" "$coder_session_id")"
         write_event_ext "req_code_assigned" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\",\"attempt\":${att_num}}"
-        write_event_ext "ccb_call" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\"}"
+        write_event_ext "ccb_call" "{\"session_id\":\"${coder_session_id}\",\"req_code\":\"${coder_req_code}\",\"role\":\"executor\",\"provider\":\"${ccb_coder_provider}\",\"planned\":false,\"adapter_suffix\":\"${coder_script_suffix}\"}"
       else
-        write_event_ext "bridge_call" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\",\"provider\":\"${ccb_coder_provider}\"}"
+        write_event_ext "bridge_call" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\",\"provider\":\"${ccb_coder_provider}\",\"planned\":false,\"adapter_suffix\":\"${coder_script_suffix}\"}"
       fi
     fi
-    local coder_channel_name="local"
-    [ "$run_surface" = "visual_ccb" ] && coder_channel_name="ccb"
-    [ "$run_surface" = "bridge" ] && coder_channel_name="bridge"
     local coder_dispatch_provider="${ccb_coder_provider:-$coder_type}"
+    write_event_ext "coder_channel_resolved" "{\"attempt\":${att_num},\"channel\":\"${coder_channel_name}\",\"run_surface\":\"${run_surface}\",\"adapter_suffix\":\"${coder_script_suffix}\",\"provider\":\"${coder_dispatch_provider}\"}"
     write_agent_dispatch_log "coder" "executor" "$coder_channel_name" "$coder_script" "$ifile" "$coder_session_id" "$coder_req_code" "$coder_dispatch_provider" "coder_execution"
     # timeout
     local tout=""
@@ -2340,22 +2339,21 @@ PY
 
   # B4-7: run.log records Judge temperature=0 (deterministic output)
   log_info "Judge run with temperature=0 (B4-7)"
-  local judge_session_id="" judge_req_code=""
-  if [ "$run_surface" = "visual_ccb" ] || [ "$run_surface" = "bridge" ]; then
+  local judge_channel_name="" judge_session_id="" judge_req_code=""
+  judge_channel_name=$(channel_name_for_adapter_suffix "$judge_script_suffix")
+  if [ "$judge_channel_name" = "ccb" ] || [ "$judge_channel_name" = "bridge" ]; then
     judge_session_id="$("$SESSION_ID_GEN" "$TASK_ID" "reviewer" "$att_num")"
     write_event_ext "session_id_assigned" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\",\"attempt\":${att_num}}"
-    if [ "$run_surface" = "visual_ccb" ]; then
+    if [ "$judge_channel_name" = "ccb" ]; then
       judge_req_code="$("$REQ_CODE_GEN" "$judge_session_id")"
       write_event_ext "req_code_assigned" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\",\"attempt\":${att_num}}"
-      write_event_ext "ccb_call" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\"}"
+      write_event_ext "ccb_call" "{\"session_id\":\"${judge_session_id}\",\"req_code\":\"${judge_req_code}\",\"role\":\"reviewer\",\"provider\":\"${ccb_judge_provider}\",\"planned\":false,\"adapter_suffix\":\"${judge_script_suffix}\"}"
     else
-      write_event_ext "bridge_call" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\",\"provider\":\"${ccb_judge_provider}\"}"
+      write_event_ext "bridge_call" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\",\"provider\":\"${ccb_judge_provider}\",\"planned\":false,\"adapter_suffix\":\"${judge_script_suffix}\"}"
     fi
   fi
-  local judge_channel_name="local"
-  [ "$run_surface" = "visual_ccb" ] && judge_channel_name="ccb"
-  [ "$run_surface" = "bridge" ] && judge_channel_name="bridge"
   local judge_dispatch_provider="${ccb_judge_provider:-$judge_type}"
+  write_event_ext "judge_channel_resolved" "{\"attempt\":${att_num},\"channel\":\"${judge_channel_name}\",\"run_surface\":\"${run_surface}\",\"adapter_suffix\":\"${judge_script_suffix}\",\"provider\":\"${judge_dispatch_provider}\"}"
   write_agent_dispatch_log "judge" "reviewer" "$judge_channel_name" "$judge_script" "$jrequest" "$judge_session_id" "$judge_req_code" "$judge_dispatch_provider" "judge_execution"
 
   while [ "$j_retries" -le "$JUDGE_MAX_RETRIES" ]; do
@@ -2630,6 +2628,10 @@ if etype == "ccb_call":
     channel_name = "ccb"
 elif etype == "bridge_call":
     channel_name = "bridge"
+elif etype in ("role_action_started", "coder_channel_resolved", "judge_channel_resolved"):
+    pch = str(payload.get("channel", "")).strip().lower()
+    if pch in ("ccb", "bridge", "local"):
+        channel_name = pch
 elif etype == "knowledge_inject":
     channel_name = "knowledge"
 elif etype in ("handoff_pointer_written", "role_transition"):
@@ -2742,8 +2744,12 @@ resolve_provider_for_role() {
   case "$task_type" in
     solo)
       local p=""
-      p=$(json_read "$TASK_JSON" "collab_roles.pm" "")
+      # v5.1 solo uses one provider; agent_config.provider is the canonical source.
+      p=$(json_read "$TASK_JSON" "agent_config.provider" "")
+      [ -z "$p" ] && p=$(json_read "$TASK_JSON" "collab_roles.pm" "")
       [ -z "$p" ] && p=$(json_read "$TASK_JSON" "collab_roles.executor" "")
+      [ -z "$p" ] && p=$(json_read "$TASK_JSON" "collab_roles.designer" "")
+      [ -z "$p" ] && p=$(json_read "$TASK_JSON" "collab_roles.reviewer" "")
       [ -z "$p" ] && p="$fallback"
       echo "$p"
       ;;
@@ -2795,6 +2801,15 @@ resolve_nonvisual_judge_type_v51() {
     cursor) echo "cursor_cli" ;;
     bridge|claude|"") echo "bridge" ;;
     *) echo "bridge" ;;
+  esac
+}
+
+channel_name_for_adapter_suffix() {
+  local suffix="${1:-}"
+  case "$suffix" in
+    ccb) echo "ccb" ;;
+    bridge|codex|antigravity|cursor|claude_bridge|opencode|droid) echo "bridge" ;;
+    *) echo "local" ;;
   esac
 }
 
@@ -2873,16 +2888,16 @@ ccb_launch_pane() {
   write_event_ext "session_id_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"pane_idx\":${pane_idx}}"
   write_event_ext "req_code_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\"}"
   upsert_task_state_pane "$role" "$pane_idx" "running" "$session_id" "ccb"
-  write_event_ext "role_start" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"launch_mode\":\"ccb\"}"
-  write_event_ext "ccb_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\",\"provider\":\"${provider}\"}"
+  write_event_ext "role_start" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"launch_mode\":\"ccb\",\"planned\":true}"
+  write_event_ext "ccb_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\",\"provider\":\"${provider}\",\"planned\":true}"
 }
 
 bridge_launch_pane() {
   local role="$1" pane_idx="$2" provider="$3" session_id="$4" _context="$5"
   write_event_ext "session_id_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"pane_idx\":${pane_idx}}"
   upsert_task_state_pane "$role" "$pane_idx" "running" "$session_id" "bridge"
-  write_event_ext "role_start" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"launch_mode\":\"bridge\"}"
-  write_event_ext "bridge_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\"}"
+  write_event_ext "role_start" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"launch_mode\":\"bridge\",\"planned\":true}"
+  write_event_ext "bridge_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\",\"planned\":true}"
 }
 
 build_role_instruction_v51() {
@@ -2894,17 +2909,33 @@ build_role_instruction_v51() {
   ifile="${role_dir}/coder/prompt.txt"
   mkdir -p "${role_dir}/coder"
 
-  case "$role" in
-    pm)
-      role_prompt="You are PM. Produce actionable task decomposition and execution notes in .rdloop/pm_notes.md. Do not execute git commands."
-      ;;
-    designer)
-      role_prompt="You are Designer. Produce a concrete design contract in design_contract.md (files, interfaces, and implementation plan)."
-      ;;
-    *)
-      role_prompt="You are ${role}. Follow the task goal and acceptance criteria."
-      ;;
-  esac
+  # §v5.1.4: Use role-specific prompt file if exists, fallback to hardcoded
+  local fname="$role"
+  [ "$role" = "executor" ] && fname="coder"
+  [ "$role" = "reviewer" ] && fname="judge"
+  
+  # Task-scope override: check out/<task_id>/prompts/ first
+  local role_prompt_file="${TASK_DIR}/prompts/${fname}.prompt.md"
+  if [ ! -f "$role_prompt_file" ]; then
+    # Fallback to global default
+    role_prompt_file="${PROMPTS_DIR}/${fname}.prompt.md"
+  fi
+
+  if [ -f "$role_prompt_file" ]; then
+    role_prompt=$(cat "$role_prompt_file")
+  else
+    case "$role" in
+      pm)
+        role_prompt="You are PM. Produce actionable task decomposition and execution notes in .rdloop/pm_notes.md. Do not execute git commands."
+        ;;
+      designer)
+        role_prompt="You are Designer. Produce a concrete design contract in design_contract.md (files, interfaces, and implementation plan)."
+        ;;
+      *)
+        role_prompt="You are ${role}. Follow the task goal and acceptance criteria."
+        ;;
+    esac
+  fi
 
   {
     echo "=== ROLE ==="
@@ -2941,7 +2972,7 @@ build_role_instruction_v51() {
 
 run_role_action_v51() {
   local role="$1" pane_idx="$2" session_id="$3" provider="$4" launch_mode="$5" context="$6" task_type="$7"
-  local role_dir role_script role_script_suffix req_code role_rc timeout_s prompt_path
+  local role_dir role_script role_script_suffix role_channel_name req_code role_rc timeout_s prompt_path
   role_dir="${TASK_DIR}/roles/${role}-$(printf '%02d' "$pane_idx")"
   mkdir -p "${role_dir}/coder"
   prompt_path=$(build_role_instruction_v51 "$role" "$role_dir" "$context" "$task_type" "$provider")
@@ -2958,6 +2989,7 @@ run_role_action_v51() {
   fi
 
   role_script_suffix=$(resolve_role_adapter_suffix_v51 "$provider" "$launch_mode")
+  role_channel_name=$(channel_name_for_adapter_suffix "$role_script_suffix")
   role_script="${LIB_DIR}/call_coder_${role_script_suffix}.sh"
   if [ ! -f "$role_script" ]; then
     enter_paused "PAUSED_ROLE_FAILED" \
@@ -2967,15 +2999,21 @@ run_role_action_v51() {
     NORMAL_EXIT=1; exit 0
   fi
 
-  write_event_ext "role_action_started" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\",\"launch_mode\":\"${launch_mode}\",\"script\":\"${role_script}\"}"
-  write_agent_dispatch_log "role_${role}" "$role" "$launch_mode" "$role_script" "$prompt_path" "$session_id" "" "$provider" "$role"
+  write_event_ext "role_action_started" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\",\"launch_mode\":\"${launch_mode}\",\"channel\":\"${role_channel_name}\",\"adapter_suffix\":\"${role_script_suffix}\",\"script\":\"${role_script}\"}"
+  if [ "$role_channel_name" = "ccb" ]; then
+    req_code="$("$REQ_CODE_GEN" "$session_id")"
+    write_event_ext "req_code_assigned" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\",\"planned\":false}"
+    write_event_ext "ccb_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"req_code\":\"${req_code}\",\"provider\":\"${provider}\",\"planned\":false}"
+  elif [ "$role_channel_name" = "bridge" ]; then
+    write_event_ext "bridge_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\",\"planned\":false}"
+  fi
+  write_agent_dispatch_log "role_${role}" "$role" "$role_channel_name" "$role_script" "$prompt_path" "$session_id" "$req_code" "$provider" "$role"
 
   local tout=""
   command -v timeout >/dev/null 2>&1 && tout="timeout"
   [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
   role_rc=1
   if [ "$role_script_suffix" = "ccb" ]; then
-    req_code="$("$REQ_CODE_GEN" "$session_id")"
     if [ -n "$tout" ]; then
       set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
     else
@@ -3005,7 +3043,7 @@ run_role_action_v51() {
   [ -f "${role_dir}/coder/req_payload.txt" ] && role_response_path="${role_dir}/coder/req_payload.txt"
   [ -z "$role_response_path" ] && [ -f "${role_dir}/coder/stdout.log" ] && role_response_path="${role_dir}/coder/stdout.log"
   [ -z "$role_response_path" ] && [ -f "${role_dir}/coder/run.log" ] && role_response_path="${role_dir}/coder/run.log"
-  write_agent_response_log "role_${role}" "$role" "$launch_mode" "$role_script" "$role_response_path" "$session_id" "$req_code" "$provider" "coordinator" "$role_rc"
+  write_agent_response_log "role_${role}" "$role" "$role_channel_name" "$role_script" "$role_response_path" "$session_id" "$req_code" "$provider" "coordinator" "$role_rc"
 
   write_event_ext "role_action_finished" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"rc\":${role_rc},\"path\":\"${role_dir}\"}"
   if [ "$role_rc" != "0" ]; then

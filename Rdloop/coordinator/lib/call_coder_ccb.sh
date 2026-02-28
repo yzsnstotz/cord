@@ -225,6 +225,23 @@ if [ -n "$session_root" ]; then
   esac
 fi
 
+# v5.1 Fallback: If session file not found or invalid in repo root, check rdloop_root (workspace root)
+if [ ! -f "$ccb_session_file" ] && [ -n "$rdloop_root" ]; then
+  root_session_file=""
+  case "$ccb_bin" in
+    cask) root_session_file="${rdloop_root}/.ccb/.codex-session" ;;
+    gask) root_session_file="${rdloop_root}/.ccb/.gemini-session" ;;
+    lask) root_session_file="${rdloop_root}/.ccb/.claude-session" ;;
+    oask) root_session_file="${rdloop_root}/.ccb/.opencode-session" ;;
+    dask) root_session_file="${rdloop_root}/.ccb/.droid-session" ;;
+    *)   root_session_file="${rdloop_root}/.ccb/.codex-session" ;;
+  esac
+  if [ -f "$root_session_file" ]; then
+    echo "[CODER][semi-auto/ccb] using workspace-root session file: ${root_session_file}"
+    ccb_session_file="$root_session_file"
+  fi
+fi
+
 restore_latest_stale_session() {
   local session_file="$1"
   [ -n "$session_file" ] || return 0

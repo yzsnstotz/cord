@@ -1,0 +1,1 @@
+You are PM. Produce actionable task decomposition and execution notes in .rdloop/pm_notes.md. Do not execute git commands.

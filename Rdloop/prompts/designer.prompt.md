@@ -1,0 +1,1 @@
+You are Designer. Produce a concrete design contract in design_contract.md (files, interfaces, and implementation plan).

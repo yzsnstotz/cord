@@ -49,6 +49,16 @@ document.addEventListener('DOMContentLoaded', () => {
   updateSidebarUI();
 });
 
+window.addEventListener('error', function(event) {
+  console.error('Unhandled error:', event.error);
+  // alert('GUI Error: ' + (event.error?.message || event.message));
+});
+
+window.addEventListener('unhandledrejection', function(event) {
+  console.error('Unhandled rejection:', event.reason);
+  // alert('GUI Promise Error: ' + (event.reason?.message || String(event.reason)));
+});
+
 // B1-2: etag per logName for If-None-Match
 let liveLogEtag = {};
 
@@ -265,7 +275,11 @@ function badge(state) {
 // Fetch helper
 async function api(path, opts) {
   const res = await fetch(`/api${path}`, opts);
-  return res.json();
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    return { error: err.error || String(res.status) };
+  }
+  return res.json().catch(e => ({ error: 'JSON parse error: ' + e.message }));
 }
 
 function setButtonLoading(btn, isLoading) {
@@ -2442,7 +2456,7 @@ async function loadTaskSpecs() {
         <div style="display:flex;gap:4px;flex-shrink:0;align-items:center">
           <button class="btn btn-primary write-action" style="padding:2px 6px;font-size:10px"
             onclick="generateTaskFromTemplate('${escapeHtml(s.task_id)}')">Generate</button>
-          <button class="btn write-action" style="padding:2px 6px;font-size:10px"
+          <button class="btn" style="padding:2px 6px;font-size:10px"
             onclick="openEditSpecModal('${escapeHtml(s.task_id)}')">Edit</button>
           <button class="btn btn-danger write-action" style="padding:2px 6px;font-size:10px"
             onclick="deleteSpec('${escapeHtml(s.task_id)}')">×</button>
@@ -2544,11 +2558,15 @@ async function loadAdapters() {
  * Prompt for a template name and save current form state as a new spec (template).
  */
 async function makeCurrentAsTemplate() {
-  const tplName = prompt('Enter a name for this template (alphanumeric, underscore, hyphen):');
+  let tplName = prompt('Enter a name for this template (alphanumeric, underscore, hyphen):');
   if (!tplName) return;
   if (!/^[A-Za-z0-9_-]+$/.test(tplName)) {
     alert('Invalid template name.');
     return;
+  }
+  
+  if (!tplName.startsWith('template_')) {
+    tplName = 'template_' + tplName;
   }
   
   // Use existing saveNewSpec logic but with the new template name as taskId
@@ -2557,9 +2575,7 @@ async function makeCurrentAsTemplate() {
   originalTaskIdEl.value = tplName;
   try {
     await saveNewSpec();
-    const notice = document.getElementById('task-specs-notice');
-    if (notice) notice.textContent = 'Template saved: ' + tplName;
-    setTimeout(() => { if (notice) notice.textContent = ''; }, 3000);
+    alert('Template saved successfully: ' + tplName);
   } finally {
     originalTaskIdEl.value = originalVal;
   }
@@ -2582,17 +2598,22 @@ async function generateTaskFromTemplate(templateId) {
     }
   }
 
-  const newTaskId = prompt('Enter new Task ID for the instance:', 'task_' + new Date().getTime().toString().slice(-6));
+  let newTaskId = prompt('Enter new Task ID for the instance:', 'task_' + new Date().getTime().toString().slice(-6));
   if (!newTaskId) return;
   if (!/^[A-Za-z0-9_-]+$/.test(newTaskId)) {
     alert('Invalid Task ID.');
     return;
   }
 
+  // Ensure instances don't accidentally get saved as templates
+  if (newTaskId.startsWith('template_')) {
+    newTaskId = newTaskId.replace(/^template_/, '');
+  }
+
   const spec = { ...baseSpec, task_id: newTaskId, created_at: new Date().toISOString() };
   
   try {
-    const res = await fetch('/api/task_specs', {
+    const res = await fetch('/api/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task_id: newTaskId, spec })
@@ -2602,8 +2623,9 @@ async function generateTaskFromTemplate(templateId) {
       alert('Generation failed: ' + (result.error || 'Validation failed'));
       return;
     }
-    alert('Task generated: ' + newTaskId);
-    loadTaskSpecs();
+    alert('Task instance generated: ' + newTaskId);
+    loadTasks(); // Refresh tasks list
+    loadTaskSpecs(); // Refresh templates list (just in case)
   } catch (e) {
     alert('Save failed: ' + (e.message || String(e)));
   }
@@ -3164,52 +3186,30 @@ function syncFormToJson() {
     if (!jsonEl) return;
     const taskId = (document.getElementById('modal-task-id')?.value || '').trim();
     const taskType = document.getElementById('modal-task-type')?.value || '';
-    const launchMode = document.getElementById('modal-launch-mode')?.value || 'bridge';
-    const launchModeLocked = document.getElementById('modal-launch-mode-locked')?.checked === true;
     const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
     const acceptance = (document.getElementById('modal-acceptance')?.value || '').trim().split(/\n/).map(s => s.trim()).filter(Boolean);
     const testCmd = (document.getElementById('modal-test-cmd')?.value || 'true').trim();
-    const maxAttempts = Math.min(10, Math.max(1, parseInt(document.getElementById('modal-max-attempts')?.value || '3', 10) || 3));
-    const coderTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-coder-timeout')?.value || '600', 10) || 600));
-    const judgeTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-judge-timeout')?.value || '300', 10) || 300));
+    const maxAttempts = parseInt(document.getElementById('modal-max-attempts')?.value || '3', 10);
+    const coderTimeout = parseInt(document.getElementById('modal-coder-timeout')?.value || '600', 10);
+    const judgeTimeout = parseInt(document.getElementById('modal-judge-timeout')?.value || '300', 10);
     const constraintsRaw = (document.getElementById('modal-constraints')?.value || '').trim();
     const constraints = constraintsRaw ? constraintsRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
     const repoPath = (document.getElementById('modal-repo-path')?.value || '').trim();
     const baseRef = (document.getElementById('modal-base-ref')?.value || 'main').trim();
-    const apRaw = (document.getElementById('modal-allowed-paths')?.value || '').trim();
-    const allowedPaths = apRaw ? apRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
-    const fgRaw = (document.getElementById('modal-forbidden-globs')?.value || '').trim();
-    const forbiddenGlobs = fgRaw ? fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : ['**/.env', '**/secrets*', '**/*.pem'];
-    const channelType = document.getElementById('adapter-channel-type')?.value || 'coding-agent-cli';
-    let coder = document.getElementById('adapter-coder')?.value || 'mock';
-    let judge = document.getElementById('adapter-judge')?.value || 'mock';
-    let coderModel = document.getElementById('adapter-coder-model')?.value?.trim();
-    let judgeModel = document.getElementById('adapter-judge-model')?.value?.trim();
-    if (channelType === 'ccb') {
-      coder = 'ccb';
-      judge = 'ccb';
-      coderModel = document.getElementById('adapter-coder')?.value || 'codex';
-      judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
-    }
+
     const spec = {
-      schema_version: 'v1',
       task_id: taskId || 'my_task',
       task_type: taskType || 'solo',
-      launch_mode: launchMode,
-      launch_mode_locked: launchModeLocked,
-      execution_mode: 'auto',
       repo_path: repoPath || undefined,
       base_ref: baseRef || 'main',
       goal: instruction || '',
       acceptance,
       test_cmd: testCmd || 'true',
-      max_attempts: maxAttempts,
-      coder_timeout_seconds: coderTimeout,
-      judge_timeout_seconds: judgeTimeout,
+      max_attempts: Number.isFinite(maxAttempts) ? maxAttempts : 3,
+      coder_timeout_seconds: Number.isFinite(coderTimeout) ? coderTimeout : 600,
+      judge_timeout_seconds: Number.isFinite(judgeTimeout) ? judgeTimeout : 300,
       attempt_context_mode: document.getElementById('modal-attempt-context-mode')?.value || 'fresh_each',
-      constraints,
-      allowed_paths: allowedPaths,
-      forbidden_globs: forbiddenGlobs
+      constraints
     };
 
     const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim();
@@ -3218,49 +3218,20 @@ function syncFormToJson() {
 
     spec.agent_config = {
       max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '5', 10),
-      auto_pass_threshold: autoPass,
-      inspiration_trigger_attempts: inspTrigger,
+      auto_pass_threshold: Number.isFinite(autoPass) ? autoPass : 0.85,
+      inspiration_trigger_attempts: Number.isFinite(inspTrigger) ? inspTrigger : 3,
       provider: soloProvider || 'claude',
       knowledge_shards: getSelectedKnowledgeShards()
     };
 
-    // Role-based model selection (F1 redesign)
-    if (taskType === 'copywriting') {
-      spec.collab_roles = {
-        executor: document.getElementById('collab-role-executor')?.value || 'claude',
-        reviewer: document.getElementById('collab-role-reviewer')?.value || 'codex'
-      };
-      spec.coder = 'cliapi-proxy';
-      spec.judge = 'cliapi-proxy';
-      spec.coder_model = spec.collab_roles.executor;
-      spec.judge_model = spec.collab_roles.reviewer;
-    } else if (taskType === 'solo') {
-      const p = soloProvider || 'claude';
-      spec.collab_roles = { pm: p, designer: p, executor: p, reviewer: p, inspiration: p };
-      const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-      if (soloExecutorInstruction) {
-        spec.executor_instruction = soloExecutorInstruction;
-        spec.goal = soloExecutorInstruction;
-      }
-      spec.coder = 'solo';
-      spec.judge = 'solo';
-      spec.coder_model = p;
-      spec.judge_model = p;
-    } else if (taskType === 'multi_agent') {
-      spec.collab_roles = collectCollabRolesFromForm();
-      spec.coder = 'ccb';
-      spec.judge = 'ccb';
-      // In multi-agent, top-level model usually means default or executor
-      spec.coder_model = spec.collab_roles.executor || 'codex';
-      spec.judge_model = spec.collab_roles.reviewer || 'codex';
-    }
+    const roles = buildCollabRolesForTaskType(taskType, spec);
+    if (roles) spec.collab_roles = roles;
 
     const knowledgeEnabled = document.getElementById('modal-knowledge-enabled')?.checked === true;
     if (knowledgeEnabled) {
       spec.knowledge_enabled = true;
       const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
-      const rp = (document.getElementById('modal-repo-path')?.value || '').trim();
-      spec.knowledge_project_path = kp || normalizeKnowledgePath(rp);
+      spec.knowledge_project_path = kp || normalizeKnowledgePath(repoPath);
       spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
     }
     jsonEl.value = JSON.stringify(spec, null, 2);
@@ -3281,16 +3252,9 @@ function syncJsonToForm() {
       if (el) el.value = spec.task_type;
       onTaskTypeChange();
     }
-    if (spec.launch_mode) {
-      const el = document.getElementById('modal-launch-mode');
-      if (el) el.value = spec.launch_mode;
-    }
-    const lockedEl = document.getElementById('modal-launch-mode-locked');
-    if (lockedEl) lockedEl.checked = spec.launch_mode_locked === true;
 
     set('modal-instruction', spec.goal || spec.instruction);
     set('modal-solo-provider', spec.agent_config?.provider || spec.coder_model || '');
-    set('modal-solo-executor-instruction', spec.executor_instruction || '');
     set('modal-max-iterations', spec.agent_config?.max_attempts || spec.max_attempts || 5);
     set('modal-auto-pass-threshold', spec.agent_config?.auto_pass_threshold || 0.85);
     set('modal-inspiration-trigger', spec.agent_config?.inspiration_trigger_attempts || 3);
@@ -3298,7 +3262,7 @@ function syncJsonToForm() {
     // Sync collab roles back to UI selectors
     if (spec.collab_roles) {
       Object.entries(spec.collab_roles).forEach(([role, model]) => {
-        const el = document.getElementById('collab-role-' + role);
+        const el = getCollabRoleSelect(role);
         if (el) el.value = model;
       });
     }
@@ -3317,30 +3281,8 @@ function syncJsonToForm() {
     document.getElementById('modal-constraints') && (document.getElementById('modal-constraints').value = Array.isArray(spec.constraints) ? spec.constraints.join('\n') : '');
     set('modal-repo-path', spec.repo_path);
     set('modal-base-ref', spec.base_ref || 'main');
-    document.getElementById('modal-allowed-paths') && (document.getElementById('modal-allowed-paths').value = Array.isArray(spec.allowed_paths) ? spec.allowed_paths.join('\n') : '');
-    document.getElementById('modal-forbidden-globs') && (document.getElementById('modal-forbidden-globs').value = Array.isArray(spec.forbidden_globs) ? spec.forbidden_globs.join('\n') : '');
-    if (spec.channel_type) document.getElementById('adapter-channel-type') && (document.getElementById('adapter-channel-type').value = spec.channel_type);
-    if (spec.executor_type) {
-      setExecutorType(spec.executor_type);
-      const smEl = document.getElementById('modal-session-mode');
-      const nextSm = spec.session_mode || defaultSessionModeForExecutor(spec.executor_type);
-      if (smEl) smEl.value = nextSm;
-      _currentSessionMode = nextSm;
-      updateSessionModeConstraints();
-    }
-    onRunSurfaceChange();
-    onChannelTypeChange();
-    const coderVal = spec.coder;
-    const judgeVal = spec.judge;
-    const coderModelVal = spec.coder_model;
-    const judgeModelVal = spec.judge_model;
-    const ch = spec.channel_type || inferChannelFromAdapter(spec.coder);
-    const coderSel = document.getElementById('coder-adapter-selector');
-    const judgeSel = document.getElementById('judge-adapter-selector');
-    if (coderSel) coderSel.innerHTML = buildAdapterSelector('coder', ch === 'ccb' ? (coderModelVal || 'codex') : coderVal, coderModelVal, ch);
-    if (judgeSel) judgeSel.innerHTML = buildAdapterSelector('judge', ch === 'ccb' ? (judgeModelVal || 'codex') : judgeVal, judgeModelVal, ch);
-    refreshModelSelector('coder').catch(() => {});
-    refreshModelSelector('judge').catch(() => {});
+    
+    // Legacy/Sync-only helpers
     if (spec.collab_roles) applyCollabRolesToForm(spec.collab_roles);
     initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
   } catch (_) { /* invalid JSON, ignore */ }
@@ -3427,6 +3369,12 @@ async function onTaskTypeChange() {
   else if (taskType === 'multi_agent') setExecutorType('multi_agent');
   else if (taskType === 'copywriting') setExecutorType('api_call');
 
+  const journeyContainer = document.getElementById('modal-journey-prompts-container');
+  if (journeyContainer) {
+    const taskId = document.getElementById('modal-task-id')?.value || '';
+    journeyContainer.innerHTML = buildTaskJourneyPromptsUI(taskType, taskId);
+  }
+
   const container = document.getElementById('rubric-thresholds-container');
   if (!container) return;
 
@@ -3473,10 +3421,9 @@ function setExecutorType(type) {
   showIf('section-loop-config', type === 'solo_agent');
   showIf('section-knowledge', true);
   showIf('section-observation', type === 'solo_agent');
-  showIf('section-acceptance', type !== 'solo_agent');
+  showIf('section-acceptance', true); // Show for all, contains goal/instruction
   showIf('rubric-thresholds-container', type === 'api_call');
   showIf('section-channel-type', false);
-  showIf('section-attempt-context', type === 'api_call');
   onRunSurfaceChange();
   
   // Update role row visibility (F1 redesign)
@@ -3527,6 +3474,14 @@ function workflowModeToExecutorType(mode) {
   return 'api_call';
 }
 
+function taskTypeToExecutorType(taskType) {
+  const t = normalizeTaskTypeAlias(taskType);
+  if (t === 'solo') return 'solo_agent';
+  if (t === 'multi_agent') return 'multi_agent';
+  if (t === 'copywriting') return 'api_call';
+  return 'solo_agent';
+}
+
 function defaultSessionModeForExecutor(executorType) {
   return executorType === 'api_call' ? 'fresh' : 'continuous';
 }
@@ -3575,10 +3530,29 @@ function collabRoleDefaultsFromApi(roleRows) {
   return out;
 }
 
+function isVisibleCollabRoleSelect(el) {
+  if (!el) return false;
+  if (el.disabled) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+
+function getCollabRoleSelect(role) {
+  const key = String(role || '').trim();
+  if (!key) return null;
+  const all = Array.from(document.querySelectorAll(`select[id="collab-role-${key}"]`));
+  if (!all.length) return null;
+  for (let i = all.length - 1; i >= 0; i -= 1) {
+    if (isVisibleCollabRoleSelect(all[i])) return all[i];
+  }
+  return all[all.length - 1];
+}
+
 function collectCollabRolesFromForm() {
   const out = {};
   for (const role of COLLAB_ROLE_KEYS) {
-    const el = document.getElementById('collab-role-' + role);
+    const el = getCollabRoleSelect(role);
     if (el && el.value) out[role] = el.value;
   }
   return Object.keys(out).length ? out : null;
@@ -3587,7 +3561,7 @@ function collectCollabRolesFromForm() {
 function applyCollabRolesToForm(collabRoles) {
   const normalized = normalizeCollabRolesMap(collabRoles);
   COLLAB_ROLE_KEYS.forEach(role => {
-    const el = document.getElementById('collab-role-' + role);
+    const el = getCollabRoleSelect(role);
     if (el && normalized[role]) el.value = normalized[role];
   });
 }
@@ -3612,16 +3586,23 @@ function buildCollabRolesForTaskType(taskType, fallbackSpec) {
   const t = normalizeTaskTypeAlias(taskType);
   const fromSpec = normalizeCollabRolesMap((fallbackSpec && fallbackSpec.collab_roles) || {});
   if (t === 'copywriting') {
-    const execUi = normalizeProviderFromAny(document.getElementById('adapter-coder')?.value || fromSpec.executor || '');
-    const revUi = normalizeProviderFromAny(document.getElementById('adapter-judge')?.value || fromSpec.reviewer || '');
+    const execRoleUi = normalizeProviderFromAny(getCollabRoleSelect('executor')?.value || '');
+    const revRoleUi = normalizeProviderFromAny(getCollabRoleSelect('reviewer')?.value || '');
+    const inspRoleUi = normalizeProviderFromAny(getCollabRoleSelect('inspiration')?.value || '');
+    const execUi = normalizeProviderFromAny(document.getElementById('adapter-coder')?.value || execRoleUi || fromSpec.executor || '');
+    const revUi = normalizeProviderFromAny(document.getElementById('adapter-judge')?.value || revRoleUi || fromSpec.reviewer || '');
+    const inspUi = normalizeProviderFromAny(inspRoleUi || fromSpec.inspiration || '');
     return {
       executor: execUi || 'codex',
-      reviewer: revUi || 'gemini'
+      reviewer: revUi || 'gemini',
+      inspiration: inspUi || execUi || 'codex'
     };
   }
   if (t === 'solo') {
-    const p = normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || fromSpec.pm || fromSpec.executor || 'codex') || 'codex';
-    return { pm: p, designer: p, executor: p, reviewer: p };
+    const soloUi = normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || '');
+    const execRoleUi = normalizeProviderFromAny(getCollabRoleSelect('executor')?.value || '');
+    const p = normalizeProviderFromAny(soloUi || execRoleUi || fromSpec.pm || fromSpec.executor || 'codex') || 'codex';
+    return { pm: p, designer: p, executor: p, reviewer: p, inspiration: p };
   }
   if (t === 'multi_agent') {
     const ui = collectCollabRolesFromForm() || {};
@@ -3630,7 +3611,8 @@ function buildCollabRolesForTaskType(taskType, fallbackSpec) {
       pm: normalizeProviderFromAny(merged.pm || ''),
       designer: normalizeProviderFromAny(merged.designer || ''),
       executor: normalizeProviderFromAny(merged.executor || ''),
-      reviewer: normalizeProviderFromAny(merged.reviewer || '')
+      reviewer: normalizeProviderFromAny(merged.reviewer || ''),
+      inspiration: normalizeProviderFromAny(merged.inspiration || '')
     };
   }
   return fromSpec;
@@ -3643,9 +3625,16 @@ function normalizeToV51SavePayload(rawSpec, taskId) {
 
   const uiTaskType = normalizeTaskTypeAlias(document.getElementById('modal-task-type')?.value || out.task_type);
   if (uiTaskType) out.task_type = uiTaskType;
-  // Launch mode is chosen at run time, not in New/Edit forms.
-  out.launch_mode = 'bridge';
-  out.launch_mode_locked = false;
+  
+  const uiLaunchMode = document.getElementById('modal-launch-mode')?.value || out.launch_mode;
+  if (uiLaunchMode) out.launch_mode = uiLaunchMode;
+  
+  const uiLaunchModeLocked = document.getElementById('modal-launch-mode-locked');
+  if (uiLaunchModeLocked) {
+    out.launch_mode_locked = uiLaunchModeLocked.checked;
+  } else if (out.launch_mode_locked === undefined) {
+    out.launch_mode_locked = false;
+  }
 
   // Keep provider terminology consistent in v5.1 payload.
   if (out.coder !== undefined) delete out.coder;
@@ -3681,11 +3670,16 @@ function normalizeToV51SavePayload(rawSpec, taskId) {
   if (roles && Object.keys(roles).length > 0) out.collab_roles = roles;
 
   const soloProvider = normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || out.agent_config?.provider || '');
+  const uiMaxAttempts = parseInt(document.getElementById('modal-max-iterations')?.value || '', 10);
+  const uiAutoPass = parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '');
+  const uiInspTrigger = parseInt(document.getElementById('modal-inspiration-trigger')?.value || '', 10);
+
   out.agent_config = {
     ...(out.agent_config || {}),
     provider: soloProvider || normalizeProviderFromAny(out.collab_roles?.executor || '') || 'codex',
-    max_attempts: out.agent_config?.max_attempts || out.max_attempts || 3,
-    auto_pass_threshold: out.agent_config?.auto_pass_threshold || 0.85,
+    max_attempts: Number.isFinite(uiMaxAttempts) ? uiMaxAttempts : (out.agent_config?.max_attempts || out.max_attempts || 5),
+    auto_pass_threshold: Number.isFinite(uiAutoPass) ? uiAutoPass : (out.agent_config?.auto_pass_threshold || 0.85),
+    inspiration_trigger_attempts: Number.isFinite(uiInspTrigger) ? uiInspTrigger : (out.agent_config?.inspiration_trigger_attempts || 3),
     knowledge_shards: Array.isArray(out.agent_config?.knowledge_shards) ? out.agent_config.knowledge_shards : getSelectedKnowledgeShards()
   };
   return out;
@@ -3708,13 +3702,13 @@ function validateV51SpecForSave(spec) {
     if (!roles.executor || !roles.reviewer) errors.push('Copywriting requires Executor and Reviewer providers.');
   }
   if (s.task_type === 'solo') {
-    const required = ['pm', 'designer', 'executor', 'reviewer'];
+    const required = ['pm', 'designer', 'executor', 'reviewer', 'inspiration'];
     const vals = required.map(k => normalizeProviderFromAny(roles[k] || '')).filter(Boolean);
-    if (vals.length !== required.length) errors.push('Solo requires PM/Designer/Executor/Reviewer providers.');
+    if (vals.length !== required.length) errors.push('Solo requires PM/Designer/Executor/Reviewer/Inspiration providers.');
     if (new Set(vals).size > 1) errors.push('Solo requires one same provider for all roles.');
   }
   if (s.task_type === 'multi_agent') {
-    const required = ['pm', 'designer', 'executor', 'reviewer'];
+    const required = ['pm', 'designer', 'executor', 'reviewer', 'inspiration'];
     required.forEach((k) => {
       if (!normalizeProviderFromAny(roles[k] || '')) errors.push(`Multi-agent requires collab_roles.${k}.`);
     });
@@ -3739,13 +3733,14 @@ async function openNewSpecModal() {
   } catch {}
   try {
     const roles = await api('/agent/roles');
-    collabRoleDefaults = collabRoleDefaultsFromApi(roles);
+    collabRoleDefaults = roles.defaults || {};
   } catch {}
 
   const defaultChannel = inferChannelFromAdapter(defaultCoder);
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
   const COLLAB_ROLES = COLLAB_ROLE_KEYS.map(key => ({
     key,
+    label: COLLAB_ROLE_LABELS[key],
     provider: collabRoleDefaults[key] || DEFAULT_COLLAB_ROLE_PROVIDERS[key]
   }));
 
@@ -3758,85 +3753,46 @@ async function openNewSpecModal() {
 
         <div id="legacy-warning" class="questions-banner" style="display:none; margin-bottom:12px; border-color: var(--accent-red); background: rgba(218,54,51,0.1)">
           <strong>Legacy Task Detected</strong>
-          <p style="font-size:12px; margin-top:4px">This task uses deprecated fields (executor_type, session_mode, etc.). Saving will normalize it to v5.1.4.</p>
+          <p style="font-size:12px; margin-top:4px">This task uses deprecated fields. Saving will normalize it to v5.1.4.</p>
           <div id="migration-preview" style="font-size:11px; margin-top:8px; opacity:0.8; font-family:monospace"></div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
+        <!-- Primary Fields -->
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; margin-bottom:12px">
           <div>
-            <label class="form-label">Task Type (v5.1)</label>
+            <label class="form-label">Task Type</label>
             <select id="modal-task-type" class="form-select" onchange="syncFormToJson(); onTaskTypeChange()">
               <option value="copywriting">copywriting (single flow)</option>
               <option value="solo" selected>solo (autonomous agent)</option>
               <option value="multi_agent">multi_agent (collaborative)</option>
             </select>
           </div>
-          <div style="font-size:12px;color:#8b949e">
-            Run mode is selected at start time (Run button), not in task editing.
+          <div>
+            <label class="form-label">Template (optional)</label>
+            <select id="modal-template" class="form-select" onchange="applyTemplate()">
+              <option value="">— none —</option>
+              ${Object.keys(window._specTemplates || {}).map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="form-label">Task ID</label>
+            <input type="text" id="modal-task-id" class="form-input" placeholder="my_new_task"
+              pattern="[A-Za-z0-9_-]+" title="Alphanumeric, underscore, hyphen only" oninput="syncFormToJson()">
           </div>
         </div>
 
-        <div id="section-deprecated-fields" style="margin-bottom:12px; opacity:0.6">
-          <details>
-            <summary style="font-size:11px; color:var(--text-muted); cursor:pointer">Deprecated Fields (Legacy v5.0 compat)</summary>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px">
-              <div>
-                <label class="form-label" style="font-size:10px">Executor Type</label>
-                <select id="modal-executor-type" class="form-select" style="font-size:11px" onchange="setExecutorType(this.value); syncFormToJson()">
-                  <option value="api_call">api_call</option>
-                  <option value="solo_agent">solo_agent</option>
-                  <option value="multi_agent">multi_agent</option>
-                </select>
-              </div>
-              <div>
-                <label class="form-label" style="font-size:10px">Session Mode</label>
-                <select id="modal-session-mode" class="form-select" style="font-size:11px" onchange="_currentSessionMode=this.value; syncFormToJson()">
-                  <option value="fresh">fresh</option>
-                  <option value="iterative">iterative</option>
-                </select>
-              </div>
-            </div>
-          </details>
-        </div>
-
         <div style="margin-bottom:12px">
-          <label class="form-label">Task ID</label>
-          <input type="text" id="modal-task-id" class="form-input" placeholder="my_new_task"
-            pattern="[A-Za-z0-9_-]+" title="Alphanumeric, underscore, hyphen only" oninput="syncFormToJson()">
+          <label class="form-label">instruction / goal <span style="color:#f85149">*</span></label>
+          <textarea id="modal-instruction" class="form-input" rows="4" placeholder="Describe what to achieve" style="width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
         </div>
 
-        <div id="section-attempt-context" style="margin-bottom:12px">
-          <label class="form-label">Attempt context mode</label>
-          <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch (divergent). iterative: n+1 gets previous coder output as context (convergent)." onchange="syncFormToJson()">
-            <option value="fresh_each">fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
-            <option value="iterative">iterative — next attempt builds on previous coder output (convergent, e.g. requirements, code)</option>
-          </select>
-        </div>
-
-        <div id="collab-config-wrap" style="margin-bottom:12px;display:none;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <details open>
-            <summary class="form-label" style="cursor:pointer">协作配置 (visual CCB)</summary>
-            <div id="collab-roles-table" style="margin-top:8px;font-size:12px">
-              <table style="width:100%;border-collapse:collapse">
-                <thead><tr><th style="text-align:left">Role</th><th style="text-align:left">Provider</th></tr></thead>
-                <tbody>
-                  ${COLLAB_ROLES.map(r => {
-                    const opts = COLLAB_PROVIDERS.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
-                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px" onchange="syncFormToJson()">${opts}</select></td></tr>`;
-                  }).join('')}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </div>
-
-        <div id="section-role-models" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <!-- Model Selection (Unified) -->
+        <div id="section-role-models" style="margin-bottom:16px;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
             <strong class="form-label" style="margin:0">Model Selection</strong>
             <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="makeCurrentAsTemplate()">Make it Template</button>
           </div>
           
-          <!-- Unified Solo Provider Selector (F1) -->
           <div id="solo-provider-wrap" style="margin-bottom:8px">
             <label class="form-label" style="font-size:11px">Provider</label>
             <select id="modal-solo-provider" class="form-select" onchange="syncFormToJson()">
@@ -3857,142 +3813,151 @@ async function openNewSpecModal() {
           </div>
         </div>
 
-        <div id="section-loop-config" style="margin-bottom:12px;display:none">
-          <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-            <strong class="form-label">Agent Loop Config (v5.1)</strong>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
-              <div>
-                <label class="form-label" style="font-size:11px">max_attempts</label>
-                <input type="number" id="modal-max-iterations" class="form-input" value="5" min="1" max="50" onchange="syncFormToJson()">
+        <!-- Advanced Settings (Collapsed) -->
+        <details style="margin-bottom:12px; border:1px solid #30363d; border-radius:8px; background: rgba(0,0,0,0.1)">
+          <summary style="padding:10px; cursor:pointer; font-size:12px; color:var(--text-muted); font-weight:600">Advanced Settings (Repo, Context, Loop Config)</summary>
+          <div style="padding:12px; border-top:1px solid #30363d">
+            
+            <div id="section-repo-git" style="margin-bottom:16px">
+              <label class="form-label" style="font-size:11px">repo_path</label>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <input type="text" id="modal-repo-path" class="form-input" placeholder="/path/to/repo" style="flex:1;margin:0" onchange="onRepoSelectionChanged()" oninput="syncFormToJson()">
+                <button type="button" class="btn write-action" style="padding:4px 8px;font-size:11px" onclick="openFolderPickerModal()">Choose</button>
               </div>
-              <div>
-                <label class="form-label" style="font-size:11px">auto_pass (0-1)</label>
-                <input type="number" id="modal-auto-pass-threshold" class="form-input" value="0.85" min="0" max="1" step="0.05" onchange="syncFormToJson()">
-              </div>
-              <div>
-                <label class="form-label" style="font-size:11px">inspiration trigger</label>
-                <input type="number" id="modal-inspiration-trigger" class="form-input" value="3" min="1" max="10" onchange="syncFormToJson()">
+              <div style="display:flex; gap:12px">
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">base_ref</label>
+                  <input type="text" id="modal-base-ref" class="form-input" placeholder="main" style="font-size:11px" oninput="syncFormToJson()">
+                </div>
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">context_mode</label>
+                  <select id="modal-attempt-context-mode" class="form-select" style="font-size:11px" onchange="syncFormToJson()">
+                    <option value="fresh_each">fresh_each</option>
+                    <option value="iterative">iterative</option>
+                  </select>
+                </div>
               </div>
             </div>
-            <div style="margin-top:8px;margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Executor instructions</label>
-              <textarea id="modal-solo-executor-instruction" class="form-input" rows="3" placeholder="Instructions sent to the solo executor agent" style="width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
-            </div>
-            <div style="margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Test command</label>
-              <input type="text" id="modal-test-cmd-solo" class="form-input" placeholder="bash run_tests.sh" oninput="syncFormToJson()">
-            </div>
-          </div>
-        </div>
 
-        <div id="section-observation" style="margin-bottom:12px;display:none">
-          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
-            <input type="checkbox" id="modal-open-terminal" checked>
-            <span class="form-label" style="display:inline;margin:0">Open agent terminal on start</span>
-          </label>
-        </div>
+            <div id="section-loop-config" style="margin-bottom:16px; display:none; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117">
+              <strong class="form-label" style="font-size:11px">Loop Parameters</strong>
+              <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:8px">
+                <div>
+                  <label class="form-label" style="font-size:10px">max_attempts</label>
+                  <input type="number" id="modal-max-iterations" class="form-input" style="font-size:11px" value="5" min="1" max="50" onchange="syncFormToJson()">
+                </div>
+                <div>
+                  <label class="form-label" style="font-size:10px">auto_pass</label>
+                  <input type="number" id="modal-auto-pass-threshold" class="form-input" style="font-size:11px" value="0.85" min="0" max="1" step="0.05" onchange="syncFormToJson()">
+                </div>
+                <div>
+                  <label class="form-label" style="font-size:10px">insp_trigger</label>
+                  <input type="number" id="modal-inspiration-trigger" class="form-input" style="font-size:11px" value="3" min="1" max="10" onchange="syncFormToJson()">
+                </div>
+              </div>
+            </div>
 
-        <div id="section-knowledge" style="margin-bottom:12px;display:none">
-          <details>
-            <summary class="form-label" style="cursor:pointer">Knowledge Settings</summary>
-            <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+            <div id="section-knowledge" style="margin-bottom:16px; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117">
               <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
                 <input type="checkbox" id="modal-knowledge-enabled" checked oninput="syncFormToJson()">
-                <span>Enable knowledge read/write</span>
+                <span class="form-label" style="margin:0; font-size:11px">Enable Knowledge agent</span>
               </label>
-              <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Provider</label>
-                <select id="modal-knowledge-provider" class="form-select" style="width:auto" onchange="syncFormToJson()">
-                  ${['codex','gemini','claude','opencode','droid'].map(p => '<option value="'+p+'">'+providerDisplayName(p)+'</option>').join('')}
-                </select>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+                <div>
+                  <label class="form-label" style="font-size:10px">Provider</label>
+                  <select id="modal-knowledge-provider" class="form-select" style="font-size:11px" onchange="syncFormToJson()">
+                    ${['codex','gemini','claude','opencode','droid'].map(p => '<option value="'+p+'">'+providerDisplayName(p)+'</option>').join('')}
+                  </select>
+                </div>
+                <div>
+                  <label class="form-label" style="font-size:10px">Knowledge Path</label>
+                  <input type="text" id="modal-knowledge-project" class="form-input" style="font-size:11px" oninput="syncFormToJson()">
+                </div>
               </div>
-              <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Knowledge base path</label>
-                <input type="text" id="modal-knowledge-project" class="form-input" placeholder="/path/to/repo/.knowledge" oninput="this.dataset.userEdited='true'; refreshKnowledgeShardSelector().catch(()=>{}); syncFormToJson()">
+              <div id="modal-knowledge-shards-list" style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px"></div>
+            </div>
+
+            <div id="section-repo-filters" style="margin-bottom:16px; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117">
+              <div style="display:flex; gap:12px">
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">allowed_paths (one per line)</label>
+                  <textarea id="modal-allowed-paths" class="form-input" rows="2" style="font-size:11px; font-family:monospace" oninput="syncFormToJson()"></textarea>
+                </div>
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">forbidden_globs (one per line)</label>
+                  <textarea id="modal-forbidden-globs" class="form-input" rows="2" style="font-size:11px; font-family:monospace" oninput="syncFormToJson()"></textarea>
+                </div>
+              </div>
+            </div>
+
+            <div id="section-timeouts" style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px">
+              <div>
+                <label class="form-label" style="font-size:10px">coder_timeout</label>
+                <input type="number" id="modal-coder-timeout" class="form-input" style="font-size:11px" value="600" onchange="syncFormToJson()">
               </div>
               <div>
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-                  <label class="form-label" style="font-size:11px;margin:0">Relevant shards</label>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="selectAllKnowledgeShards()">Select all</button>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="clearKnowledgeShards()">Clear all</button>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="refreshKnowledgeShardSelector().catch(()=>{})">Refresh</button>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="openKnowledgeViewerFromTaskModal()">View / Edit</button>
-                </div>
-                <div id="modal-knowledge-shards-list" style="min-height:28px;padding:6px;border:1px solid #30363d;border-radius:4px;background:#0b111a"></div>
+                <label class="form-label" style="font-size:10px">judge_timeout</label>
+                <input type="number" id="modal-judge-timeout" class="form-input" style="font-size:11px" value="300" onchange="syncFormToJson()">
               </div>
             </div>
-          </details>
-        </div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+              <div id="section-observation" style="display:none">
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                  <input type="checkbox" id="modal-open-terminal" checked>
+                  <span style="font-size:11px; color:var(--text-muted)">Open terminal</span>
+                </label>
+              </div>
+              <div id="section-deprecated-fields">
+                <details>
+                  <summary style="font-size:10px; color:var(--text-muted); cursor:pointer">Legacy Mapping</summary>
+                  <div style="display:flex; gap:8px; margin-top:4px">
+                    <select id="modal-executor-type" class="form-select" style="font-size:10px; padding:2px" onchange="setExecutorType(this.value); syncFormToJson()">
+                      <option value="api_call">api_call</option>
+                      <option value="solo_agent">solo_agent</option>
+                      <option value="multi_agent">multi_agent</option>
+                    </select>
+                    <select id="modal-session-mode" class="form-select" style="font-size:10px; padding:2px" onchange="_currentSessionMode=this.value; syncFormToJson()">
+                      <option value="fresh">fresh</option>
+                      <option value="iterative">iterative</option>
+                    </select>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+          </div>
+        </details>
 
         <div id="section-acceptance" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <strong class="form-label">需求与验收</strong>
+          <strong class="form-label" style="font-size:11px">Acceptance &amp; Constraints</strong>
           <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">instruction / goal <span style="color:#f85149">*</span></label>
-            <textarea id="modal-instruction" class="form-input" rows="3" placeholder="Describe what to achieve" style="width:100%;resize:vertical;margin-bottom:6px" oninput="syncFormToJson()"></textarea>
+            <label class="form-label" style="font-size:10px">criteria (one per line)</label>
+            <textarea id="modal-acceptance" class="form-input" rows="2" placeholder="Line 1&#10;Line 2" style="font-size:11px;width:100%;resize:vertical;margin-bottom:6px" oninput="syncFormToJson()"></textarea>
           </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">acceptance_criteria (one per line)</label>
-            <textarea id="modal-acceptance" class="form-input" rows="2" placeholder="Line 1&#10;Line 2" style="width:100%;resize:vertical;margin-bottom:6px" oninput="syncFormToJson()"></textarea>
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">test_cmd</label>
-            <input type="text" id="modal-test-cmd" class="form-input" placeholder="bash run_tests.sh" style="margin-bottom:6px" oninput="syncFormToJson()">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">max_attempts (1–10)</label>
-            <input type="number" id="modal-max-attempts" class="form-input" min="1" max="10" value="3" style="width:80px;margin-bottom:6px" onchange="syncFormToJson()">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">coder_timeout_seconds</label>
-            <input type="number" id="modal-coder-timeout" class="form-input" min="60" max="3600" value="600" style="width:80px;margin-bottom:6px" onchange="syncFormToJson()">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">judge_timeout_seconds</label>
-            <input type="number" id="modal-judge-timeout" class="form-input" min="60" max="3600" value="300" style="width:80px;margin-bottom:6px" onchange="syncFormToJson()">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">constraints (one per line, optional)</label>
-            <textarea id="modal-constraints" class="form-input" rows="2" placeholder="e.g. No network" style="width:100%;resize:vertical;margin-bottom:6px" oninput="syncFormToJson()"></textarea>
-          </div>
-        </div>
-
-        <div id="section-repo-git" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <strong class="form-label">Repo &amp; Git</strong>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">repo_path (choose repository)</label>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input type="text" id="modal-repo-path" class="form-input" placeholder="/path/to/repo" style="flex:1;margin-bottom:6px" onchange="onRepoSelectionChanged()" oninput="syncFormToJson()">
-              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="openFolderPickerModal()">Choose / Create</button>
-              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshRepoOptions().then(() => onRepoSelectionChanged())">Refresh</button>
-              <span id="modal-repo-path-status" style="font-size:12px;min-width:80px" title="Validation result"></span>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+            <div>
+              <label class="form-label" style="font-size:10px">test_cmd</label>
+              <input type="text" id="modal-test-cmd" class="form-input" placeholder="bash run_tests.sh" style="font-size:11px" oninput="syncFormToJson()">
+            </div>
+            <div>
+              <label class="form-label" style="font-size:10px">max_attempts</label>
+              <input type="number" id="modal-max-attempts" class="form-input" style="font-size:11px" value="3" onchange="syncFormToJson()">
             </div>
           </div>
-          <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">base_ref (choose git branch/ref)</label>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input type="text" id="modal-base-ref" class="form-input" placeholder="main" style="flex:1;margin-bottom:6px" onchange="syncFormToJson()" oninput="syncFormToJson()">
-              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshBaseRefOptions()">Refresh</button>
-            </div>
-          </div>
-          <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">allowed_paths (one per line, optional)</label>
-            <textarea id="modal-allowed-paths" class="form-input" rows="2" placeholder="src/" style="font-family:monospace;font-size:11px;width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
-          </div>
-          <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">forbidden_globs (one per line, optional)</label>
-            <textarea id="modal-forbidden-globs" class="form-input" rows="2" placeholder="**/.env" style="font-family:monospace;font-size:11px;width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
+          <div style="margin-top:8px">
+            <label class="form-label" style="font-size:10px">constraints / paths</label>
+            <textarea id="modal-constraints" class="form-input" rows="1" placeholder="allowed_paths, forbidden_globs..." style="font-size:11px;width:100%;resize:vertical" oninput="syncFormToJson()"></textarea>
           </div>
         </div>
 
         <div id="rubric-thresholds-container" style="margin-bottom:12px"></div>
+        <div id="modal-journey-prompts-container"></div>
 
         <details style="margin-bottom:12px">
-          <summary class="form-label" style="cursor:pointer">高级 (JSON)</summary>
-          <div style="margin-top:8px">
-            <label class="form-label">Task JSON (syntax validated on save)</label>
-            <textarea id="modal-spec-json" class="code-editor" style="height:200px;font-family:monospace;font-size:12px" onblur="syncJsonToForm()"></textarea>
-            <div id="modal-json-error" style="color:#f85149;font-size:12px;margin-top:4px"></div>
-          </div>
+          <summary class="form-label" style="cursor:pointer; font-size:11px">Advanced (JSON)</summary>
+          <textarea id="modal-spec-json" class="code-editor" style="height:150px;font-family:monospace;font-size:11px" onblur="syncJsonToForm()"></textarea>
+          <div id="modal-json-error" style="color:#f85149;font-size:11px;margin-top:4px"></div>
         </details>
 
         <div id="modal-form-error" style="color:#f85149;font-size:12px;margin:8px 0;min-height:16px"></div>
@@ -4007,12 +3972,13 @@ async function openNewSpecModal() {
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
   updateReadOnlyBanner();
-  onChannelTypeChange();
-  refreshModelSelector('coder').catch(() => {});
-  refreshModelSelector('judge').catch(() => {});
+  
+  // Initialize UI state
+  onTaskTypeChange().then(() => {
+    // Sync JSON once UI is ready
+    syncFormToJson();
+  });
 
-  // Apply default executor type (v5)
-  setExecutorType('api_call');
   const knProviderEl = document.getElementById('modal-knowledge-provider');
   if (knProviderEl && !knProviderEl.value) knProviderEl.value = 'codex';
   const knPathEl = document.getElementById('modal-knowledge-project');
@@ -4045,10 +4011,6 @@ function applyTemplate() {
   // Update task-type selector
   const typeEl = document.getElementById('modal-task-type');
   if (typeEl && tpl.task_type) typeEl.value = tpl.task_type;
-  const launchModeEl = document.getElementById('modal-launch-mode');
-  if (launchModeEl && tpl.launch_mode) launchModeEl.value = tpl.launch_mode;
-  const lockedEl = document.getElementById('modal-launch-mode-locked');
-  if (lockedEl) lockedEl.checked = tpl.launch_mode_locked === true;
   const attemptModeEl = document.getElementById('modal-attempt-context-mode');
   if (attemptModeEl && (tpl.attempt_context_mode === 'iterative' || tpl.attempt_context_mode === 'fresh_each')) attemptModeEl.value = tpl.attempt_context_mode;
   // Update adapter and model selectors
@@ -4083,12 +4045,9 @@ function applyTemplate() {
   if (knProvider) knProvider.value = tpl.knowledge_provider || tpl.agent_config?.provider || 'codex';
   const knPath = document.getElementById('modal-knowledge-project');
   if (knPath) {
-    knPath.value = tpl.knowledge_project_path || normalizeKnowledgePath(tpl.repo_path || '');
     knPath.dataset.userEdited = tpl.knowledge_project_path ? 'true' : 'false';
   }
   refreshKnowledgeShardSelector(Array.isArray(tpl.agent_config?.knowledge_shards) ? tpl.agent_config.knowledge_shards : []).catch(() => {});
-  const soloInst = document.getElementById('modal-solo-executor-instruction');
-  if (soloInst) soloInst.value = tpl.executor_instruction || tpl.goal || tpl.instruction || '';
   const acc = document.getElementById('modal-acceptance');
   if (acc) acc.value = Array.isArray(tpl.acceptance) ? tpl.acceptance.join('\n') : (tpl.acceptance || '');
   const tc = document.getElementById('modal-test-cmd');
@@ -4130,10 +4089,15 @@ async function saveNewSpec(e) {
       return;
     }
 
-    const res = await fetch('/api/tasks', {
+    // Naming convention: template_* go to task_specs (blueprints)
+    // others go to tasks (live instances)
+    const isTemplate = taskId.startsWith('template_');
+    const endpoint = isTemplate ? '/api/task_specs' : '/api/tasks';
+
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ task_id: taskId, spec: payload })
     });
     const result = await res.json();
     if (!res.ok) {
@@ -4142,6 +4106,7 @@ async function saveNewSpec(e) {
     }
     closeModal();
     loadTaskSpecs();
+    loadTasks();
   } catch (e) {
     renderValidationErrors(errEl, ['Save failed: ' + (e.message || String(e))]);
   } finally {
@@ -4163,7 +4128,14 @@ async function openEditSpecModal(taskId) {
   const editChannel = spec.channel_type || inferChannelFromAdapter(spec.coder);
   const coderAdapterForSelector = editChannel === 'ccb' ? (spec.coder_model || 'codex') : spec.coder;
   const judgeAdapterForSelector = editChannel === 'ccb' ? (spec.judge_model || 'codex') : spec.judge;
-  const editExecutorType = spec.executor_type || workflowModeToExecutorType(spec.workflow_mode);
+  const specTaskType = normalizeTaskTypeAlias(spec.task_type || '');
+  let editExecutorType = spec.executor_type || '';
+  if (!editExecutorType && spec.workflow_mode) {
+    editExecutorType = workflowModeToExecutorType(spec.workflow_mode);
+  }
+  if (!editExecutorType) {
+    editExecutorType = taskTypeToExecutorType(specTaskType || 'solo');
+  }
   const editSessionMode = spec.session_mode || defaultSessionModeForExecutor(editExecutorType);
   _currentExecutorType = editExecutorType;
   _currentSessionMode = editSessionMode;
@@ -4171,7 +4143,7 @@ async function openEditSpecModal(taskId) {
   let collabRoleDefaults = {};
   try {
     const roles = await api('/agent/roles');
-    collabRoleDefaults = collabRoleDefaultsFromApi(roles);
+    collabRoleDefaults = roles.defaults || {};
   } catch {}
   const editCollabRoles = normalizeCollabRolesMap(spec.collab_roles || {});
   const COLLAB_PROVIDERS_EDIT = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
@@ -4206,74 +4178,42 @@ async function openEditSpecModal(taskId) {
           </div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
+        <!-- Primary Fields -->
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px">
           <div>
-            <label class="form-label">Task Type (v5.1)</label>
+            <label class="form-label">Task Type</label>
             <select id="modal-task-type" class="form-select" onchange="syncFormToJson(); onTaskTypeChange()">
               <option value="copywriting" ${nSpec.task_type === 'copywriting' ? 'selected' : ''}>copywriting</option>
               <option value="solo" ${nSpec.task_type === 'solo' ? 'selected' : ''}>solo</option>
               <option value="multi_agent" ${nSpec.task_type === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
             </select>
           </div>
-          <div style="font-size:12px;color:#8b949e">
-            Run mode is selected at start time (Run button), not in task editing.
+          <div>
+            <label class="form-label">Task ID</label>
+            <input type="text" id="modal-task-id" class="form-input" value="${escapeHtml(taskId)}" readonly style="background:rgba(255,255,255,0.05); cursor:not-allowed">
           </div>
         </div>
 
-        <div id="section-deprecated-fields" style="margin-bottom:12px; opacity:0.6">
-          <details>
-            <summary style="font-size:11px; color:var(--text-muted); cursor:pointer">Deprecated Fields (Legacy v5.0 compat)</summary>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px">
-              <div>
-                <label class="form-label" style="font-size:10px">Executor Type</label>
-                <select id="modal-executor-type" class="form-select" style="font-size:11px" onchange="setExecutorType(this.value); syncFormToJson()">
-                  <option value="api_call" ${editExecutorType === 'api_call' ? 'selected' : ''}>api_call</option>
-                  <option value="solo_agent" ${editExecutorType === 'solo_agent' ? 'selected' : ''}>solo_agent</option>
-                  <option value="multi_agent" ${editExecutorType === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
-                </select>
-              </div>
-              <div>
-                <label class="form-label" style="font-size:10px">Session Mode</label>
-                <select id="modal-session-mode" class="form-select" style="font-size:11px" onchange="_currentSessionMode=this.value; syncFormToJson()">
-                  <option value="fresh" ${editSessionMode === 'fresh' ? 'selected' : ''}>fresh</option>
-                  <option value="iterative" ${editSessionMode === 'iterative' ? 'selected' : ''}>iterative</option>
-                </select>
-              </div>
-            </div>
-          </details>
+        <div style="margin-bottom:12px">
+          <label class="form-label">instruction / goal <span style="color:#f85149">*</span></label>
+          <textarea id="modal-instruction" class="form-input" rows="4" placeholder="Describe what to achieve" style="width:100%;resize:vertical" oninput="syncFormToJson()">${escapeHtml(spec.goal || spec.instruction || '')}</textarea>
         </div>
 
-        <div id="section-attempt-context" style="margin-bottom:12px">
-          <label class="form-label">Attempt context mode</label>
-          <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch. iterative: n+1 gets previous coder output as context.">
-            <option value="fresh_each" ${(spec.attempt_context_mode || 'fresh_each') === 'fresh_each' ? 'selected' : ''}>fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
-            <option value="iterative" ${(spec.attempt_context_mode || '') === 'iterative' ? 'selected' : ''}>iterative — next attempt builds on previous coder output (convergent, e.g. requirements, code)</option>
-          </select>
-        </div>
-
-        <div id="collab-config-wrap" style="margin-bottom:12px;display:none;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <details open>
-            <summary class="form-label" style="cursor:pointer">协作配置 (visual CCB)</summary>
-            <div id="collab-roles-table" style="margin-top:8px;font-size:12px">
-              <table style="width:100%;border-collapse:collapse">
-                <thead><tr><th style="text-align:left">Role</th><th style="text-align:left">Provider</th></tr></thead>
-                <tbody>
-                  ${COLLAB_ROLES_EDIT.map(r => {
-                    const opts = COLLAB_PROVIDERS_EDIT.map(p => `<option value="${escapeHtml(p)}" ${p === r.provider ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('');
-                    return `<tr><td>${escapeHtml(r.label)}</td><td><select id="collab-role-${escapeHtml(r.key)}" class="form-select" style="min-width:100px" onchange="syncFormToJson()">${opts}</select></td></tr>`;
-                  }).join('')}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </div>
-
-        <div id="section-role-models" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+        <!-- Model Selection (Unified) -->
+        <div id="section-role-models" style="margin-bottom:16px;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <strong class="form-label" style="margin:0">Model Selection (per role)</strong>
+            <strong class="form-label" style="margin:0">Model Selection</strong>
             <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="makeCurrentAsTemplate()">Make it Template</button>
           </div>
-          <div id="collab-roles-table" style="font-size:12px">
+          
+          <div id="solo-provider-wrap" style="margin-bottom:8px; display:${nSpec.task_type === 'solo' ? 'block' : 'none'}">
+            <label class="form-label" style="font-size:11px">Provider</label>
+            <select id="modal-solo-provider" class="form-select" onchange="syncFormToJson()">
+              ${COLLAB_PROVIDERS_EDIT.map(p => `<option value="${escapeHtml(p)}" ${(nSpec.agent_config?.provider || nSpec.coder_model || 'claude') === p ? 'selected' : ''}>${escapeHtml(providerDisplayName(p))}</option>`).join('')}
+            </select>
+          </div>
+
+          <div id="collab-roles-table" style="font-size:12px; display:${nSpec.task_type !== 'solo' ? 'block' : 'none'}">
             <table style="width:100%;border-collapse:collapse">
               <thead><tr><th style="text-align:left;padding-bottom:4px">Role</th><th style="text-align:left;padding-bottom:4px">Model / Provider</th></tr></thead>
               <tbody>
@@ -4286,156 +4226,158 @@ async function openEditSpecModal(taskId) {
           </div>
         </div>
 
-        <div id="section-loop-config" style="margin-bottom:12px;display:none">
-          <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-            <strong class="form-label">Agent Loop Config</strong>
-            <div style="margin-top:8px;margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Solo agent provider</label>
-              <select id="modal-solo-provider" class="form-select">
-                <option value="claude" ${(spec.agent_config?.provider || spec.coder_model || 'claude') === 'claude' ? 'selected' : ''}>claude</option>
-                <option value="codex" ${(spec.agent_config?.provider || spec.coder_model || '') === 'codex' ? 'selected' : ''}>codex</option>
-                <option value="gemini" ${(spec.agent_config?.provider || spec.coder_model || '') === 'gemini' ? 'selected' : ''}>gemini</option>
-                <option value="opencode" ${(spec.agent_config?.provider || spec.coder_model || '') === 'opencode' ? 'selected' : ''}>opencode</option>
-                <option value="droid" ${(spec.agent_config?.provider || spec.coder_model || '') === 'droid' ? 'selected' : ''}>droid</option>
-              </select>
-            </div>
-            <div style="margin-top:8px;margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Executor instructions</label>
-              <textarea id="modal-solo-executor-instruction" class="form-input" rows="3" placeholder="Instructions sent to the solo executor agent" style="width:100%;resize:vertical">${escapeHtml(spec.executor_instruction || '')}</textarea>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
-              <div>
-                <label class="form-label" style="font-size:11px">Max iterations</label>
-                <input type="number" id="modal-max-iterations" class="form-input" value="${spec.agent_config?.max_attempts ?? spec.solo_config?.max_iterations ?? 10}" min="1" max="100">
+        <!-- Advanced Settings (Collapsed) -->
+        <details style="margin-bottom:12px; border:1px solid #30363d; border-radius:8px; background: rgba(0,0,0,0.1)">
+          <summary style="padding:10px; cursor:pointer; font-size:12px; color:var(--text-muted); font-weight:600">Advanced Settings (Repo, Context, Loop Config)</summary>
+          <div style="padding:12px; border-top:1px solid #30363d">
+            
+            <div id="section-repo-git" style="margin-bottom:16px">
+              <label class="form-label" style="font-size:11px">repo_path</label>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <input type="text" id="modal-repo-path" class="form-input" value="${escapeHtml(spec.repo_path || '')}" placeholder="/path/to/repo" style="flex:1;margin:0" onchange="onRepoSelectionChanged()" oninput="syncFormToJson()">
+                <button type="button" class="btn write-action" style="padding:4px 8px;font-size:11px" onclick="openFolderPickerModal()">Choose</button>
               </div>
-              <div>
-                <label class="form-label" style="font-size:11px">Auto-pass threshold</label>
-                <input type="number" id="modal-auto-pass-threshold" class="form-input" value="${spec.agent_config?.auto_pass_threshold ?? spec.solo_config?.auto_pass_threshold ?? 0.85}" min="0" max="1" step="0.05">
+              <div style="display:flex; gap:12px">
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">base_ref</label>
+                  <input type="text" id="modal-base-ref" class="form-input" value="${escapeHtml(spec.base_ref || 'main')}" placeholder="main" style="font-size:11px" oninput="syncFormToJson()">
+                </div>
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">context_mode</label>
+                  <select id="modal-attempt-context-mode" class="form-select" style="font-size:11px" onchange="syncFormToJson()">
+                    <option value="fresh_each" ${(spec.attempt_context_mode || 'fresh_each') === 'fresh_each' ? 'selected' : ''}>fresh_each</option>
+                    <option value="iterative" ${(spec.attempt_context_mode || '') === 'iterative' ? 'selected' : ''}>iterative</option>
+                  </select>
+                </div>
               </div>
             </div>
-            <div style="margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Test command</label>
-              <input type="text" id="modal-test-cmd-solo" class="form-input" value="${escapeHtml(spec.test_cmd || '')}" placeholder="bash run_tests.sh">
+
+            <div id="section-loop-config" style="margin-bottom:16px; display:none; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117">
+              <strong class="form-label" style="font-size:11px">Loop Parameters</strong>
+              <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:8px">
+                <div>
+                  <label class="form-label" style="font-size:10px">max_attempts</label>
+                  <input type="number" id="modal-max-iterations" class="form-input" style="font-size:11px" value="${spec.agent_config?.max_attempts ?? spec.max_attempts ?? 5}" min="1" max="50" onchange="syncFormToJson()">
+                </div>
+                <div>
+                  <label class="form-label" style="font-size:10px">auto_pass</label>
+                  <input type="number" id="modal-auto-pass-threshold" class="form-input" style="font-size:11px" value="${spec.agent_config?.auto_pass_threshold ?? 0.85}" min="0" max="1" step="0.05" onchange="syncFormToJson()">
+                </div>
+                <div>
+                  <label class="form-label" style="font-size:10px">insp_trigger</label>
+                  <input type="number" id="modal-inspiration-trigger" class="form-input" style="font-size:11px" value="${spec.agent_config?.inspiration_trigger_attempts ?? 3}" min="1" max="10" onchange="syncFormToJson()">
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
 
-        <div id="section-observation" style="margin-bottom:12px;display:none">
-          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
-            <input type="checkbox" id="modal-open-terminal" ${((spec.solo_config && spec.solo_config.open_terminal) !== false) ? 'checked' : ''}>
-            <span class="form-label" style="display:inline;margin:0">Open agent terminal on start</span>
-          </label>
-        </div>
-
-        <div id="section-knowledge" style="margin-bottom:12px;display:none">
-          <details>
-            <summary class="form-label" style="cursor:pointer">Knowledge Settings</summary>
-            <div style="margin-top:8px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+            <div id="section-knowledge" style="margin-bottom:16px; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117">
               <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
                 <input type="checkbox" id="modal-knowledge-enabled" ${spec.knowledge_enabled ? 'checked' : ''} oninput="syncFormToJson()">
-                <span>Enable knowledge read/write</span>
+                <span class="form-label" style="margin:0; font-size:11px">Enable Knowledge agent</span>
               </label>
-              <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Provider</label>
-                <select id="modal-knowledge-provider" class="form-select" style="width:auto" onchange="syncFormToJson()">
-                  ${['codex','gemini','claude','opencode','droid'].map(p => '<option value="'+p+'" '+(((spec.knowledge_provider || spec.agent_config?.provider || 'codex')===p)?'selected':'')+'>'+providerDisplayName(p)+'</option>').join('')}
-                </select>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+                <div>
+                  <label class="form-label" style="font-size:10px">Provider</label>
+                  <select id="modal-knowledge-provider" class="form-select" style="font-size:11px" onchange="syncFormToJson()">
+                    ${['codex','gemini','claude','opencode','droid'].map(p => '<option value="'+p+'" '+(((spec.knowledge_provider || spec.agent_config?.provider || 'codex')===p)?'selected':'')+'>'+providerDisplayName(p)+'</option>').join('')}
+                  </select>
+                </div>
+                <div>
+                  <label class="form-label" style="font-size:10px">Knowledge Path</label>
+                  <input type="text" id="modal-knowledge-project" class="form-input" style="font-size:11px" value="${escapeHtml(spec.knowledge_project_path || '')}" oninput="syncFormToJson()">
+                </div>
               </div>
-              <div style="margin-bottom:8px">
-                <label class="form-label" style="font-size:11px">Knowledge base path</label>
-                <input type="text" id="modal-knowledge-project" class="form-input" value="${escapeHtml(spec.knowledge_project_path || normalizeKnowledgePath(spec.repo_path || ''))}" placeholder="/path/to/repo/.knowledge" oninput="this.dataset.userEdited='true'; refreshKnowledgeShardSelector().catch(()=>{}); syncFormToJson()">
+              <div id="modal-knowledge-shards-list" style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px"></div>
+            </div>
+
+            <div id="section-repo-filters" style="margin-bottom:16px; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117">
+              <div style="display:flex; gap:12px">
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">allowed_paths (one per line)</label>
+                  <textarea id="modal-allowed-paths" class="form-input" rows="2" style="font-size:11px; font-family:monospace" oninput="syncFormToJson()">${escapeHtml(Array.isArray(spec.allowed_paths) ? spec.allowed_paths.join('\n') : (spec.allowed_paths || ''))}</textarea>
+                </div>
+                <div style="flex:1">
+                  <label class="form-label" style="font-size:10px">forbidden_globs (one per line)</label>
+                  <textarea id="modal-forbidden-globs" class="form-input" rows="2" style="font-size:11px; font-family:monospace" oninput="syncFormToJson()">${escapeHtml(Array.isArray(spec.forbidden_globs) ? spec.forbidden_globs.join('\n') : (spec.forbidden_globs || ''))}</textarea>
+                </div>
+              </div>
+            </div>
+
+            <div id="section-timeouts" style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px">
+              <div>
+                <label class="form-label" style="font-size:10px">coder_timeout</label>
+                <input type="number" id="modal-coder-timeout" class="form-input" style="font-size:11px" value="${spec.coder_timeout_seconds || 600}" onchange="syncFormToJson()">
               </div>
               <div>
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-                  <label class="form-label" style="font-size:11px;margin:0">Relevant shards</label>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="selectAllKnowledgeShards()">Select all</button>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="clearKnowledgeShards()">Clear all</button>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="refreshKnowledgeShardSelector().catch(()=>{})">Refresh</button>
-                  <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="openKnowledgeViewerFromTaskModal()">View / Edit</button>
-                </div>
-                <div id="modal-knowledge-shards-list" data-selected="${escapeHtml(Array.isArray(spec.agent_config?.knowledge_shards) ? spec.agent_config.knowledge_shards.join(',') : '')}" style="min-height:28px;padding:6px;border:1px solid #30363d;border-radius:4px;background:#0b111a"></div>
+                <label class="form-label" style="font-size:10px">judge_timeout</label>
+                <input type="number" id="modal-judge-timeout" class="form-input" style="font-size:11px" value="${spec.judge_timeout_seconds || 300}" onchange="syncFormToJson()">
               </div>
             </div>
-          </details>
-        </div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+              <div id="section-observation" style="display:none">
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                  <input type="checkbox" id="modal-open-terminal" ${((spec.solo_config && spec.solo_config.open_terminal) !== false) ? 'checked' : ''}>
+                  <span style="font-size:11px; color:var(--text-muted)">Open terminal</span>
+                </label>
+              </div>
+              <div id="section-deprecated-fields">
+                <details>
+                  <summary style="font-size:10px; color:var(--text-muted); cursor:pointer">Legacy Mapping</summary>
+                  <div style="display:flex; gap:8px; margin-top:4px">
+                    <select id="modal-executor-type" class="form-select" style="font-size:10px; padding:2px" onchange="setExecutorType(this.value); syncFormToJson()">
+                      <option value="api_call" ${editExecutorType === 'api_call' ? 'selected' : ''}>api_call</option>
+                      <option value="solo_agent" ${editExecutorType === 'solo_agent' ? 'selected' : ''}>solo_agent</option>
+                      <option value="multi_agent" ${editExecutorType === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
+                    </select>
+                    <select id="modal-session-mode" class="form-select" style="font-size:10px; padding:2px" onchange="_currentSessionMode=this.value; syncFormToJson()">
+                      <option value="fresh" ${editSessionMode === 'fresh' ? 'selected' : ''}>fresh</option>
+                      <option value="iterative" ${editSessionMode === 'iterative' ? 'selected' : ''}>iterative</option>
+                    </select>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+          </div>
+        </details>
 
         <div id="section-acceptance" class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <strong class="form-label">需求与验收</strong>
+          <strong class="form-label" style="font-size:11px">Acceptance &amp; Constraints</strong>
           <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">instruction / goal</label>
-            <textarea id="modal-instruction" class="form-input" rows="3" placeholder="Describe what to achieve" style="width:100%;resize:vertical;margin-bottom:6px">${escapeHtml(spec.goal || spec.instruction || '')}</textarea>
+            <label class="form-label" style="font-size:10px">criteria (one per line)</label>
+            <textarea id="modal-acceptance" class="form-input" rows="2" placeholder="Line 1&#10;Line 2" style="font-size:11px;width:100%;resize:vertical;margin-bottom:6px" oninput="syncFormToJson()">${escapeHtml(Array.isArray(spec.acceptance) ? spec.acceptance.join('\n') : (spec.acceptance || ''))}</textarea>
           </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">acceptance_criteria (one per line)</label>
-            <textarea id="modal-acceptance" class="form-input" rows="2" style="width:100%;resize:vertical;margin-bottom:6px">${escapeHtml(Array.isArray(spec.acceptance) ? spec.acceptance.join('\n') : (spec.acceptance || ''))}</textarea>
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">test_cmd</label>
-            <input type="text" id="modal-test-cmd" class="form-input" value="${escapeHtml(spec.test_cmd || '')}" placeholder="bash run_tests.sh" style="margin-bottom:6px">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">max_attempts (1–10)</label>
-            <input type="number" id="modal-max-attempts" class="form-input" min="1" max="10" value="${spec.max_attempts !== undefined ? spec.max_attempts : 3}" style="width:80px;margin-bottom:6px">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">coder_timeout_seconds</label>
-            <input type="number" id="modal-coder-timeout" class="form-input" min="60" max="3600" value="${spec.coder_timeout_seconds !== undefined ? spec.coder_timeout_seconds : 600}" style="width:80px;margin-bottom:6px">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">judge_timeout_seconds</label>
-            <input type="number" id="modal-judge-timeout" class="form-input" min="60" max="3600" value="${spec.judge_timeout_seconds !== undefined ? spec.judge_timeout_seconds : 300}" style="width:80px;margin-bottom:6px">
-          </div>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">constraints (one per line)</label>
-            <textarea id="modal-constraints" class="form-input" rows="2" style="width:100%;resize:vertical;margin-bottom:6px">${escapeHtml(Array.isArray(spec.constraints) ? spec.constraints.join('\n') : (spec.constraints || []).join('\n'))}</textarea>
-          </div>
-        </div>
-
-        <div class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <strong class="form-label">Repo &amp; Git</strong>
-          <div style="margin-top:8px">
-            <label class="form-label" style="font-size:11px">repo_path</label>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input type="text" id="modal-repo-path" class="form-input" value="${escapeHtml(spec.repo_path || '')}" placeholder="/path/to/repo" style="flex:1;margin-bottom:6px" onchange="onRepoSelectionChanged()">
-              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="openFolderPickerModal()">Choose / Create</button>
-              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshRepoOptions().then(() => onRepoSelectionChanged())">Refresh</button>
-              <span id="modal-repo-path-status" style="font-size:12px;min-width:80px"></span>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+            <div>
+              <label class="form-label" style="font-size:10px">test_cmd</label>
+              <input type="text" id="modal-test-cmd" class="form-input" placeholder="bash run_tests.sh" style="font-size:11px" oninput="syncFormToJson()" value="${escapeHtml(spec.test_cmd || '')}">
+            </div>
+            <div>
+              <label class="form-label" style="font-size:10px">max_attempts</label>
+              <input type="number" id="modal-max-attempts" class="form-input" style="font-size:11px" value="${spec.max_attempts !== undefined ? spec.max_attempts : 3}" onchange="syncFormToJson()">
             </div>
           </div>
-          <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">base_ref</label>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input type="text" id="modal-base-ref" class="form-input" value="${escapeHtml(spec.base_ref || 'main')}" placeholder="main" style="flex:1;margin-bottom:6px" onchange="syncFormToJson()">
-              <button type="button" class="btn write-action" style="margin-bottom:6px" onclick="refreshBaseRefOptions()">Refresh</button>
-            </div>
-          </div>
-          <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">allowed_paths (one per line)</label>
-            <textarea id="modal-allowed-paths" class="form-input" rows="2" style="font-family:monospace;font-size:11px;width:100%;resize:vertical">${escapeHtml(Array.isArray(spec.allowed_paths) ? spec.allowed_paths.join('\n') : (spec.allowed_paths || []).join('\n'))}</textarea>
-          </div>
-          <div style="margin-top:6px">
-            <label class="form-label" style="font-size:11px">forbidden_globs (one per line)</label>
-            <textarea id="modal-forbidden-globs" class="form-input" rows="2" style="font-family:monospace;font-size:11px;width:100%;resize:vertical">${escapeHtml(Array.isArray(spec.forbidden_globs) ? spec.forbidden_globs.join('\n') : (spec.forbidden_globs || []).join('\n'))}</textarea>
+          <div style="margin-top:8px">
+            <label class="form-label" style="font-size:10px">constraints / paths</label>
+            <textarea id="modal-constraints" class="form-input" rows="1" placeholder="allowed_paths, forbidden_globs..." style="font-size:11px;width:100%;resize:vertical" oninput="syncFormToJson()">${escapeHtml(Array.isArray(spec.constraints) ? spec.constraints.join('\n') : (spec.constraints || []).join('\n'))}</textarea>
           </div>
         </div>
 
         <div id="rubric-thresholds-container" style="margin-bottom:12px">
           ${thresholdsHtml}
         </div>
+        <div id="modal-journey-prompts-container"></div>
 
         <details style="margin-bottom:12px">
-          <summary class="form-label" style="cursor:pointer">高级 (JSON)</summary>
-          <div style="margin-top:8px">
-            <label class="form-label">Task JSON (syntax validated on save)</label>
-            <textarea id="modal-spec-json" class="code-editor" style="height:200px;font-family:monospace;font-size:12px" onblur="syncJsonToForm()">${escapeHtml(JSON.stringify(spec, null, 2))}</textarea>
-            <div id="modal-json-error" style="color:#f85149;font-size:12px;margin-top:4px"></div>
-          </div>
+          <summary class="form-label" style="cursor:pointer; font-size:11px">Advanced (JSON)</summary>
+          <textarea id="modal-spec-json" class="code-editor" style="height:150px;font-family:monospace;font-size:11px" onblur="syncJsonToForm()">${escapeHtml(JSON.stringify(spec, null, 2))}</textarea>
+          <div id="modal-json-error" style="color:#f85149;font-size:11px;margin-top:4px"></div>
         </details>
 
         <div id="modal-form-error" style="color:#f85149;font-size:12px;margin:8px 0;min-height:16px"></div>
 
-        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
-          ${nSpec.task_type ? `<button class="btn write-action" style="margin-right:auto;font-size:12px" onclick="openPromptForTaskType('${escapeHtml(nSpec.task_type)}')">Edit judge.prompt.${escapeHtml(nSpec.task_type)}.md</button>` : ''}
+        <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn" onclick="closeModal()">Cancel</button>
           <button class="btn btn-primary write-action" onclick="saveEditSpec('${escapeHtml(taskId)}')">Save</button>
         </div>
@@ -4445,20 +4387,21 @@ async function openEditSpecModal(taskId) {
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
   updateReadOnlyBanner();
-  setExecutorType(editExecutorType);
-  _currentSessionMode = editSessionMode;
-  const smEl = document.getElementById('modal-session-mode');
-  if (smEl) smEl.value = editSessionMode;
-  updateSessionModeConstraints();
-  onChannelTypeChange();
-  refreshModelSelector('coder').catch(() => {});
-  refreshModelSelector('judge').catch(() => {});
-  const knPathEl = document.getElementById('modal-knowledge-project');
-  if (knPathEl) knPathEl.dataset.userEdited = spec.knowledge_project_path ? 'true' : 'false';
-  const ksListEl = document.getElementById('modal-knowledge-shards-list');
-  const preselected = (ksListEl?.dataset?.selected || '').split(',').map(s => s.trim()).filter(Boolean);
-  refreshKnowledgeShardSelector(preselected).catch(() => {});
-  initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
+
+  onTaskTypeChange().then(() => {
+    syncFormToJson();
+  }).catch(e => console.error('onTaskTypeChange failed', e));
+
+  try {
+    const knPathEl = document.getElementById('modal-knowledge-project');
+    if (knPathEl) knPathEl.dataset.userEdited = spec.knowledge_project_path ? 'true' : 'false';
+    const ksListEl = document.getElementById('modal-knowledge-shards-list');
+    const preselected = (ksListEl?.dataset?.selected || '').split(',').map(s => s.trim()).filter(Boolean);
+    refreshKnowledgeShardSelector(preselected).catch(() => {});
+    initRepoGitSelectors(spec.repo_path || '', spec.base_ref || 'main').catch(() => {});
+  } catch (e) {
+    console.error('Edit modal init failed', e);
+  }
 }
 
 // A2-5: Save edited spec
@@ -4482,10 +4425,7 @@ async function saveEditSpec(taskId) {
   const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
   if (attemptContextModeVal) payload.attempt_context_mode = attemptContextModeVal;
   const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
-  const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
   if (instructionVal) payload.goal = instructionVal;
-  if (soloExecutorInstructionVal) payload.executor_instruction = soloExecutorInstructionVal;
-  else if (payload.executor_instruction !== undefined) delete payload.executor_instruction;
   const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
   if (acceptanceVal) payload.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
   const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
@@ -4542,9 +4482,6 @@ async function saveEditSpec(taskId) {
       provider: normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || payload.agent_config?.provider || payload.collab_roles?.executor || 'codex') || 'codex',
       knowledge_shards: getSelectedKnowledgeShards()
     };
-    const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
-    if (testCmdSolo) payload.test_cmd = testCmdSolo;
-    if (soloExecutorInstructionVal && !instructionVal) payload.goal = soloExecutorInstructionVal;
   }
   if (payload.rubric_thresholds !== undefined && payload.task_type !== 'copywriting') {
     delete payload.rubric_thresholds;
@@ -4558,10 +4495,14 @@ async function saveEditSpec(taskId) {
 
   setButtonLoading(btn, true);
   try {
-    const res = await fetch('/api/tasks', {
-      method: 'POST',
+    const isTemplate = taskId.startsWith('template_');
+    const url = isTemplate ? `/api/task_specs/${encodeURIComponent(taskId)}` : '/api/tasks';
+    const method = isTemplate ? 'PUT' : 'POST';
+
+    const res = await fetch(url, {
+      method: method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(isTemplate ? { spec: payload } : { task_id: taskId, spec: payload })
     });
     const result = await res.json();
     if (!res.ok) {
@@ -4570,6 +4511,7 @@ async function saveEditSpec(taskId) {
     }
     closeModal();
     loadTaskSpecs();
+    loadTasks();
   } catch (e) {
     renderValidationErrors(errEl, ['Save failed: ' + (e.message || String(e))]);
   } finally {
@@ -4640,23 +4582,33 @@ async function loadPrompts() {
 }
 
 // D2: View and edit a prompt in a modal
-async function viewPrompt(name) {
+async function viewPrompt(name, taskId = null) {
   // Remove existing modal if any
   const old = document.getElementById('prompt-modal');
   if (old) old.remove();
   try {
-    const res = await fetch(`/api/prompts/${encodeURIComponent(name)}`);
+    let url = `/api/prompts/${encodeURIComponent(name)}`;
+    if (taskId) url += `?task_id=${encodeURIComponent(taskId)}`;
+    
+    const res = await fetch(url);
     const data = await res.json();
     if (data.error) { alert('Failed to load prompt: ' + data.error); return; }
+    
+    const scopeInfo = taskId 
+      ? `<span style="background:var(--accent-blue);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;vertical-align:middle;margin-left:8px">TASK SCOPE: ${escapeHtml(taskId)}</span>`
+      : `<span style="background:#8b949e;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;vertical-align:middle;margin-left:8px">GLOBAL DEFAULT</span>`;
+
     const modalHtml = `
       <div id="prompt-modal" class="modal-overlay" onclick="if(event.target===this)closePromptModal()">
         <div class="modal-box" style="max-width:800px;max-height:90vh;overflow-y:auto">
-          <h3 style="margin-top:0">Edit Prompt: ${escapeHtml(name)}</h3>
+          <h3 style="margin-top:0;display:flex;align-items:center;justify-content:space-between">
+            <span>Edit Prompt: ${escapeHtml(name)} ${scopeInfo}</span>
+          </h3>
           <textarea id="prompt-editor" class="code-editor" style="height:480px;font-family:monospace;font-size:12px;width:100%;box-sizing:border-box">${escapeHtml(data.content || '')}</textarea>
           <div id="prompt-save-notice" style="font-size:12px;color:#3fb950;margin-top:4px;min-height:16px"></div>
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
             <button class="btn" onclick="closePromptModal()">Cancel</button>
-            <button class="btn btn-primary write-action" onclick="savePrompt(${JSON.stringify(name)})">Save</button>
+            <button class="btn btn-primary write-action" onclick="savePrompt(${JSON.stringify(name)}, ${JSON.stringify(taskId)})">Save</button>
           </div>
         </div>
       </div>`;
@@ -4673,14 +4625,21 @@ function closePromptModal() {
 }
 
 // D2: Save prompt content via PUT. K7-2: overwrite requires second confirmation.
-async function savePrompt(name) {
+async function savePrompt(name, taskId = null) {
   const content = document.getElementById('prompt-editor')?.value;
   if (content === undefined) return;
-  if (!confirm('Overwrite this prompt file? This action will be recorded in the audit log.')) return;
+  const msg = taskId 
+    ? `Overwrite this prompt specifically for task ${taskId}? This will NOT affect other tasks.`
+    : `Overwrite this GLOBAL prompt? This will affect all future tasks.`;
+    
+  if (!confirm(msg)) return;
   const notice = document.getElementById('prompt-save-notice');
   if (notice) notice.textContent = '';
   try {
-    const res = await fetch(`/api/prompts/${encodeURIComponent(name)}`, {
+    let url = `/api/prompts/${encodeURIComponent(name)}`;
+    if (taskId) url += `?task_id=${encodeURIComponent(taskId)}`;
+    
+    const res = await fetch(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content })
@@ -4722,6 +4681,37 @@ async function openPromptForTaskType(taskType) {
     // fallback below
   }
   await viewPrompt(preferred);
+}
+
+// §v5.1.4: Task Journey Prompts UI (Bottom of Modal)
+function buildTaskJourneyPromptsUI(taskType, taskId) {
+  const normType = taskType ? normalizeTaskTypeAlias(taskType) : '';
+  const prompts = [
+    { name: 'pm.prompt.md', label: 'PM' },
+    { name: 'designer.prompt.md', label: 'Designer' },
+    { name: 'coder.prompt.md', label: 'Executor (Coder)' },
+    { name: 'judge.prompt.md', label: 'Reviewer (Judge) — Global' },
+    { name: 'inspiration.prompt.md', label: 'Inspiration' }
+  ];
+  if (normType) {
+    prompts.push({ name: `judge.prompt.${normType}.md`, label: `Reviewer (Judge) — for ${normType}` });
+  }
+
+  const buttons = prompts.map(p => `
+    <button type="button" class="btn" style="padding:4px 10px;font-size:11px" onclick="viewPrompt('${escapeHtml(p.name)}', ${JSON.stringify(taskId)})">
+      ${escapeHtml(p.label)}
+    </button>
+  `).join('');
+
+  return `
+    <div id="section-journey-prompts" style="margin-top:16px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid #30363d;border-radius:8px">
+      <strong class="form-label" style="margin-bottom:8px">Task Journey Prompts</strong>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${buttons}
+      </div>
+      <p style="font-size:11px;color:#8b949e;margin-top:8px">These prompts define role-specific instructions used by the coordinator during task execution.</p>
+    </div>
+  `;
 }
 
 function formatPromptCenterSize(size) {
