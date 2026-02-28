@@ -29,6 +29,7 @@ const VALID_SIM_RUN_ID = /^sim_[A-Za-z0-9_-]+$/;
 const CCB_GUI_LOG_PATH = path.join(RDLOOP_ROOT, 'ccb-gui.log');
 const CCB_GUI_LOG_MAX_LINES = 2000;
 let CCB_GUI_LOG_ACTUAL_PATH = CCB_GUI_LOG_PATH;
+const TASK_LIFECYCLE_LOG_FILE = 'task_lifecycle.jsonl';
 
 function appendToCcbGuiLog(operation, detail) {
   const writeTo = (logPath) => {
@@ -354,6 +355,24 @@ function readEvents(filepath, tail) {
   } catch { return []; }
 }
 
+function appendTaskLifecycleLog(taskId, entry) {
+  try {
+    if (!taskId || !isValidTaskId(taskId)) return;
+    const taskDir = path.join(OUT_DIR, taskId);
+    if (!fs.existsSync(taskDir)) return;
+    const payload = (entry && typeof entry === 'object') ? { ...entry } : {};
+    if (!payload.ts) payload.ts = nowSecZ();
+    if (!payload.task_id) payload.task_id = taskId;
+    if (payload.attempt == null) {
+      const status = readJSON(path.join(taskDir, 'status.json'));
+      payload.attempt = status?.current_attempt ?? 0;
+    }
+    fs.appendFileSync(path.join(taskDir, TASK_LIFECYCLE_LOG_FILE), JSON.stringify(payload) + '\n', 'utf8');
+  } catch {
+    // best effort
+  }
+}
+
 // Helper: map READY -> READY_FOR_REVIEW (5.4 compat)
 function normalizeState(state) {
   if (state === 'READY') return 'READY_FOR_REVIEW';
@@ -563,6 +582,27 @@ app.get('/api/tasks/:taskId/events', validateTaskId, (req, res) => {
     events = events.filter(e => e.ts && String(e.ts) > ts);
   }
   res.json({ events });
+});
+
+// GET /api/tasks/:taskId/lifecycle — detailed lifecycle trace with tail/since filters
+app.get('/api/tasks/:taskId/lifecycle', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  const tail = req.query.tail ? parseInt(req.query.tail, 10) : undefined;
+  const sinceOffset = req.query.since_offset != null ? parseInt(req.query.since_offset, 10) : undefined;
+  const sinceTs = req.query.since_ts;
+  let logs = readEvents(path.join(taskDir, TASK_LIFECYCLE_LOG_FILE), tail);
+  if (typeof sinceOffset === 'number' && sinceOffset >= 0) {
+    logs = logs.slice(sinceOffset);
+  }
+  if (sinceTs && typeof sinceTs === 'string' && sinceTs.trim()) {
+    const ts = sinceTs.trim();
+    logs = logs.filter(e => e.ts && String(e.ts) > ts);
+  }
+  res.json({ logs });
 });
 
 // GET /api/task/:taskId — full task detail
@@ -851,6 +891,16 @@ app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
 
   const controlPath = path.join(taskDir, 'control.json');
   fs.writeFileSync(controlPath, JSON.stringify(control, null, 2));
+  appendTaskLifecycleLog(taskId, {
+    what_happened: 'control_action_requested',
+    event_type: 'CONTROL_ACTION_REQUESTED',
+    triggered_by: { actor: 'user', source: 'http', author: 'gui' },
+    channel: { name: 'http', direction: 'inbound' },
+    delivery: { from: 'gui', to: 'coordinator', content: control, content_path: controlPath },
+    executed_by: { component: 'gui_server', endpoint: '/api/task/:taskId/control' },
+    next: { path: controlPath, target: 'coordinator.process_control' },
+    details: { action: control.action, nonce: control.nonce }
+  });
 
   // Aggressive PAUSE logic: if PAUSE requested, try to stop the live process group
   if (control.action === 'PAUSE') {
@@ -866,9 +916,29 @@ app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
           try {
             process.kill(-pid, 'SIGTERM');
             appendToCcbGuiLog('pause_kill', { taskId, pid, signal: 'SIGTERM' });
+            appendTaskLifecycleLog(taskId, {
+              what_happened: 'pause_signal_sent',
+              event_type: 'CONTROL_PAUSE_SIGNAL_SENT',
+              triggered_by: { actor: 'user', source: 'http', author: 'gui' },
+              channel: { name: 'os_signal', direction: 'outbound' },
+              delivery: { from: 'gui', to: 'runner_process_group', content: { signal: 'SIGTERM', pid } },
+              executed_by: { component: 'gui_server', endpoint: '/api/task/:taskId/control' },
+              next: { target: 'coordinator_signal_trap' },
+              details: { action: control.action, nonce: control.nonce }
+            });
           } catch (e) {
             // Fallback to single process if group kill fails
             process.kill(pid, 'SIGTERM');
+            appendTaskLifecycleLog(taskId, {
+              what_happened: 'pause_signal_sent_fallback',
+              event_type: 'CONTROL_PAUSE_SIGNAL_SENT_FALLBACK',
+              triggered_by: { actor: 'user', source: 'http', author: 'gui' },
+              channel: { name: 'os_signal', direction: 'outbound' },
+              delivery: { from: 'gui', to: 'runner_process', content: { signal: 'SIGTERM', pid } },
+              executed_by: { component: 'gui_server', endpoint: '/api/task/:taskId/control' },
+              next: { target: 'coordinator_signal_trap' },
+              details: { action: control.action, nonce: control.nonce }
+            });
           }
           // We still return ok:true here; the UI will poll and see the state change to PAUSED (via trap)
           return res.json({ ok: true, nonce: control.nonce, signalled: true });
@@ -908,6 +978,16 @@ app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
           }
         }
         if (fs.existsSync(controlPath)) fs.unlinkSync(controlPath);
+        appendTaskLifecycleLog(taskId, {
+          what_happened: 'pause_ghost_cleanup',
+          event_type: 'CONTROL_PAUSE_GHOST_CLEANUP',
+          triggered_by: { actor: 'system', source: 'gui_cleanup' },
+          channel: { name: 'filesystem', direction: 'internal' },
+          delivery: { from: 'gui', to: 'task_state', content: { lock_removed: true, status_forced_paused: true } },
+          executed_by: { component: 'gui_server', endpoint: '/api/task/:taskId/control' },
+          next: { target: 'task_status_paused' },
+          details: { action: control.action, nonce: control.nonce }
+        });
         return res.json({ ok: true, nonce: control.nonce, cleaned_up: true });
       } catch (err) {
         console.error('Failed to cleanup ghost process:', err);
@@ -1449,6 +1529,22 @@ app.post('/api/tasks/:taskId/user_input', requireWritable, validateTaskId, (req,
     task_id: taskId,
     request_id,
     payload: { text }
+  });
+
+  appendTaskLifecycleLog(taskId, {
+    what_happened: 'user_input_received',
+    event_type: 'USER_INPUT_RECEIVED',
+    triggered_by: { actor: 'user', source: 'http', author: 'gui' },
+    channel: { name: 'http', direction: 'inbound' },
+    delivery: {
+      from: 'user',
+      to: 'task_user_input_buffer',
+      content: { text, request_id },
+      content_path: inputFile
+    },
+    executed_by: { component: 'gui_server', endpoint: '/api/tasks/:taskId/user_input' },
+    next: { path: inputFile, target: 'coordinator.consume_user_input' },
+    details: { request_id, len: text.length }
   });
 
   res.json({ ok: true, request_id });

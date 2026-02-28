@@ -242,8 +242,45 @@ extract_req_payload_segment() {
   fi
   if "$REQ_SEGMENT_EXTRACTOR" "$req_code" "$input_file" > "$output_file"; then
     write_event_ext "req_segment_extracted" "{\"role\":\"${role}\",\"req_code\":\"${req_code}\",\"path\":\"${output_file}\"}"
+    local payload_ok
+    payload_ok=$(python3 - "$role" "$req_code" "$input_file" "$output_file" <<'PY'
+import json, sys
+role, req_code, input_file, output_file = sys.argv[1:5]
+print(json.dumps({
+  "event_type": "req_segment_extracted",
+  "triggered_by": {"actor": "coordinator", "source": "extract_req_payload_segment"},
+  "channel": {"name": "ccb", "direction": "inbound"},
+  "delivery": {
+    "from": role,
+    "to": "coordinator",
+    "req_code": req_code,
+    "content_path": output_file
+  },
+  "executed_by": {"component": "extract_req_segment.sh", "input_path": input_file},
+  "next": {"path": output_file},
+  "details": {"input_path": input_file, "output_path": output_file}
+}))
+PY
+)
+    write_task_lifecycle_log "req_segment_extracted" "$payload_ok"
   else
     write_event_ext "req_segment_extract_error" "{\"role\":\"${role}\",\"req_code\":\"${req_code}\",\"path\":\"${input_file}\"}"
+    local payload_err
+    payload_err=$(python3 - "$role" "$req_code" "$input_file" <<'PY'
+import json, sys
+role, req_code, input_file = sys.argv[1:4]
+print(json.dumps({
+  "event_type": "req_segment_extract_error",
+  "triggered_by": {"actor": "coordinator", "source": "extract_req_payload_segment"},
+  "channel": {"name": "ccb", "direction": "inbound"},
+  "delivery": {"from": role, "to": "coordinator", "req_code": req_code},
+  "executed_by": {"component": "extract_req_segment.sh", "input_path": input_file},
+  "next": {"target": "retry_or_manual_inspect"},
+  "details": {"input_path": input_file}
+}))
+PY
+)
+    write_task_lifecycle_log "req_segment_extract_error" "$payload_err"
   fi
 }
 
@@ -339,6 +376,150 @@ print(json.dumps(d))
   | python3 "$ATOMIC_WRITE" "${TASK_DIR}/final_summary.json" -
 }
 
+write_task_lifecycle_log() {
+  local happened="$1" payload_json="${2-}"
+  [ -z "${TASK_DIR:-}" ] && return 0
+  [ -z "$payload_json" ] && payload_json='{}'
+  python3 - "$TASK_DIR" "$TASK_ID" "${CURRENT_ATTEMPT:-0}" "$happened" "$payload_json" <<'PY' \
+  | python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/task_lifecycle.jsonl" - 2>/dev/null || true
+import datetime, hashlib, json, os, sys
+import ast
+
+task_dir, task_id, current_attempt_raw, happened, payload_raw = sys.argv[1:6]
+now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+payload = {}
+candidate = payload_raw if payload_raw else {}
+for _ in range(4):
+    if isinstance(candidate, dict):
+        payload = candidate
+        break
+    if not isinstance(candidate, str):
+        break
+    text = candidate.strip()
+    if not text:
+        break
+    decoded = None
+    try:
+        decoded = json.loads(text)
+    except Exception:
+        try:
+            decoded = ast.literal_eval(text)
+        except Exception:
+            decoded = None
+    if decoded is None:
+        break
+    candidate = decoded
+if not isinstance(payload, dict):
+    payload = {}
+
+def as_obj(v):
+    return v if isinstance(v, dict) else {}
+
+def resolve_path(path_value):
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    path_value = path_value.strip()
+    if os.path.isabs(path_value):
+        return path_value
+    return os.path.join(task_dir, path_value)
+
+def enrich_content(section, default_limit=1024 * 1024):
+    if not isinstance(section, dict):
+        return section
+    path_value = section.get("content_path")
+    resolved = resolve_path(path_value)
+    if not resolved or not os.path.isfile(resolved):
+        return section
+    try:
+        raw = open(resolved, "rb").read()
+    except Exception:
+        return section
+    max_bytes = section.get("content_max_bytes", default_limit)
+    try:
+        max_bytes = int(max_bytes)
+    except Exception:
+        max_bytes = default_limit
+    if max_bytes < 0:
+        max_bytes = default_limit
+    if max_bytes == 0:
+        view = b""
+    else:
+        view = raw[:max_bytes]
+    section["content_path"] = resolved
+    section.setdefault("content_total_bytes", len(raw))
+    section.setdefault("content_sha256", hashlib.sha256(raw).hexdigest())
+    section.setdefault("content", view.decode("utf-8", "replace"))
+    if len(raw) > len(view):
+        section["content_truncated"] = True
+    return section
+
+attempt = payload.get("attempt")
+if attempt in (None, ""):
+    try:
+        attempt = int(current_attempt_raw or "0")
+    except Exception:
+        attempt = 0
+else:
+    try:
+        attempt = int(attempt)
+    except Exception:
+        attempt = 0
+
+entry = {
+    "ts": now,
+    "task_id": task_id,
+    "attempt": attempt,
+    "what_happened": happened,
+    "triggered_by": as_obj(payload.get("triggered_by")),
+    "channel": as_obj(payload.get("channel")),
+    "delivery": enrich_content(as_obj(payload.get("delivery"))),
+    "executed_by": enrich_content(as_obj(payload.get("executed_by"))),
+    "next": as_obj(payload.get("next")),
+    "details": enrich_content(as_obj(payload.get("details")))
+}
+
+if "event_type" in payload:
+    entry["event_type"] = payload["event_type"]
+
+print(json.dumps(entry, ensure_ascii=False))
+PY
+}
+
+write_agent_dispatch_log() {
+  local stage="$1" role="$2" channel_name="$3" script_path="$4"
+  local content_path="$5" session_id="${6:-}" req_code="${7:-}"
+  local provider="${8:-}" next_target="${9:-}"
+  local payload
+  payload=$(python3 - "$stage" "$role" "$channel_name" "$script_path" "$content_path" "$session_id" "$req_code" "$provider" "$next_target" <<'PY'
+import json, os, sys
+stage, role, channel_name, script_path, content_path, session_id, req_code, provider, next_target = sys.argv[1:10]
+delivery = {"from": "coordinator", "to": role}
+if content_path:
+    delivery["content_path"] = content_path
+if session_id:
+    delivery["session_id"] = session_id
+if req_code:
+    delivery["req_code"] = req_code
+if provider:
+    delivery["provider"] = provider
+print(json.dumps({
+  "event_type": f"{stage}_dispatch",
+  "triggered_by": {"actor": "coordinator", "source": "run_task.sh"},
+  "channel": {"name": channel_name, "direction": "outbound"},
+  "delivery": delivery,
+  "executed_by": {
+    "component": os.path.basename(script_path) if script_path else "",
+    "script_path": script_path
+  },
+  "next": {"target": next_target or role},
+  "details": {"stage": stage}
+}))
+PY
+)
+  write_task_lifecycle_log "${stage}_dispatch" "$payload"
+}
+
 write_event() {
   local att="$1" etype="$2" summary="$3"
   local att_dir="${4:-}" wt_dir="${5:-}"
@@ -352,6 +533,21 @@ print(json.dumps(e))
 ' "$(now_iso)" "$TASK_ID" "$att" "$etype" "$summary" \
   "${TASK_DIR}" "$att_dir" "$wt_dir" "${TASK_DIR}/status.json" \
   | python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/events.jsonl" -
+  local lifecycle_payload
+  lifecycle_payload=$(python3 - "$etype" "$summary" "$att_dir" "$wt_dir" <<'PY'
+import json, sys
+etype, summary, att_dir, wt_dir = sys.argv[1:5]
+print(json.dumps({
+  "event_type": etype,
+  "triggered_by": {"actor": "coordinator", "source": "run_task.sh"},
+  "channel": {"name": "events.jsonl", "direction": "internal"},
+  "executed_by": {"component": "run_task.sh", "function": "write_event"},
+  "next": {"path": "events.jsonl"},
+  "details": {"summary": summary, "attempt_dir": att_dir, "worktree_dir": wt_dir}
+}))
+PY
+)
+  write_task_lifecycle_log "$etype" "$lifecycle_payload"
 }
 
 # K3-1/K3-5: ATTEMPT_DECIDED with decision, next_state, pause_reason_code, effective_max_attempts, current_attempt
@@ -366,6 +562,26 @@ e={"ts":sys.argv[1],"task_id":sys.argv[2],"attempt":int(sys.argv[3]),
 print(json.dumps(e))
 ' "$(now_iso)" "$TASK_ID" "$att" "$decision" "$next_state" "$prcode" "$EFFECTIVE_MAX_ATTEMPTS" \
   | python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/events.jsonl" -
+  local lifecycle_payload
+  lifecycle_payload=$(python3 - "$att" "$decision" "$next_state" "$prcode" "$EFFECTIVE_MAX_ATTEMPTS" <<'PY'
+import json, sys
+att, decision, next_state, prcode, effective_max = sys.argv[1:6]
+print(json.dumps({
+  "attempt": int(att) if att else 0,
+  "event_type": "ATTEMPT_DECIDED",
+  "triggered_by": {"actor": "coordinator", "source": "decision_table"},
+  "channel": {"name": "events.jsonl", "direction": "internal"},
+  "executed_by": {"component": "run_task.sh", "function": "write_event_attempt_decided"},
+  "next": {"state": next_state},
+  "details": {
+    "decision": decision,
+    "pause_reason_code": prcode if prcode else "",
+    "effective_max_attempts": int(effective_max)
+  }
+}))
+PY
+)
+  write_task_lifecycle_log "ATTEMPT_DECIDED" "$lifecycle_payload"
 }
 
 write_commands_log() {
@@ -377,6 +593,23 @@ e={"ts":sys.argv[1],"attempt":int(sys.argv[2]),"cmd":sys.argv[3],
 print(json.dumps(e))
 ' "$(now_iso)" "$att" "$cmd" "$rc" "$secs" \
   | python3 "$ATOMIC_WRITE" --append "$logf" -
+  local lifecycle_payload
+  lifecycle_payload=$(python3 - "$att" "$cmd" "$rc" "$secs" "$logf" <<'PY'
+import json, sys
+att, cmd, rc, secs, logf = sys.argv[1:6]
+print(json.dumps({
+  "attempt": int(att) if att else 0,
+  "event_type": "COMMAND_EXECUTED",
+  "triggered_by": {"actor": "coordinator", "source": "run_attempt"},
+  "channel": {"name": "local_shell", "direction": "internal"},
+  "delivery": {"content": cmd},
+  "executed_by": {"component": "bash", "log_path": logf},
+  "next": {"path": logf},
+  "details": {"rc": int(rc), "seconds": float(secs)}
+}))
+PY
+)
+  write_task_lifecycle_log "command_executed" "$lifecycle_payload"
 }
 
 write_metrics() {
@@ -797,6 +1030,22 @@ check_control_pause() {
       '["User requested PAUSE. Use --continue to resume."]' \
       "PAUSED_MANUAL" "PAUSED_USER" ""
     write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "PAUSED_USER at ${cpname}"
+    local pause_payload
+    pause_payload=$(python3 - "$cpname" "$cf" <<'PY'
+import json, sys
+cpname, control_path = sys.argv[1:3]
+print(json.dumps({
+  "event_type": "CONTROL_PAUSE_AT_CHECKPOINT",
+  "triggered_by": {"actor": "user", "source": "control.json"},
+  "channel": {"name": "control_file", "direction": "inbound"},
+  "delivery": {"from": "user", "to": "coordinator", "content_path": control_path},
+  "executed_by": {"component": "run_task.sh", "function": "check_control_pause"},
+  "next": {"state": "PAUSED", "checkpoint": cpname},
+  "details": {"checkpoint": cpname}
+}))
+PY
+)
+    write_task_lifecycle_log "control_pause_checkpoint" "$pause_payload"
     rm -f "$cf"
     NORMAL_EXIT=1; exit 0
   fi
@@ -817,23 +1066,75 @@ process_control() {
     grep -qF "$nonce" "$pf" 2>/dev/null && { rm -f "$cf"; return 0; }
   fi
   case "$action" in
-    PAUSE) return 0 ;;
+    PAUSE)
+      local pause_req_payload
+      pause_req_payload=$(python3 - "$nonce" "$cf" <<'PY'
+import json, sys
+nonce, control_path = sys.argv[1:3]
+print(json.dumps({
+  "event_type": "CONTROL_PAUSE_REQUESTED",
+  "triggered_by": {"actor": "user", "source": "control.json"},
+  "channel": {"name": "control_file", "direction": "inbound"},
+  "delivery": {"from": "user", "to": "coordinator", "content_path": control_path},
+  "executed_by": {"component": "run_task.sh", "function": "process_control"},
+  "next": {"target": "checkpoint_pause"},
+  "details": {"nonce": nonce}
+}))
+PY
+)
+      write_task_lifecycle_log "control_pause_requested" "$pause_req_payload"
+      return 0
+      ;;
     RESUME)
       local ma; ma=$(json_read "$TASK_JSON" "max_attempts" "3")
       write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
-      rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
       write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "RESUMED via control"
+      local resume_payload
+      resume_payload=$(python3 - "$action" "$nonce" "$cf" <<'PY'
+import json, sys
+action, nonce, control_path = sys.argv[1:4]
+print(json.dumps({
+  "event_type": "CONTROL_RESUME_APPLIED",
+  "triggered_by": {"actor": "user", "source": "control.json"},
+  "channel": {"name": "control_file", "direction": "inbound"},
+  "delivery": {"from": "user", "to": "coordinator", "content_path": control_path},
+  "executed_by": {"component": "run_task.sh", "function": "process_control"},
+  "next": {"state": "RUNNING"},
+  "details": {"action": action, "nonce": nonce}
+}))
+PY
+)
+      write_task_lifecycle_log "control_resume" "$resume_payload"
+      rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
       CONTROL_RESUME_APPLIED=1
       ;;
     EDIT_INSTRUCTION)
-      local ea et; ea=$(json_read "$cf" "payload.attempt" "0")
+      local ea et edit_prompt_path; ea=$(json_read "$cf" "payload.attempt" "0")
       et=$(json_read "$cf" "payload.instruction_text" "")
+      edit_prompt_path=""
       if [ -n "$ea" ] && [ "$ea" != "0" ]; then
         local pad; pad=$(printf "%03d" "$ea")
         mkdir -p "${TASK_DIR}/attempt_${pad}/coder"
         echo "$et" > "${TASK_DIR}/attempt_${pad}/coder/prompt.txt"
         echo "$et" > "${TASK_DIR}/attempt_${pad}/coder/instruction.txt"
+        edit_prompt_path="${TASK_DIR}/attempt_${pad}/coder/prompt.txt"
       fi
+      local edit_payload
+      edit_payload=$(python3 - "$ea" "$nonce" "$edit_prompt_path" "$cf" <<'PY'
+import json, sys
+attempt, nonce, prompt_path, control_path = sys.argv[1:5]
+print(json.dumps({
+  "event_type": "CONTROL_EDIT_INSTRUCTION_APPLIED",
+  "triggered_by": {"actor": "user", "source": "control.json"},
+  "channel": {"name": "control_file", "direction": "inbound"},
+  "delivery": {"from": "user", "to": "coordinator", "content_path": control_path},
+  "executed_by": {"component": "run_task.sh", "function": "process_control"},
+  "next": {"path": prompt_path},
+  "details": {"attempt": int(attempt) if str(attempt).isdigit() else 0, "nonce": nonce, "content_path": prompt_path}
+}))
+PY
+)
+      write_task_lifecycle_log "control_edit_instruction" "$edit_payload"
       rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
       ;;
     RUN_NEXT)
@@ -843,6 +1144,22 @@ process_control() {
         write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" ""
         write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "RUN_NEXT from PAUSED"
       fi
+      local run_next_payload
+      run_next_payload=$(python3 - "$nonce" "$cs" "$cf" <<'PY'
+import json, sys
+nonce, prev_state, control_path = sys.argv[1:4]
+print(json.dumps({
+  "event_type": "CONTROL_RUN_NEXT_APPLIED",
+  "triggered_by": {"actor": "user", "source": "control.json"},
+  "channel": {"name": "control_file", "direction": "inbound"},
+  "delivery": {"from": "user", "to": "coordinator", "content_path": control_path},
+  "executed_by": {"component": "run_task.sh", "function": "process_control"},
+  "next": {"state": "RUNNING" if prev_state == "PAUSED" else prev_state},
+  "details": {"nonce": nonce, "previous_state": prev_state}
+}))
+PY
+)
+      write_task_lifecycle_log "control_run_next" "$run_next_payload"
       rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
       ;;
   esac
@@ -1215,6 +1532,54 @@ try:
 except Exception as e:
   print(prev_ts if prev_ts else '')
 " "$ifile" "$ui_file" "$prev_ts" 2>/dev/null || echo "")
+  if [ -n "${LAST_USER_INPUT_TS_CONSUMED:-}" ] && [ "$LAST_USER_INPUT_TS_CONSUMED" != "${prev_ts:-}" ]; then
+    local ui_payload
+    ui_payload=$(python3 - "$ui_file" "${prev_ts:-}" "$LAST_USER_INPUT_TS_CONSUMED" <<'PY'
+import json, sys
+ui_file, prev_ts, new_ts = sys.argv[1:4]
+entries = []
+try:
+    with open(ui_file, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ob = json.loads(line)
+            except Exception:
+                continue
+            ts = (ob.get('ts') or ob.get('timestamp') or '').strip()
+            if not ts:
+                continue
+            if prev_ts and ts <= prev_ts:
+                continue
+            if new_ts and ts > new_ts:
+                continue
+            entries.append({
+                "ts": ts,
+                "request_id": ob.get('request_id', ''),
+                "text": ob.get('text') or ob.get('content') or ''
+            })
+except Exception:
+    entries = []
+print(json.dumps({
+  "event_type": "USER_INPUT_CONSUMED",
+  "triggered_by": {"actor": "user", "source": "user_input.jsonl"},
+  "channel": {"name": "user_input_jsonl", "direction": "inbound"},
+  "delivery": {
+    "from": "user",
+    "to": "coordinator",
+    "content_path": ui_file,
+    "entries": entries
+  },
+  "executed_by": {"component": "run_task.sh", "function": "consume_user_input"},
+  "next": {"target": "coder_prompt"},
+  "details": {"consumed_count": len(entries), "from_ts": prev_ts, "to_ts": new_ts}
+}))
+PY
+)
+    write_task_lifecycle_log "user_input_consumed" "$ui_payload"
+  fi
   [ -z "$LAST_USER_INPUT_TS_CONSUMED" ] || export LAST_USER_INPUT_TS_CONSUMED
 }
 
@@ -1301,51 +1666,72 @@ run_attempt() {
       ;;
   esac
 
+  local judge_enabled_flag task_provider executor_provider reviewer_provider pm_provider solo_provider
+  judge_enabled_flag=$(json_read "$TASK_JSON" "judge_enabled" "true")
+  task_provider=$(normalize_provider_v51 "$(json_read "$TASK_JSON" "agent_config.provider" "claude")")
+  executor_provider=$(normalize_provider_v51 "$(json_read "$TASK_JSON" "collab_roles.executor" "")")
+  reviewer_provider=$(normalize_provider_v51 "$(json_read "$TASK_JSON" "collab_roles.reviewer" "")")
+  pm_provider=$(normalize_provider_v51 "$(json_read "$TASK_JSON" "collab_roles.pm" "")")
+  [ -z "$task_provider" ] && task_provider="claude"
+  [ -z "$executor_provider" ] && executor_provider="$task_provider"
+  [ -z "$reviewer_provider" ] && reviewer_provider="$executor_provider"
+
   case "$executor_type" in
     api_call)
-      coder_type="ccb"
-      local judge_enabled_flag; judge_enabled_flag=$(json_read "$TASK_JSON" "judge_enabled" "true")
+      if [ "$executor_provider" = "mock" ]; then
+        coder_type="mock"
+      else
+        if [ "$run_surface" = "visual_ccb" ]; then coder_type="ccb"; else coder_type="bridge"; fi
+      fi
       if [ "$judge_enabled_flag" = "false" ]; then
         judge_type="none"
+      elif [ "$reviewer_provider" = "mock" ]; then
+        judge_type="mock"
       else
-        judge_type="ccb"
+        if [ "$run_surface" = "visual_ccb" ]; then judge_type="ccb"; else judge_type="bridge"; fi
       fi
       ;;
     solo_agent)
-      # Solo mode: coder and judge should use the same provider/model, but run in separate instances/contexts.
       [ -z "$judge_model" ] && judge_model="$coder_model"
-      local solo_provider="claude"
-      case "${coder_model}" in
-        codex*|*codex*) solo_provider="codex" ;;
-        gemini*|*gemini*) solo_provider="antigravity" ;;
-        opencode*|*opencode*) solo_provider="opencode" ;;
-        droid*|*droid*) solo_provider="droid" ;;
-        cursor*|*cursor*) solo_provider="cursor" ;;
-        antigravity*|*antigravity*) solo_provider="antigravity" ;;
-        *) solo_provider="claude" ;;
-      esac
-      if [ "$run_surface" = "visual_ccb" ]; then
-        coder_type="ccb"
-        judge_type="ccb"
-      else
-        coder_type="solo"
-        case "$solo_provider" in
-          codex) judge_type="codex" ;;
-          claude) judge_type="claude" ;;
-          cursor) judge_type="cursor" ;;
-          antigravity) judge_type="antigravity" ;;
-          *)
-            enter_paused "PAUSED_UNSUPPORTED_PROVIDER" \
-              "solo + bridge unsupported provider: coder_model='${coder_model}' resolved provider='${solo_provider}' (supported: claude, codex, cursor, antigravity/gemini)" \
-              "[\"Use launch_mode=ccb for opencode/droid, or switch coder_model to claude/codex/cursor/gemini(antigravity) for bridge mode.\"]"
-            NORMAL_EXIT=1; exit 0
-            ;;
+      solo_provider="$pm_provider"
+      [ -z "$solo_provider" ] && solo_provider="$executor_provider"
+      [ -z "$solo_provider" ] && solo_provider="$task_provider"
+      if [ -z "$solo_provider" ]; then
+        case "${coder_model}" in
+          codex*|*codex*) solo_provider="codex" ;;
+          gemini*|*gemini*|antigravity*|*antigravity*) solo_provider="gemini" ;;
+          opencode*|*opencode*) solo_provider="opencode" ;;
+          droid*|*droid*) solo_provider="droid" ;;
+          cursor*|*cursor*) solo_provider="cursor" ;;
+          *) solo_provider="claude" ;;
         esac
+      fi
+      if [ "$solo_provider" = "mock" ]; then
+        coder_type="mock"
+        if [ "$judge_enabled_flag" = "false" ]; then judge_type="none"; else judge_type="mock"; fi
+      else
+        if [ "$run_surface" = "visual_ccb" ]; then
+          coder_type="ccb"
+          if [ "$judge_enabled_flag" = "false" ]; then judge_type="none"; else judge_type="ccb"; fi
+        else
+          coder_type="bridge"
+          if [ "$judge_enabled_flag" = "false" ]; then judge_type="none"; else judge_type="bridge"; fi
+        fi
       fi
       ;;
     multi_agent)
-      coder_type="ccb"
-      judge_type="ccb"
+      if [ "$executor_provider" = "mock" ]; then
+        coder_type="mock"
+      else
+        if [ "$run_surface" = "visual_ccb" ]; then coder_type="ccb"; else coder_type="bridge"; fi
+      fi
+      if [ "$judge_enabled_flag" = "false" ]; then
+        judge_type="none"
+      elif [ "$reviewer_provider" = "mock" ]; then
+        judge_type="mock"
+      else
+        if [ "$run_surface" = "visual_ccb" ]; then judge_type="ccb"; else judge_type="bridge"; fi
+      fi
       ;;
   esac
   [ -z "$coder_type" ] && coder_type="mock"
@@ -1365,23 +1751,14 @@ run_attempt() {
   case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; claude-cli|claude_bridge) judge_script_suffix="claude";; antigravity-cli|gemini-cli) judge_script_suffix="antigravity";; bridge) judge_script_suffix="bridge";; ccb) judge_script_suffix="ccb";; *) judge_script_suffix="$judge_type";; esac
   # P16: collab_roles for semi-auto (ccb) — pass executor/reviewer to call_coder_ccb/call_judge_ccb
   local ccb_coder_provider ccb_judge_provider
-  ccb_coder_provider=$(json_read "$TASK_JSON" "collab_roles.executor" "")
-  ccb_judge_provider=$(json_read "$TASK_JSON" "collab_roles.reviewer" "")
-  # Provider alias normalization: Gemini runs on Antigravity stack in bridge, but CCB uses 'gemini'.
-  case "${ccb_coder_provider}" in antigravity|googleantigravity) ccb_coder_provider="gemini" ;; esac
-  case "${ccb_judge_provider}" in antigravity|googleantigravity) ccb_judge_provider="gemini" ;; esac
-  if [ "$executor_type" = "solo_agent" ] && [ "$coder_script_suffix" = "ccb" ]; then
-    if [ -z "$ccb_coder_provider" ]; then
-      case "${coder_model}" in
-        codex*|*codex*) ccb_coder_provider="codex" ;;
-        gemini*|*gemini*) ccb_coder_provider="gemini" ;;
-        opencode*|*opencode*) ccb_coder_provider="opencode" ;;
-        droid*|*droid*) ccb_coder_provider="droid" ;;
-        *) ccb_coder_provider="claude" ;;
-      esac
-    fi
+  ccb_coder_provider="$executor_provider"
+  ccb_judge_provider="$reviewer_provider"
+  if [ "$executor_type" = "solo_agent" ]; then
+    [ -n "$solo_provider" ] && ccb_coder_provider="$solo_provider"
     [ -z "$ccb_judge_provider" ] && ccb_judge_provider="$ccb_coder_provider"
   fi
+  [ -z "$ccb_coder_provider" ] && ccb_coder_provider="$task_provider"
+  [ -z "$ccb_judge_provider" ] && ccb_judge_provider="$ccb_coder_provider"
   coder_timeout=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")
@@ -1496,6 +1873,11 @@ run_attempt() {
         write_event_ext "bridge_call" "{\"session_id\":\"${coder_session_id}\",\"role\":\"executor\"}"
       fi
     fi
+    local coder_channel_name="local"
+    [ "$coder_script_suffix" = "ccb" ] && coder_channel_name="ccb"
+    [ "$coder_script_suffix" = "bridge" ] && coder_channel_name="bridge"
+    local coder_dispatch_provider="${ccb_coder_provider:-$coder_type}"
+    write_agent_dispatch_log "coder" "executor" "$coder_channel_name" "$coder_script" "$ifile" "$coder_session_id" "$coder_req_code" "$coder_dispatch_provider" "coder_execution"
     # timeout
     local tout=""
     command -v timeout >/dev/null 2>&1 && tout="timeout"
@@ -1736,6 +2118,22 @@ EOF
     fi
     echo "0" > "${att_dir}/judge/rc.txt"
     log_info "Judge skipped (judge_type=none), auto-verdict based on coder rc=${coder_rc_val}"
+    local auto_judge_payload
+    auto_judge_payload=$(python3 - "$coder_rc_val" "${att_dir}/judge/verdict.json" <<'PY'
+import json, sys
+coder_rc, verdict_path = sys.argv[1:3]
+print(json.dumps({
+  "event_type": "JUDGE_SKIPPED_AUTO_VERDICT",
+  "triggered_by": {"actor": "coordinator", "source": "run_attempt"},
+  "channel": {"name": "local", "direction": "internal"},
+  "delivery": {"from": "coordinator", "to": "reviewer", "content_path": verdict_path},
+  "executed_by": {"component": "run_task.sh", "function": "run_attempt"},
+  "next": {"path": verdict_path},
+  "details": {"coder_rc": int(coder_rc) if str(coder_rc).isdigit() else coder_rc}
+}))
+PY
+)
+    write_task_lifecycle_log "judge_skipped_auto_verdict" "$auto_judge_payload"
     skip_judge=1
   fi
 
@@ -1783,6 +2181,11 @@ EOF
       write_event_ext "bridge_call" "{\"session_id\":\"${judge_session_id}\",\"role\":\"reviewer\"}"
     fi
   fi
+  local judge_channel_name="local"
+  [ "$judge_script_suffix" = "ccb" ] && judge_channel_name="ccb"
+  [ "$judge_script_suffix" = "bridge" ] && judge_channel_name="bridge"
+  local judge_dispatch_provider="${ccb_judge_provider:-$judge_type}"
+  write_agent_dispatch_log "judge" "reviewer" "$judge_channel_name" "$judge_script" "$jrequest" "$judge_session_id" "$judge_req_code" "$judge_dispatch_provider" "judge_execution"
 
   while [ "$j_retries" -le "$JUDGE_MAX_RETRIES" ]; do
     local j_s_e; j_s_e=$(date +%s)
@@ -2017,7 +2420,8 @@ PY
 write_event_ext() {
   local etype="$1" payload_json="${2-}"
   [ -z "$payload_json" ] && payload_json='{}'
-  python3 - "$TASK_DIR" "$TASK_ID" "$etype" "$payload_json" <<'PY'
+  python3 - "$TASK_DIR" "$TASK_ID" "$etype" "$payload_json" <<'PY' \
+  | python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/events.jsonl" -
 import datetime, json, os, sys
 task_dir, task_id, etype, payload_raw = sys.argv[1:5]
 payload = {}
@@ -2031,10 +2435,69 @@ event = {
     "type": etype
 }
 event.update(payload)
-os.makedirs(task_dir, exist_ok=True)
-with open(os.path.join(task_dir, "events.jsonl"), "a", encoding="utf-8") as f:
-    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+print(json.dumps(event, ensure_ascii=False))
 PY
+
+  local lifecycle_payload
+  lifecycle_payload=$(python3 - "$etype" "$payload_json" <<'PY'
+import json, sys
+etype, payload_raw = sys.argv[1:3]
+try:
+    payload = json.loads(payload_raw) if payload_raw else {}
+except Exception:
+    payload = {}
+
+channel_name = "events.jsonl"
+if etype == "ccb_call":
+    channel_name = "ccb"
+elif etype == "bridge_call":
+    channel_name = "bridge"
+elif etype == "knowledge_inject":
+    channel_name = "knowledge"
+elif etype in ("handoff_pointer_written", "role_transition"):
+    channel_name = "handoff"
+elif etype in ("session_id_assigned", "req_code_assigned"):
+    channel_name = "session"
+
+delivery = {}
+for k in ("from", "to", "role", "session_id", "req_code", "provider", "from_role", "to_role", "from_session_id"):
+    if k in payload and payload.get(k) not in (None, ""):
+        delivery[k] = payload.get(k)
+if "path" in payload and payload.get("path"):
+    delivery["content_path"] = payload.get("path")
+if "handoff_path" in payload and payload.get("handoff_path"):
+    delivery["content_path"] = payload.get("handoff_path")
+if "req_code" in payload and payload.get("req_code"):
+    delivery["req_code"] = payload.get("req_code")
+
+next_hop = {}
+if payload.get("to"):
+    next_hop["to"] = payload.get("to")
+if payload.get("to_role"):
+    next_hop["to"] = payload.get("to_role")
+if payload.get("session_id"):
+    next_hop["session_id"] = payload.get("session_id")
+if payload.get("handoff_path"):
+    next_hop["handoff_path"] = payload.get("handoff_path")
+
+details = dict(payload)
+if "path" in details and details["path"]:
+    details["content_path"] = details["path"]
+if "handoff_path" in details and details["handoff_path"]:
+    details["content_path"] = details["handoff_path"]
+
+print(json.dumps({
+  "event_type": etype,
+  "triggered_by": {"actor": "coordinator", "source": "run_task.sh"},
+  "channel": {"name": channel_name, "direction": "internal"},
+  "delivery": delivery,
+  "executed_by": {"component": "run_task.sh", "function": "write_event_ext"},
+  "next": next_hop,
+  "details": details
+}))
+PY
+)
+  write_task_lifecycle_log "$etype" "$lifecycle_payload"
 }
 
 upsert_task_state_pane() {
@@ -2124,6 +2587,15 @@ resolve_provider_for_role() {
   esac
 }
 
+normalize_provider_v51() {
+  local provider="${1:-}"
+  provider=$(echo "$provider" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  case "$provider" in
+    antigravity|googleantigravity) echo "gemini" ;;
+    *) echo "$provider" ;;
+  esac
+}
+
 resolve_launch_mode_v51() {
   local locked launch_mode waited cfg mode_from_cfg
   locked=$(json_read "$TASK_JSON" "launch_mode_locked" "false")
@@ -2191,6 +2663,126 @@ bridge_launch_pane() {
   write_event_ext "bridge_call" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\"}"
 }
 
+build_role_instruction_v51() {
+  local role="$1" role_dir="$2" context="$3" task_type="$4" provider="$5"
+  local goal acceptance repo_path role_prompt ifile
+  goal=$(json_read "$TASK_JSON" "goal" "")
+  acceptance=$(json_read "$TASK_JSON" "acceptance" "")
+  repo_path=$(json_read "$TASK_JSON" "repo_path" "")
+  ifile="${role_dir}/coder/prompt.txt"
+  mkdir -p "${role_dir}/coder"
+
+  case "$role" in
+    pm)
+      role_prompt="You are PM. Produce actionable task decomposition and execution notes in .rdloop/pm_notes.md. Do not execute git commands."
+      ;;
+    designer)
+      role_prompt="You are Designer. Produce a concrete design contract in design_contract.md (files, interfaces, and implementation plan)."
+      ;;
+    *)
+      role_prompt="You are ${role}. Follow the task goal and acceptance criteria."
+      ;;
+  esac
+
+  {
+    echo "=== ROLE ==="
+    echo "${role}"
+    echo ""
+    echo "=== TASK TYPE ==="
+    echo "${task_type}"
+    echo ""
+    echo "=== PROVIDER ==="
+    echo "${provider}"
+    echo ""
+    echo "=== REPO PATH ==="
+    echo "${repo_path}"
+    echo ""
+    echo "=== GOAL ==="
+    echo "${goal}"
+    echo ""
+    echo "=== ACCEPTANCE CRITERIA ==="
+    echo "${acceptance}"
+    echo ""
+    echo "=== ROLE REQUIREMENTS ==="
+    echo "${role_prompt}"
+    echo ""
+    if [ -n "$context" ]; then
+      echo "=== KNOWLEDGE CONTEXT ==="
+      echo "${context}"
+      echo ""
+    fi
+    echo "Keep the output deterministic and concrete."
+  } > "$ifile"
+
+  echo "$ifile"
+}
+
+run_role_action_v51() {
+  local role="$1" pane_idx="$2" session_id="$3" provider="$4" launch_mode="$5" context="$6" task_type="$7"
+  local role_dir role_script role_script_suffix req_code role_rc timeout_s prompt_path
+  role_dir="${TASK_DIR}/roles/${role}-$(printf '%02d' "$pane_idx")"
+  mkdir -p "${role_dir}/coder"
+  prompt_path=$(build_role_instruction_v51 "$role" "$role_dir" "$context" "$task_type" "$provider")
+  timeout_s=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
+
+  role_script_suffix="$launch_mode"
+  role_script="${LIB_DIR}/call_coder_${role_script_suffix}.sh"
+  if [ "$provider" = "mock" ]; then
+    role_script_suffix="mock"
+    role_script="${LIB_DIR}/call_coder_mock.sh"
+  fi
+  if [ ! -f "$role_script" ]; then
+    enter_paused "PAUSED_ROLE_FAILED" \
+      "Role ${role} adapter missing: ${role_script}" \
+      "[\"Check coordinator/lib adapters for v5.1 role execution and rerun.\"]" \
+      "NEED_USER_INPUT" "" "true"
+    NORMAL_EXIT=1; exit 0
+  fi
+
+  write_event_ext "role_action_started" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"provider\":\"${provider}\",\"launch_mode\":\"${launch_mode}\",\"script\":\"${role_script}\"}"
+  write_agent_dispatch_log "role_${role}" "$role" "$launch_mode" "$role_script" "$prompt_path" "$session_id" "" "$provider" "$role"
+
+  local tout=""
+  command -v timeout >/dev/null 2>&1 && tout="timeout"
+  [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
+  role_rc=1
+  if [ "$role_script_suffix" = "ccb" ]; then
+    req_code="$("$REQ_CODE_GEN" "$session_id")"
+    if [ -n "$tout" ]; then
+      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+    else
+      set +e; bash "$role_script" --session-id "$session_id" --req-code "$req_code" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+    fi
+    if [ -f "${role_dir}/coder/stdout.log" ]; then
+      extract_req_payload_segment "$req_code" "${role_dir}/coder/stdout.log" "${role_dir}/coder/req_payload.txt" "$role"
+    fi
+  elif [ "$role_script_suffix" = "bridge" ]; then
+    if [ -n "$tout" ]; then
+      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+    else
+      set +e; bash "$role_script" --session-id "$session_id" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+    fi
+  else
+    if [ -n "$tout" ]; then
+      set +e; $tout "$timeout_s" bash "$role_script" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+    else
+      set +e; bash "$role_script" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+    fi
+  fi
+
+  [ -f "${role_dir}/coder/rc.txt" ] && role_rc=$(cat "${role_dir}/coder/rc.txt" 2>/dev/null || echo "$role_rc")
+  [ -f "${role_dir}/coder/stdout.log" ] || [ ! -f "${role_dir}/coder/run.log" ] || cp "${role_dir}/coder/run.log" "${role_dir}/coder/stdout.log" 2>/dev/null || true
+
+  write_event_ext "role_action_finished" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"rc\":${role_rc},\"path\":\"${role_dir}\"}"
+  if [ "$role_rc" != "0" ]; then
+    enter_paused "PAUSED_ROLE_FAILED" \
+      "Role ${role} failed (rc=${role_rc})." \
+      "[\"Inspect out/<task_id>/roles/${role}-*/coder/run.log and retry.\"]" \
+      "NEED_USER_INPUT" "" "true"
+    NORMAL_EXIT=1; exit 0
+  fi
+}
+
 write_role_handoff_pointer() {
   local from_role="$1" from_sid="$2" to_role="$3" to_sid="$4" commit_sha="$5" launch_mode="$6"
   python3 - "$TASK_DIR" "$TASK_ID" "$from_role" "$from_sid" "$to_role" "$to_sid" "$commit_sha" "$launch_mode" <<'PY'
@@ -2227,6 +2819,7 @@ role_transition_v51() {
   local from_role="$1" from_idx="$2" from_sid="$3"
   local to_role="$4" to_idx="$5" to_sid="$6"
   local launch_mode="$7" provider="$8"
+  local launch_next="${9:-true}"
   local repo_path="" commit_sha="" next_context="" handoff_path=""
 
   upsert_task_state_pane "$from_role" "$from_idx" "done" "$from_sid" "$launch_mode"
@@ -2242,10 +2835,14 @@ role_transition_v51() {
   handoff_path=$(write_role_handoff_pointer "$from_role" "$from_sid" "$to_role" "$to_sid" "$commit_sha" "$launch_mode")
   write_event_ext "handoff_pointer_written" "{\"path\":\"${handoff_path}\",\"from\":\"${from_role}\",\"to\":\"${to_role}\",\"session_id\":\"${from_sid}\"}"
   next_context=$(knowledge_agent_query "$to_role" "$from_role" "$from_sid" "$commit_sha" "$handoff_path")
-  case "$launch_mode" in
-    ccb) ccb_launch_pane "$to_role" "$to_idx" "$provider" "$to_sid" "$next_context" ;;
-    bridge) bridge_launch_pane "$to_role" "$to_idx" "$provider" "$to_sid" "$next_context" ;;
-  esac
+  if [ "$launch_next" = "true" ]; then
+    case "$launch_mode" in
+      ccb) ccb_launch_pane "$to_role" "$to_idx" "$provider" "$to_sid" "$next_context" ;;
+      bridge) bridge_launch_pane "$to_role" "$to_idx" "$provider" "$to_sid" "$next_context" ;;
+    esac
+  else
+    upsert_task_state_pane "$to_role" "$to_idx" "waiting" "$to_sid" "$launch_mode"
+  fi
   write_event_ext "role_transition" "{\"from\":\"${from_role}\",\"to\":\"${to_role}\",\"session_id\":\"${to_sid}\",\"handoff_path\":\"${handoff_path}\"}"
 }
 
@@ -2265,7 +2862,7 @@ run_v51_flow() {
   esac
 
   launch_mode=$(resolve_launch_mode_v51)
-  max_att=$(json_read "$TASK_JSON" "max_attempts" "1")
+  max_att="${EFFECTIVE_MAX_ATTEMPTS:-$(json_read "$TASK_JSON" "max_attempts" "1")}"
   write_status "RUNNING" "0" "$max_att" "false" "" "v5.1 role flow started" "[]" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
 
   local roles=()
@@ -2291,33 +2888,43 @@ PY
     fi
   fi
 
-  local idx=0 prev_role="" prev_idx=0 prev_sid="" role sid provider context
-  for role in "${roles[@]}"; do
-    sid="$("$SESSION_ID_GEN" "$TASK_ID" "$role" "$idx")"
-    provider="$(resolve_provider_for_role "$role" "$task_type")"
-    if [ -z "$prev_role" ]; then
-      context="$(knowledge_agent_query "$role" "" "" "" "")"
-      case "$launch_mode" in
-        ccb) ccb_launch_pane "$role" "$idx" "$provider" "$sid" "$context" ;;
-        bridge) bridge_launch_pane "$role" "$idx" "$provider" "$sid" "$context" ;;
-      esac
-    else
-      role_transition_v51 "$prev_role" "$prev_idx" "$prev_sid" "$role" "$idx" "$sid" "$launch_mode" "$provider"
-    fi
-    prev_role="$role"
-    prev_idx="$idx"
-    prev_sid="$sid"
-    idx=$((idx + 1))
-  done
+  local pm_sid pm_provider pm_ctx
+  pm_sid="$("$SESSION_ID_GEN" "$TASK_ID" "pm" "0")"
+  pm_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "pm" "$task_type")")
+  [ -z "$pm_provider" ] && pm_provider="claude"
+  pm_ctx=$(knowledge_agent_query "pm" "" "" "" "")
+  case "$launch_mode" in
+    ccb) ccb_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
+    bridge) bridge_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
+  esac
+  run_role_action_v51 "pm" "0" "$pm_sid" "$pm_provider" "$launch_mode" "$pm_ctx" "$task_type"
 
-  # Mark last role complete and finalize.
-  if [ -n "$prev_role" ]; then
-    upsert_task_state_pane "$prev_role" "$prev_idx" "done" "$prev_sid" "$launch_mode"
-    write_event_ext "role_end" "{\"role\":\"${prev_role}\",\"session_id\":\"${prev_sid}\"}"
+  if [ "$task_type" = "copywriting" ]; then
+    local ex_sid ex_provider
+    ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "1")"
+    ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
+    role_transition_v51 "pm" "0" "$pm_sid" "executor" "1" "$ex_sid" "$launch_mode" "$ex_provider" "false"
+  else
+    local designer_sid designer_provider designer_ctx ex_sid ex_provider
+    designer_sid="$("$SESSION_ID_GEN" "$TASK_ID" "designer" "1")"
+    designer_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "designer" "$task_type")")
+    [ -z "$designer_provider" ] && designer_provider="$pm_provider"
+    role_transition_v51 "pm" "0" "$pm_sid" "designer" "1" "$designer_sid" "$launch_mode" "$designer_provider" "true"
+    designer_ctx=$(knowledge_agent_query "designer" "pm" "$pm_sid" "" "")
+    run_role_action_v51 "designer" "1" "$designer_sid" "$designer_provider" "$launch_mode" "$designer_ctx" "$task_type"
+
+    ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "1")"
+    ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
+    role_transition_v51 "designer" "1" "$designer_sid" "executor" "1" "$ex_sid" "$launch_mode" "$ex_provider" "false"
   fi
 
-  write_status "READY_FOR_REVIEW" "1" "$max_att" "false" "READY_FOR_REVIEW" "v5.1 role flow complete" "[]" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
-  write_final_summary "READY_FOR_REVIEW" "READY_FOR_REVIEW" "1" "$max_att" "v5.1 role flow complete" "[]" "" "" ""
+  local att=1
+  while [ "$att" -le "$EFFECTIVE_MAX_ATTEMPTS" ]; do
+    process_control
+    load_runtime_overrides
+    run_attempt "$att"
+    att=$(( att + 1 ))
+  done
 }
 
 ##############################################################################
