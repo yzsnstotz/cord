@@ -1,36 +1,34 @@
 # Design Contract
 
-## Scope
-Establish a deterministic filesystem artifact set for the solo test target.
+## Objective
+Create a deterministic filesystem artifact for solo test setup.
 
 ## Files
 - `/Users/yzliu/work/Cord/test/v5.1_test/v5.1_solo_test/`
-  - Purpose: Dedicated folder for the v5.1 solo test artifact.
+  - Type: directory
+  - Requirement: must exist.
 - `/Users/yzliu/work/Cord/test/v5.1_test/v5.1_solo_test/hello.txt`
-  - Purpose: Required text artifact.
-  - Required content (exact): `hello world` followed by a trailing newline.
+  - Type: text file
+  - Requirement: file content must be exactly `hello world`.
 - `/Users/yzliu/work/Cord/test/v5.1_test/design_contract.md`
-  - Purpose: This contract document.
+  - Type: text file
+  - Requirement: defines this contract.
 
 ## Interfaces
-- Filesystem interface: directory creation
-  - Operation: `mkdir -p /Users/yzliu/work/Cord/test/v5.1_test/v5.1_solo_test`
-  - Contract: Directory exists after execution.
-- Filesystem interface: file write
-  - Operation: write plain text to `hello.txt`
-  - Contract: File exists and full content is exactly `hello world\n`.
-- Verification interface: file read
-  - Operation: `cat /Users/yzliu/work/Cord/test/v5.1_test/v5.1_solo_test/hello.txt`
-  - Contract: Output line is `hello world`.
+- `DirectoryProvisioner.ensure(path)`
+  - Input: absolute directory path
+  - Behavior: create directory if missing; no-op if present
+  - Deterministic output: directory exists at target path.
+- `TextFileWriter.write_exact(path, content)`
+  - Input: absolute file path, exact string
+  - Behavior: overwrite file content with provided string
+  - Deterministic output: file bytes match input string exactly.
+- `Verifier.assert_exact(path, expected)`
+  - Input: file path and expected text
+  - Behavior: read file and compare exact value
+  - Deterministic output: pass only if equal.
 
 ## Implementation Plan
-1. Ensure the target directory exists.
-2. Write `hello world` into `hello.txt` with a trailing newline.
-3. Verify file existence and content by reading the file.
-4. Keep contract and implementation deterministic by using absolute paths and exact string content.
-
-## Acceptance Mapping
-- Goal satisfied when:
-  - `v5.1_solo_test` exists under `/Users/yzliu/work/Cord/test/v5.1_test/`.
-  - `hello.txt` exists in that folder.
-  - `hello.txt` content is exactly `hello world` (newline-terminated).
+1. Ensure directory exists at `/Users/yzliu/work/Cord/test/v5.1_test/v5.1_solo_test`.
+2. Write exact text `hello world` to `/Users/yzliu/work/Cord/test/v5.1_test/v5.1_solo_test/hello.txt`.
+3. Verify the file content is exactly `hello world`.
