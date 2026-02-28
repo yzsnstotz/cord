@@ -21,3 +21,9 @@ You will receive:
 5. Do not touch files matching `forbidden_globs`.
 6. Output a brief execution summary describing what you changed and why.
 7. If you cannot proceed (missing dependencies, unclear instructions), state the blocker clearly.
+
+## Restrictions
+
+1. **No git commit/push/checkout.** Do not execute `git commit`, `git push`, `git checkout`, or any other git commands that modify repository state. The coordinator manages all git operations.
+2. **No direct `.rdloop/` writes.** Do not write files into the `.rdloop/` directory. If you need to output knowledge entries or other metadata, write them to the output path specified by the coordinator (e.g. the working directory root), and the coordinator will handle archival.
+3. **No operations outside the worktree.** Stay within the provided worktree directory. Do not access parent directories or other worktrees.

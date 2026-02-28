@@ -1616,7 +1616,7 @@ build_instruction() {
     echo "$acceptance"
     echo ""
     echo "=== KNOWLEDGE ENTRIES (optional) ==="
-    echo "When you have finished implementing, write a JSON file at .rdloop/knowledge_entries.json (repo root): keys = relative paths of files you modified (e.g. src/auth.py), values = one-line summary of what the file does or what changed (e.g. \"JWT auth. verify_token().\"). Only include files you actually modified. If you did not modify any files, you may omit this file."
+    echo "When you have finished implementing, write a JSON file at knowledge_entries.json in the working directory root (NOT in .rdloop/): keys = relative paths of files you modified (e.g. src/auth.py), values = one-line summary of what the file does or what changed (e.g. \"JWT auth. verify_token().\"). Only include files you actually modified. If you did not modify any files, you may omit this file. The coordinator will collect this file automatically."
     echo ""
   } > "$ifile"
   # E5-2: Consume user_input.jsonl (incremental), append USER_INPUT block, set LAST_USER_INPUT_TS_CONSUMED
@@ -2039,24 +2039,20 @@ run_attempt() {
     local tout=""
     command -v timeout >/dev/null 2>&1 && tout="timeout"
     [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
-    if [ "$coder_script_suffix" = "ccb" ]; then
-      if [ -n "$tout" ]; then
-        set +e; $tout "$coder_timeout" bash "$coder_script" --session-id "$coder_session_id" --req-code "$coder_req_code" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
-      else
-        set +e; bash "$coder_script" --session-id "$coder_session_id" --req-code "$coder_req_code" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
-      fi
-    elif [ "$coder_script_suffix" = "bridge" ]; then
-      if [ -n "$tout" ]; then
-        set +e; $tout "$coder_timeout" bash "$coder_script" --session-id "$coder_session_id" "$TASK_JSON" "$att_dir" "$wt" "$ifile"; coder_rc=$?; set -e
-      else
-        set +e; bash "$coder_script" --session-id "$coder_session_id" "$TASK_JSON" "$att_dir" "$wt" "$ifile"; coder_rc=$?; set -e
-      fi
+    # Build unified adapter flags
+    local coder_flags=()
+    if [ "$coder_script_suffix" = "ccb" ] || [ "$coder_script_suffix" = "bridge" ]; then
+      coder_flags+=(--session-id "$coder_session_id")
+      [ -n "${RDLOOP_TASK_CODE:-}" ] && coder_flags+=(--task-code "$RDLOOP_TASK_CODE")
+      [ -n "${RDLOOP_ATTEMPT:-}" ] && coder_flags+=(--attempt "$RDLOOP_ATTEMPT")
+      [ "$coder_script_suffix" = "ccb" ] && coder_flags+=(--req-code "$coder_req_code")
+    fi
+    local coder_pos_args=("$TASK_JSON" "$att_dir" "$wt" "$ifile")
+    [ -n "${ccb_coder_provider:-}" ] && coder_pos_args+=("$ccb_coder_provider")
+    if [ -n "$tout" ]; then
+      set +e; $tout "$coder_timeout" bash "$coder_script" ${coder_flags[@]+"${coder_flags[@]}"} "${coder_pos_args[@]}"; coder_rc=$?; set -e
     else
-      if [ -n "$tout" ]; then
-        set +e; $tout "$coder_timeout" bash "$coder_script" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
-      else
-        set +e; bash "$coder_script" "$TASK_JSON" "$att_dir" "$wt" "$ifile" ${ccb_coder_provider:+"$ccb_coder_provider"}; coder_rc=$?; set -e
-      fi
+      set +e; bash "$coder_script" ${coder_flags[@]+"${coder_flags[@]}"} "${coder_pos_args[@]}"; coder_rc=$?; set -e
     fi
     local c_e_epoch; c_e_epoch=$(date +%s)
     local c_secs=$(( c_e_epoch - c_s_epoch ))
@@ -2748,8 +2744,125 @@ get_commit_sha() {
 knowledge_agent_query() {
   local to_role="$1" from_role="${2:-}" from_sid="${3:-}" commit_sha="${4:-}" handoff_path="${5:-}"
   write_event_ext "knowledge_inject" "{\"to_role\":\"${to_role}\",\"from_role\":\"${from_role}\",\"from_session_id\":\"${from_sid}\",\"commit_sha\":\"${commit_sha}\",\"handoff_path\":\"${handoff_path}\"}"
-  # v5.1: coordinator-owned context assembly hook. Keep lightweight by default.
-  echo ""
+
+  local ctx=""
+  local repo_path; repo_path=$(json_read "$TASK_JSON" "repo_path" "")
+  local nl=$'\n'
+
+  case "$to_role" in
+    pm)
+      # PM gets knowledge shards from task config (if any)
+      local shards; shards=$(python3 -c "
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d = json.load(f)
+shards = d.get('agent_config', {}).get('knowledge_shards', [])
+for s in shards:
+    print(s)
+" "$TASK_JSON" 2>/dev/null || true)
+      if [ -n "$shards" ]; then
+        ctx="=== KNOWLEDGE SHARDS ===${nl}${shards}"
+      fi
+      ;;
+
+    designer)
+      # Designer gets PM output
+      local pm_output=""
+      local pm_dir="${TASK_DIR}/roles/pm-00/coder"
+      for f in req_payload.txt stdout.log run.log; do
+        if [ -f "${pm_dir}/${f}" ] && [ -s "${pm_dir}/${f}" ]; then
+          pm_output=$(tail -c 40000 "${pm_dir}/${f}" 2>/dev/null || true)
+          break
+        fi
+      done
+      if [ -n "$pm_output" ]; then
+        ctx="=== PM OUTPUT ===${nl}${pm_output}"
+      fi
+      # Add repo structure summary if repo_path exists
+      if [ -n "$repo_path" ] && [ -d "$repo_path" ]; then
+        local tree; tree=$(find "$repo_path" -maxdepth 3 -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -type f 2>/dev/null | head -80 | sed "s|^${repo_path}/||" | sort || true)
+        if [ -n "$tree" ]; then
+          ctx="${ctx:+${ctx}${nl}${nl}}=== REPO STRUCTURE (top files) ===${nl}${tree}"
+        fi
+      fi
+      ;;
+
+    executor)
+      # Executor gets designer output + git context
+      local designer_output=""
+      local designer_dir="${TASK_DIR}/roles/designer-01/coder"
+      for f in req_payload.txt stdout.log run.log; do
+        if [ -f "${designer_dir}/${f}" ] && [ -s "${designer_dir}/${f}" ]; then
+          designer_output=$(tail -c 40000 "${designer_dir}/${f}" 2>/dev/null || true)
+          break
+        fi
+      done
+      if [ -n "$designer_output" ]; then
+        ctx="=== DESIGNER OUTPUT ===${nl}${designer_output}"
+      fi
+      # Git context from repo
+      if [ -n "$repo_path" ] && [ -d "$repo_path/.git" ] || [ -n "$repo_path" ] && [ -f "$repo_path/.git" ]; then
+        local git_stat; git_stat=$(git -C "$repo_path" diff --stat HEAD~1..HEAD 2>/dev/null || echo "(no diff)")
+        local git_head; git_head=$(git -C "$repo_path" log -1 --oneline 2>/dev/null || echo "(no commits)")
+        ctx="${ctx:+${ctx}${nl}${nl}}=== GIT STATUS ===${nl}diff --stat:${nl}${git_stat}${nl}${nl}HEAD: ${git_head}"
+      fi
+      # Allowed paths from task config
+      local allowed; allowed=$(python3 -c "
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d = json.load(f)
+paths = d.get('allowed_paths', [])
+for p in paths:
+    print(p)
+" "$TASK_JSON" 2>/dev/null || true)
+      if [ -n "$allowed" ]; then
+        ctx="${ctx:+${ctx}${nl}${nl}}=== ALLOWED PATHS ===${nl}${allowed}"
+      fi
+      ;;
+
+    reviewer)
+      # Reviewer gets evidence bundle paths
+      local evidence=""
+      # Find the most recent attempt dir
+      local latest_att_dir=""
+      local att_num; att_num=$(ls -d "${TASK_DIR}/attempt_"* 2>/dev/null | wc -l | tr -d ' ')
+      if [ "${att_num:-0}" -gt 0 ]; then
+        latest_att_dir=$(ls -d "${TASK_DIR}/attempt_"* 2>/dev/null | sort | tail -1)
+      fi
+      if [ -n "$latest_att_dir" ] && [ -d "$latest_att_dir" ]; then
+        evidence="=== EVIDENCE BUNDLE ==="
+        # Coder output
+        for f in coder/req_payload.txt coder/stdout.log coder/run.log; do
+          if [ -f "${latest_att_dir}/${f}" ]; then
+            evidence="${evidence}${nl}Coder output: ${latest_att_dir}/${f}"
+            evidence="${evidence}${nl}$(tail -c 20000 "${latest_att_dir}/${f}" 2>/dev/null | head -c 20000 || true)"
+            break
+          fi
+        done
+        # Test results
+        if [ -f "${latest_att_dir}/test/rc.txt" ]; then
+          local test_rc; test_rc=$(cat "${latest_att_dir}/test/rc.txt" 2>/dev/null || echo "?")
+          evidence="${evidence}${nl}${nl}Test result: rc=${test_rc}"
+          if [ -f "${latest_att_dir}/test/stdout.log" ]; then
+            evidence="${evidence}${nl}Test log (tail):${nl}$(tail -n 50 "${latest_att_dir}/test/stdout.log" 2>/dev/null || true)"
+          fi
+        fi
+        # Diff patch
+        if [ -f "${latest_att_dir}/diff.patch" ] && [ -s "${latest_att_dir}/diff.patch" ]; then
+          evidence="${evidence}${nl}${nl}Diff patch: ${latest_att_dir}/diff.patch"
+          evidence="${evidence}${nl}$(head -c 20000 "${latest_att_dir}/diff.patch" 2>/dev/null || true)"
+        fi
+        ctx="$evidence"
+      fi
+      # Also include handoff_path content if provided
+      if [ -n "$handoff_path" ] && [ -f "$handoff_path" ]; then
+        local handoff_content; handoff_content=$(tail -c 20000 "$handoff_path" 2>/dev/null || true)
+        ctx="${ctx:+${ctx}${nl}${nl}}=== HANDOFF ===${nl}${handoff_content}"
+      fi
+      ;;
+  esac
+
+  echo "$ctx"
 }
 
 resolve_provider_for_role() {
@@ -2801,7 +2914,7 @@ resolve_nonvisual_coder_type_v51() {
   provider=$(normalize_provider_v51 "${1:-}")
   case "$provider" in
     codex) echo "codex_cli" ;;
-    gemini) echo "antigravity-cli" ;;
+    gemini) echo "bridge" ;;
     cursor) echo "cursor_cli" ;;
     bridge|claude|"") echo "bridge" ;;
     *) echo "bridge" ;;
@@ -2813,7 +2926,7 @@ resolve_nonvisual_judge_type_v51() {
   provider=$(normalize_provider_v51 "${1:-}")
   case "$provider" in
     codex) echo "codex_cli" ;;
-    gemini) echo "antigravity-cli" ;;
+    gemini) echo "bridge" ;;
     cursor) echo "cursor_cli" ;;
     bridge|claude|"") echo "bridge" ;;
     *) echo "bridge" ;;
@@ -2972,9 +3085,11 @@ setup_task_tmux_session() {
       "printf '\\033]2;${role}\\033\\\\'; echo '=== ${role} pane (${tmux_session}) ==='" C-m 2>/dev/null || true
 
     # Bootstrap CCB provider in this pane if launcher available
+    # cd to pane_ccb_dir first so CCB's Path.cwd() finds .ccb here
+    # (avoids nesting-protection error when parent dir has its own .ccb)
     if [ -n "$ccb_launcher_cmd" ]; then
       tmux send-keys -t "${tmux_session}:roles.${i}" \
-        "CCB_SESSION_FILE='${pane_ccb_dir}/.ccb/.${ccb_session_suffix}-session' CCB_RUN_DIR='${pane_ccb_dir}/.ccb/run' CCB_TERMINAL=tmux CCB_GUI_LAUNCH=1 '${ccb_launcher_cmd}' -a '${provider}'" C-m 2>/dev/null || true
+        "cd '${pane_ccb_dir}' && CCB_SESSION_FILE='${pane_ccb_dir}/.ccb/.${ccb_session_suffix}-session' CCB_RUN_DIR='${pane_ccb_dir}/.ccb/run' CCB_TERMINAL=tmux CCB_GUI_LAUNCH=1 '${ccb_launcher_cmd}' -a '${provider}'" C-m 2>/dev/null || true
     fi
   done
 
@@ -3002,8 +3117,20 @@ PY
   log_info "Created tmux session '${tmux_session}' with ${num_roles} panes"
 
   # Auto-open terminal attached to the tmux session
+  # Detect the active terminal emulator on macOS (TERM_PROGRAM is set by most terminals)
   if [ "$(uname)" = "Darwin" ]; then
-    osascript -e "tell application \"Terminal\" to do script \"tmux attach -t ${tmux_session}\"" 2>/dev/null &
+    local term_app="${TERM_PROGRAM:-Terminal}"
+    case "$term_app" in
+      iTerm*|iTerm.app|iTerm2)
+        osascript -e "tell application \"iTerm\" to create window with default profile command \"tmux attach -t ${tmux_session}\"" 2>/dev/null &
+        ;;
+      WezTerm|WezTerm.app)
+        wezterm cli spawn -- tmux attach -t "$tmux_session" 2>/dev/null &
+        ;;
+      *)
+        osascript -e "tell application \"Terminal\" to do script \"tmux attach -t ${tmux_session}\"" 2>/dev/null &
+        ;;
+    esac
   elif command -v gnome-terminal >/dev/null 2>&1; then
     gnome-terminal -- tmux attach -t "$tmux_session" 2>/dev/null &
   fi
@@ -3188,32 +3315,30 @@ run_role_action_v51() {
     fi
   fi
 
-  if [ "$role_script_suffix" = "ccb" ]; then
-    if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" ${extra_ccb_flags[@]+"${extra_ccb_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+  # Build unified adapter flags
+  local role_flags=()
+  if [ "$role_script_suffix" = "ccb" ] || [ "$role_script_suffix" = "bridge" ]; then
+    role_flags+=(--session-id "$session_id")
+    [ -n "${RDLOOP_TASK_CODE:-}" ] && role_flags+=(--task-code "$RDLOOP_TASK_CODE")
+    [ -n "${RDLOOP_ATTEMPT:-}" ] && role_flags+=(--attempt "$RDLOOP_ATTEMPT")
+    if [ "$role_script_suffix" = "ccb" ]; then
+      role_flags+=(--req-code "$req_code")
+      role_flags+=(${extra_ccb_flags[@]+"${extra_ccb_flags[@]}"})
     else
-      set +e; bash "$role_script" --session-id "$session_id" --req-code "$req_code" ${extra_ccb_flags[@]+"${extra_ccb_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+      local pre_bridge_dir="${role_dir}/bridge_ipc"
+      [ -d "$pre_bridge_dir" ] && role_flags+=(--bridge-dir "$pre_bridge_dir")
     fi
-    if [ -f "${role_dir}/coder/stdout.log" ]; then
-      extract_req_payload_segment "$req_code" "${role_dir}/coder/stdout.log" "${role_dir}/coder/req_payload.txt" "$role"
-    fi
-  elif [ "$role_script_suffix" = "bridge" ]; then
-    local extra_bridge_flags=()
-    local pre_bridge_dir="${role_dir}/bridge_ipc"
-    if [ -d "$pre_bridge_dir" ]; then
-      extra_bridge_flags=(--bridge-dir "$pre_bridge_dir")
-    fi
-    if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" ${extra_bridge_flags[@]+"${extra_bridge_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
-    else
-      set +e; bash "$role_script" --session-id "$session_id" ${extra_bridge_flags[@]+"${extra_bridge_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
-    fi
+  fi
+  local role_repo_path; role_repo_path=$(json_read "$TASK_JSON" "repo_path" "")
+  local role_pos_args=("$TASK_JSON" "$role_dir" "$role_repo_path" "$prompt_path")
+  [ "$role_script_suffix" = "ccb" ] && role_pos_args+=("$provider")
+  if [ -n "$tout" ]; then
+    set +e; $tout "$timeout_s" bash "$role_script" ${role_flags[@]+"${role_flags[@]}"} "${role_pos_args[@]}"; role_rc=$?; set -e
   else
-    if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
-    else
-      set +e; bash "$role_script" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
-    fi
+    set +e; bash "$role_script" ${role_flags[@]+"${role_flags[@]}"} "${role_pos_args[@]}"; role_rc=$?; set -e
+  fi
+  if [ "$role_script_suffix" = "ccb" ] && [ -f "${role_dir}/coder/stdout.log" ]; then
+    extract_req_payload_segment "$req_code" "${role_dir}/coder/stdout.log" "${role_dir}/coder/req_payload.txt" "$role"
   fi
 
   [ -f "${role_dir}/coder/rc.txt" ] && role_rc=$(cat "${role_dir}/coder/rc.txt" 2>/dev/null || echo "$role_rc")
@@ -3333,11 +3458,41 @@ run_v51_flow() {
   max_att="${EFFECTIVE_MAX_ATTEMPTS:-$(json_read "$TASK_JSON" "max_attempts" "1")}"
   write_status "RUNNING" "0" "$max_att" "false" "" "v5.1 role flow started" "[]" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
 
-  local roles=()
-  case "$task_type" in
-    copywriting) roles=(pm executor reviewer) ;;
-    solo|multi_agent) roles=(pm designer executor reviewer) ;;
-  esac
+  # v5.2: Read role_pipeline from task.json, or construct default from task_type
+  local pipeline_json; pipeline_json=$(python3 -c "
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d = json.load(f)
+pipeline = d.get('role_pipeline')
+task_type = d.get('task_type', '')
+if not pipeline:
+    if task_type == 'copywriting':
+        pipeline = [{'role': 'pm', 'required': True}, {'role': 'executor', 'required': True}, {'role': 'reviewer', 'required': True}]
+    else:
+        pipeline = [{'role': 'pm', 'required': True}, {'role': 'designer', 'required': True}, {'role': 'executor', 'required': True}, {'role': 'reviewer', 'required': True}]
+# Assign pane_idx if not specified
+for i, entry in enumerate(pipeline):
+    if 'pane_idx' not in entry:
+        entry['pane_idx'] = i
+print(json.dumps(pipeline))
+" "$TASK_JSON" 2>/dev/null)
+
+  # Parse pipeline into arrays
+  local pipeline_roles=() pipeline_pane_idxs=()
+  eval "$(python3 -c "
+import json, sys
+pipeline = json.loads(sys.argv[1])
+roles = []
+idxs = []
+for entry in pipeline:
+    roles.append(entry['role'])
+    idxs.append(str(entry.get('pane_idx', 0)))
+print('pipeline_roles=(' + ' '.join(roles) + ')')
+print('pipeline_pane_idxs=(' + ' '.join(idxs) + ')')
+" "$pipeline_json" 2>/dev/null)"
+
+  # Build roles array for logging compatibility
+  local roles=("${pipeline_roles[@]}")
 
   # Solo mode: validate single provider
   local solo_provider=""
@@ -3377,48 +3532,59 @@ PY
   # Export tmux session for role action functions
   export RDLOOP_TMUX_SESSION="${tmux_session:-}"
 
-  # Pane indices: solo/multi_agent uses (pm=0, designer=1, executor=2, reviewer=3)
-  # to match tmux 2x2 grid layout. copywriting uses (pm=0, executor=1, reviewer=2).
   local solo_panes_created=0
   if [ "$task_type" = "solo" ]; then
     solo_panes_created=1
   fi
 
-  local pm_sid pm_provider pm_ctx
-  pm_sid="$("$SESSION_ID_GEN" "$TASK_ID" "pm" "0")"
-  pm_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "pm" "$task_type")")
-  [ -z "$pm_provider" ] && pm_provider="claude"
-  pm_ctx=$(knowledge_agent_query "pm" "" "" "" "")
-  # Skip launch_pane if solo panes were already created upfront
-  if [ "$solo_panes_created" != "1" ]; then
-    case "$launch_mode" in
-      ccb) ccb_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
-      bridge) bridge_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
-    esac
-  fi
-  run_role_action_v51 "pm" "0" "$pm_sid" "$pm_provider" "$launch_mode" "$pm_ctx" "$task_type"
+  # v5.2: Execute roles from pipeline (pre-attempt roles: everything before executor's run_attempt)
+  local prev_role="" prev_pane_idx="" prev_sid="" first_pm_provider=""
+  local i=0
+  for i in "${!pipeline_roles[@]}"; do
+    local cur_role="${pipeline_roles[$i]}"
+    local cur_pane_idx="${pipeline_pane_idxs[$i]}"
 
-  if [ "$task_type" = "copywriting" ]; then
-    local ex_sid ex_provider
-    ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "1")"
-    ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
-    role_transition_v51 "pm" "0" "$pm_sid" "executor" "1" "$ex_sid" "$launch_mode" "$ex_provider" "false"
-  else
-    # solo/multi_agent: designer=pane 1, executor=pane 2, reviewer=pane 3
-    local designer_idx=1
-    local executor_idx=2
-    local designer_sid designer_provider designer_ctx ex_sid ex_provider
-    designer_sid="$("$SESSION_ID_GEN" "$TASK_ID" "designer" "$designer_idx")"
-    designer_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "designer" "$task_type")")
-    [ -z "$designer_provider" ] && designer_provider="$pm_provider"
-    role_transition_v51 "pm" "0" "$pm_sid" "designer" "$designer_idx" "$designer_sid" "$launch_mode" "$designer_provider" "true"
-    designer_ctx=$(knowledge_agent_query "designer" "pm" "$pm_sid" "" "")
-    run_role_action_v51 "designer" "$designer_idx" "$designer_sid" "$designer_provider" "$launch_mode" "$designer_ctx" "$task_type"
+    # executor and reviewer are handled by run_attempt loop below
+    [ "$cur_role" = "executor" ] || [ "$cur_role" = "reviewer" ] && {
+      # Transition to executor before entering attempt loop
+      if [ "$cur_role" = "executor" ]; then
+        local ex_sid ex_provider
+        ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "$cur_pane_idx")"
+        ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
+        local transition_create_pane="false"
+        role_transition_v51 "${prev_role:-pm}" "${prev_pane_idx:-0}" "${prev_sid:-}" "executor" "$cur_pane_idx" "$ex_sid" "$launch_mode" "$ex_provider" "$transition_create_pane"
+      fi
+      continue
+    }
 
-    ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "$executor_idx")"
-    ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
-    role_transition_v51 "designer" "$designer_idx" "$designer_sid" "executor" "$executor_idx" "$ex_sid" "$launch_mode" "$ex_provider" "false"
-  fi
+    local role_sid role_provider role_ctx
+    role_sid="$("$SESSION_ID_GEN" "$TASK_ID" "$cur_role" "$cur_pane_idx")"
+    role_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "$cur_role" "$task_type")")
+    [ -z "$role_provider" ] && role_provider="${first_pm_provider:-claude}"
+
+    # Transition from previous role (skip for first role)
+    if [ -n "$prev_role" ]; then
+      local create_pane="true"
+      role_transition_v51 "$prev_role" "$prev_pane_idx" "$prev_sid" "$cur_role" "$cur_pane_idx" "$role_sid" "$launch_mode" "$role_provider" "$create_pane"
+    fi
+
+    role_ctx=$(knowledge_agent_query "$cur_role" "$prev_role" "$prev_sid" "" "")
+
+    # Launch pane if not solo pre-created and first role
+    if [ -z "$prev_role" ] && [ "$solo_panes_created" != "1" ]; then
+      case "$launch_mode" in
+        ccb) ccb_launch_pane "$cur_role" "$cur_pane_idx" "$role_provider" "$role_sid" "$role_ctx" ;;
+        bridge) bridge_launch_pane "$cur_role" "$cur_pane_idx" "$role_provider" "$role_sid" "$role_ctx" ;;
+      esac
+    fi
+
+    run_role_action_v51 "$cur_role" "$cur_pane_idx" "$role_sid" "$role_provider" "$launch_mode" "$role_ctx" "$task_type"
+
+    prev_role="$cur_role"
+    prev_pane_idx="$cur_pane_idx"
+    prev_sid="$role_sid"
+    [ "$cur_role" = "pm" ] && first_pm_provider="$role_provider"
+  done
 
   local att=1
   while [ "$att" -le "$EFFECTIVE_MAX_ATTEMPTS" ]; do

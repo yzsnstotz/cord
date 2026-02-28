@@ -8,6 +8,8 @@ Options:
   --claude-cmd <path>    Path to claude CLI (default: claude)
   --bridge-dir <dir>     IPC directory (default: out/claude_bridge)
   --session-id <id>      Session identifier (default: auto-generated)
+  --task-code <code>     Task identifier for log correlation (optional)
+  --attempt <n>          Attempt number for log correlation (optional)
   --help                 Show this help
 
 Environment:
@@ -30,6 +32,8 @@ function main() {
   let claudeCmd;
   let bridgeDir;
   let sessionId;
+  let taskCode;
+  let attemptNum;
   let claudeArgs = [];
 
   const dashIdx = args.indexOf('--');
@@ -47,6 +51,12 @@ function main() {
       case '--session-id':
         sessionId = ownArgs[++i];
         break;
+      case '--task-code':
+        taskCode = ownArgs[++i];
+        break;
+      case '--attempt':
+        attemptNum = ownArgs[++i];
+        break;
       case '--help':
         printUsage();
         process.exit(0);
@@ -62,12 +72,21 @@ function main() {
     process.exit(1);
   }
 
+  // Build log prefix with task correlation info
+  const logPrefix = taskCode
+    ? `[${taskCode}:${attemptNum || '?'}]`
+    : '';
+  const logFn = logPrefix
+    ? (msg) => console.log(`${logPrefix} ${msg}`)
+    : undefined;
+
   const ipc = new BridgeIPC(bridgeDir);
   const monitor = new ClaudeMonitor({
     claudeCmd,
     claudeArgs,
     sessionId,
-    ipc
+    ipc,
+    ...(logFn && { logFn })
   });
 
   process.on('SIGTERM', () => {

@@ -45,7 +45,20 @@
     "test_cmd": { "type": "string" },
     "max_attempts": { "type": "integer" },
     "judge_enabled": { "type": "boolean" },
-    "repo_path": { "type": "string" }
+    "repo_path": { "type": "string" },
+    "role_pipeline": {
+      "type": "array",
+      "description": "Ordered list of roles to execute. Overrides task_type default when present.",
+      "items": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": { "type": "string", "enum": ["pm", "designer", "executor", "reviewer"] },
+          "required": { "type": "boolean", "default": true },
+          "pane_idx": { "type": "integer", "description": "Override tmux pane index; auto-assigned if omitted" }
+        }
+      }
+    }
   },
   "allOf": [
     {

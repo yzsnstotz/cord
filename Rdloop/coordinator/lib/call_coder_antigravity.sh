@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY: api-only adapter. Not used in main v5.1 flow.
 # call_coder_antigravity.sh — Antigravity (CLIProxyAPI 8317) coder adapter for rdloop
 # Interface: $1=task_json_path $2=attempt_dir $3=worktree_dir $4=instruction_path
 # Outputs: attempt_dir/coder/run.log, attempt_dir/coder/rc.txt

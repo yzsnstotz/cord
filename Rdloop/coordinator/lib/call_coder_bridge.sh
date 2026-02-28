@@ -8,10 +8,15 @@ set -uo pipefail
 
 session_id=""
 bridge_dir_override=""
+task_code="${RDLOOP_TASK_CODE:-}"
+attempt_num="${RDLOOP_ATTEMPT:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-id) session_id="${2:-}"; shift 2 ;;
     --bridge-dir) bridge_dir_override="${2:-}"; shift 2 ;;
+    --task-code) task_code="${2:-}"; shift 2 ;;
+    --attempt) attempt_num="${2:-}"; shift 2 ;;
+    --req-code) shift 2 ;;  # accepted for interface compatibility, ignored by bridge
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) break ;;
@@ -58,21 +63,29 @@ command -v timeout >/dev/null 2>&1 && tout="timeout"
 [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
 
 {
-  echo "[CODER][auto/bridge] $(date -u +%Y-%m-%dT%H:%M:%SZ) coordinator-spawned session"
-  echo "[CODER][auto/bridge] session_id: ${session_id}"
-  echo "[CODER][auto/bridge] worktree: ${worktree_dir}"
-  echo "[CODER][auto/bridge] timeout: ${timeout_s}s"
+  local log_prefix="[CODER][auto/bridge]"
+  [ -n "$task_code" ] && log_prefix="[${task_code}:${attempt_num:-?}] ${log_prefix}"
+  echo "${log_prefix} $(date -u +%Y-%m-%dT%H:%M:%SZ) coordinator-spawned session"
+  echo "${log_prefix} session_id: ${session_id}"
+  echo "${log_prefix} worktree: ${worktree_dir}"
+  echo "${log_prefix} timeout: ${timeout_s}s"
+  [ -n "$task_code" ] && echo "${log_prefix} task_code: ${task_code}, attempt: ${attempt_num:-?}"
+
+  # Build bridge args with optional task-code/attempt
+  local bridge_extra_args=""
+  [ -n "$task_code" ] && bridge_extra_args="${bridge_extra_args} --task-code '${task_code}'"
+  [ -n "$attempt_num" ] && bridge_extra_args="${bridge_extra_args} --attempt '${attempt_num}'"
 
   if [ -n "$tout" ]; then
-    $tout "$timeout_s" bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$session_id' -- -p \"\$1\" --dangerously-skip-permissions" _ "$full_instruction" 2>&1
+    $tout "$timeout_s" bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$session_id' ${bridge_extra_args} -- -p \"\$1\" --dangerously-skip-permissions" _ "$full_instruction" 2>&1
     rc=$?
     [ "$rc" = "124" ] && echo "TIMEOUT" >> "$run_log"
   else
-    bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$session_id' -- -p \"\$1\" --dangerously-skip-permissions" _ "$full_instruction" 2>&1
+    bash -lc "cd '$worktree_dir' && node '$BRIDGE_INDEX' --bridge-dir '$BRIDGE_DIR' --session-id '$session_id' ${bridge_extra_args} -- -p \"\$1\" --dangerously-skip-permissions" _ "$full_instruction" 2>&1
     rc=$?
   fi
 
-  echo "[CODER][auto/bridge] $(date -u +%Y-%m-%dT%H:%M:%SZ) finished"
+  echo "${log_prefix} $(date -u +%Y-%m-%dT%H:%M:%SZ) finished"
   echo "$rc" > "${attempt_dir}/coder/rc.txt"
   exit "$rc"
 } > "$run_log" 2>&1

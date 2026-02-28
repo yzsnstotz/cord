@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY: api-only adapter. Not used in main v5.1 flow.
 # call_judge_antigravity.sh — Antigravity (CLIProxyAPI 8317) judge adapter for rdloop
 # Interface: $1=task_json_path $2=evidence_json_path $3=out_attempt_dir $4=judge_prompt_path
 # Outputs: out_attempt_dir/judge/verdict.json
