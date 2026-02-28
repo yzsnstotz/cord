@@ -5,3 +5,25 @@ __pycache__/
 .venv/
 node_modules/
 Rdloop/Coordinator Simulator/
+
+# CCB session state (root and test trees)
+.ccb/.claude-session
+.ccb/.codex-session
+.ccb/.gemini-session
+.ccb/.opencode-session
+.ccb/.droid-session
+test/**/.ccb/
+
+# Test / rdloop knowledge (per-workspace)
+test/**/.rdloop/knowledge_entries.json
+
+# Task configs (local / test / trash)
+Rdloop/tasks/ai_voice_agent_jp_mvp.json
+Rdloop/tasks/v5_solo_test_1012.json
+Rdloop/tasks/task_331742.json
+Rdloop/tasks/template_solo_test_hello.json
+Rdloop/tasks/v5_visual_test.json
+Rdloop/tasks/trash/
+
+# Prompt backups
+Rdloop/prompts/coder.prompt.md.bak.*
