@@ -8,10 +8,14 @@ set -uo pipefail
 
 session_id=""
 req_code=""
+tmux_target=""
+ccb_session_dir_override=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-id) session_id="${2:-}"; shift 2 ;;
     --req-code) req_code="${2:-}"; shift 2 ;;
+    --tmux-target) tmux_target="${2:-}"; shift 2 ;;
+    --ccb-session-dir) ccb_session_dir_override="${2:-}"; shift 2 ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) break ;;
@@ -86,6 +90,12 @@ ccb_run_dir=""
 if [ -n "$session_root" ]; then
   mkdir -p "${session_root}/.ccb" 2>/dev/null || true
   ccb_run_dir="${session_root}/.ccb/run"
+  mkdir -p "$ccb_run_dir" 2>/dev/null || true
+fi
+# v5.1: Override session root if --ccb-session-dir provided (per-role isolation)
+if [ -n "$ccb_session_dir_override" ] && [ -d "$ccb_session_dir_override" ]; then
+  session_root="$ccb_session_dir_override"
+  ccb_run_dir="${ccb_session_dir_override}/.ccb/run"
   mkdir -p "$ccb_run_dir" 2>/dev/null || true
 fi
 worktree_dir="$project_path"
@@ -290,6 +300,10 @@ ${full_prompt}
   fi
   ccb_bootstrap_dir="${session_root:-$worktree_dir}"
   bootstrap_attempted=0
+  # v5.1: If tmux-target provided, skip bootstrap (pane already created by coordinator)
+  if [ -n "$tmux_target" ]; then
+    bootstrap_attempted=1
+  fi
   ping_retries="${RDLOOP_CCB_PING_RETRIES:-12}"
   ping_interval="${RDLOOP_CCB_PING_INTERVAL_SECONDS:-2}"
   [[ "$ping_retries" =~ ^[0-9]+$ ]] || ping_retries=12

@@ -623,6 +623,7 @@ app.get('/api/task/:taskId', validateTaskId, (req, res) => {
     if (status.updated_at) status.updated_at = normalizeUpdatedAt(status.updated_at);
   }
   const finalSummary = readJSON(path.join(taskDir, 'final_summary.json'));
+  const taskState = readJSON(path.join(taskDir, 'task_state.json'));
   const events = readEvents(path.join(taskDir, 'events.jsonl'));
 
   if (status) {
@@ -655,7 +656,9 @@ app.get('/api/task/:taskId', validateTaskId, (req, res) => {
     status,
     final_summary: finalSummary,
     attempts,
-    timeline: events
+    timeline: events,
+    tmux_session: (taskState && taskState.tmux_session) || null,
+    panes: (taskState && Array.isArray(taskState.panes)) ? taskState.panes : []
   });
 });
 

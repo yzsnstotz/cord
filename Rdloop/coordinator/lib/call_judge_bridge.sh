@@ -7,9 +7,11 @@
 set -uo pipefail
 
 session_id=""
+bridge_dir_override=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-id) session_id="${2:-}"; shift 2 ;;
+    --bridge-dir) bridge_dir_override="${2:-}"; shift 2 ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) break ;;
@@ -34,7 +36,11 @@ mkdir -p "${attempt_dir}/judge"
 
 RDLOOP_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BRIDGE_INDEX="${RDLOOP_ROOT}/claude_bridge/index.js"
-BRIDGE_DIR="${attempt_dir}/bridge_ipc_judge"
+if [ -n "$bridge_dir_override" ] && [ -d "$bridge_dir_override" ]; then
+  BRIDGE_DIR="$bridge_dir_override"
+else
+  BRIDGE_DIR="${attempt_dir}/bridge_ipc_judge"
+fi
 
 run_log="${attempt_dir}/judge/run.log"
 

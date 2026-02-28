@@ -2881,6 +2881,146 @@ resolve_launch_mode_v51() {
   echo "$launch_mode"
 }
 
+##############################################################################
+# 10c. CCB tmux session setup (v5.1 visual mode)
+##############################################################################
+setup_task_tmux_session() {
+  local task_id="$1" task_type="$2" provider="$3"
+  local tmux_session="rdloop-${task_id}"
+  provider=$(normalize_provider_v51 "$provider")
+
+  # Determine roles based on task_type
+  local roles=()
+  case "$task_type" in
+    copywriting) roles=(pm executor reviewer) ;;
+    solo|multi_agent) roles=(pm designer executor reviewer) ;;
+  esac
+  local num_roles=${#roles[@]}
+
+  # Reuse existing session if present
+  if tmux has-session -t "$tmux_session" 2>/dev/null; then
+    log_info "Tmux session '${tmux_session}' already exists, reusing"
+    echo "$tmux_session"
+    return 0
+  fi
+
+  # Create tmux session with first pane
+  if ! tmux new-session -d -s "$tmux_session" -n "roles" -x 220 -y 50 2>/dev/null; then
+    log_info "Failed to create tmux session '${tmux_session}', falling back to per-call bootstrap"
+    echo ""
+    return 0
+  fi
+
+  # Build 2x2 grid (or appropriate layout for fewer roles)
+  if [ "$num_roles" -ge 2 ]; then
+    tmux split-window -t "${tmux_session}:roles" -h 2>/dev/null || true
+  fi
+  if [ "$num_roles" -ge 3 ]; then
+    tmux split-window -t "${tmux_session}:roles.0" -v 2>/dev/null || true
+  fi
+  if [ "$num_roles" -ge 4 ]; then
+    tmux split-window -t "${tmux_session}:roles.1" -v 2>/dev/null || true
+  fi
+
+  # Resolve CCB launcher
+  local ccb_launcher_cmd=""
+  local ccb_path_cfg=""
+  ccb_path_cfg=$(json_read "${RDLOOP_ROOT}/rdloop.config.json" "ccb_path" "" 2>/dev/null || echo "")
+  if [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/ccb" ]; then
+    ccb_launcher_cmd="${ccb_path_cfg}/ccb"
+  elif [ -n "$ccb_path_cfg" ] && [ -x "${ccb_path_cfg}/bin/ccb" ]; then
+    ccb_launcher_cmd="${ccb_path_cfg}/bin/ccb"
+  else
+    ccb_launcher_cmd="$(command -v ccb 2>/dev/null || echo "")"
+  fi
+
+  # Resolve provider name for CCB session file suffix
+  local ccb_session_suffix=""
+  case "$provider" in
+    claude) ccb_session_suffix="claude" ;;
+    codex) ccb_session_suffix="codex" ;;
+    gemini) ccb_session_suffix="gemini" ;;
+    opencode) ccb_session_suffix="opencode" ;;
+    droid) ccb_session_suffix="droid" ;;
+    *) ccb_session_suffix="codex" ;;
+  esac
+
+  # Label and bootstrap each pane
+  for i in "${!roles[@]}"; do
+    local role="${roles[$i]}"
+    local pane_ccb_dir="${TASK_DIR}/ccb_sessions/${role}"
+    mkdir -p "${pane_ccb_dir}/.ccb/run" 2>/dev/null || true
+
+    # Label the pane
+    tmux send-keys -t "${tmux_session}:roles.${i}" \
+      "printf '\\033]2;${role}\\033\\\\'; echo '=== ${role} pane (${tmux_session}) ==='" C-m 2>/dev/null || true
+
+    # Bootstrap CCB provider in this pane if launcher available
+    if [ -n "$ccb_launcher_cmd" ]; then
+      tmux send-keys -t "${tmux_session}:roles.${i}" \
+        "CCB_SESSION_FILE='${pane_ccb_dir}/.ccb/.${ccb_session_suffix}-session' CCB_RUN_DIR='${pane_ccb_dir}/.ccb/run' CCB_TERMINAL=tmux CCB_GUI_LAUNCH=1 '${ccb_launcher_cmd}' -a '${provider}'" C-m 2>/dev/null || true
+    fi
+  done
+
+  # Store tmux session name in task_state.json
+  python3 - "$TASK_DIR" "$tmux_session" <<'PY'
+import json, os, sys
+task_dir, tmux_session = sys.argv[1:3]
+state_path = os.path.join(task_dir, "task_state.json")
+data = {}
+if os.path.exists(state_path):
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+data["tmux_session"] = tmux_session
+tmp = state_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, state_path)
+PY
+
+  write_event_ext "tmux_session_created" "{\"tmux_session\":\"${tmux_session}\",\"num_panes\":${num_roles},\"provider\":\"${provider}\"}"
+  log_info "Created tmux session '${tmux_session}' with ${num_roles} panes"
+  echo "$tmux_session"
+}
+
+setup_solo_panes() {
+  local task_id="$1" launch_mode="$2" provider="$3" task_type="$4"
+  local roles=()
+  case "$task_type" in
+    copywriting) roles=(pm executor reviewer) ;;
+    solo|multi_agent) roles=(pm designer executor reviewer) ;;
+  esac
+
+  for i in "${!roles[@]}"; do
+    local role="${roles[$i]}"
+    local sid="$("$SESSION_ID_GEN" "$task_id" "$role" "$i")"
+
+    case "$launch_mode" in
+      ccb)
+        ccb_launch_pane "$role" "$i" "$provider" "$sid" ""
+        ;;
+      bridge)
+        local bridge_dir="${TASK_DIR}/roles/${role}-$(printf '%02d' "$i")/bridge_ipc"
+        mkdir -p "$bridge_dir"
+        bridge_launch_pane "$role" "$i" "$provider" "$sid" ""
+        ;;
+    esac
+
+    # First role starts as running, rest as waiting
+    if [ "$i" -eq 0 ]; then
+      upsert_task_state_pane "$role" "$i" "running" "$sid" "$launch_mode"
+    else
+      upsert_task_state_pane "$role" "$i" "waiting" "$sid" "$launch_mode"
+    fi
+  done
+
+  write_event_ext "solo_panes_created" "{\"task_type\":\"${task_type}\",\"launch_mode\":\"${launch_mode}\",\"num_panes\":${#roles[@]},\"provider\":\"${provider}\"}"
+}
+
 ccb_launch_pane() {
   local role="$1" pane_idx="$2" provider="$3" session_id="$4" _context="$5"
   local req_code=""
@@ -3013,20 +3153,36 @@ run_role_action_v51() {
   command -v timeout >/dev/null 2>&1 && tout="timeout"
   [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
   role_rc=1
+
+  # v5.1: resolve extra flags for pre-created panes (tmux target / ccb session dir / bridge dir)
+  local extra_ccb_flags=()
+  if [ "$role_script_suffix" = "ccb" ] && [ -n "${RDLOOP_TMUX_SESSION:-}" ]; then
+    local tmux_target="${RDLOOP_TMUX_SESSION}:roles.${pane_idx}"
+    local ccb_session_dir="${TASK_DIR}/ccb_sessions/${role}"
+    if tmux has-session -t "${RDLOOP_TMUX_SESSION}" 2>/dev/null && [ -d "$ccb_session_dir" ]; then
+      extra_ccb_flags=(--tmux-target "$tmux_target" --ccb-session-dir "$ccb_session_dir")
+    fi
+  fi
+
   if [ "$role_script_suffix" = "ccb" ]; then
     if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" "${extra_ccb_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
     else
-      set +e; bash "$role_script" --session-id "$session_id" --req-code "$req_code" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+      set +e; bash "$role_script" --session-id "$session_id" --req-code "$req_code" "${extra_ccb_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
     fi
     if [ -f "${role_dir}/coder/stdout.log" ]; then
       extract_req_payload_segment "$req_code" "${role_dir}/coder/stdout.log" "${role_dir}/coder/req_payload.txt" "$role"
     fi
   elif [ "$role_script_suffix" = "bridge" ]; then
+    local extra_bridge_flags=()
+    local pre_bridge_dir="${role_dir}/bridge_ipc"
+    if [ -d "$pre_bridge_dir" ]; then
+      extra_bridge_flags=(--bridge-dir "$pre_bridge_dir")
+    fi
     if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" "${extra_bridge_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
     else
-      set +e; bash "$role_script" --session-id "$session_id" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+      set +e; bash "$role_script" --session-id "$session_id" "${extra_bridge_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
     fi
   else
     if [ -n "$tout" ]; then
@@ -3159,6 +3315,8 @@ run_v51_flow() {
     solo|multi_agent) roles=(pm designer executor reviewer) ;;
   esac
 
+  # Solo mode: validate single provider
+  local solo_provider=""
   if [ "$task_type" = "solo" ]; then
     local solo_values
     solo_values=$(python3 - "$TASK_JSON" <<'PY'
@@ -3174,6 +3332,32 @@ PY
       log_error "task_type=solo requires the same provider for all collab_roles"
       exit 1
     fi
+    solo_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "pm" "$task_type")")
+    [ -z "$solo_provider" ] && solo_provider="claude"
+  fi
+
+  # v5.1 Feature 1: Setup dedicated tmux session for CCB visual mode
+  local tmux_session=""
+  if [ "$launch_mode" = "ccb" ]; then
+    local setup_provider="${solo_provider:-}"
+    [ -z "$setup_provider" ] && setup_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "pm" "$task_type")")
+    [ -z "$setup_provider" ] && setup_provider="claude"
+    tmux_session=$(setup_task_tmux_session "$TASK_ID" "$task_type" "$setup_provider")
+  fi
+
+  # v5.1 Feature 2: Solo mode upfront pane creation
+  if [ "$task_type" = "solo" ]; then
+    setup_solo_panes "$TASK_ID" "$launch_mode" "$solo_provider" "$task_type"
+  fi
+
+  # Export tmux session for role action functions
+  export RDLOOP_TMUX_SESSION="${tmux_session:-}"
+
+  # Pane indices: solo/multi_agent uses (pm=0, designer=1, executor=2, reviewer=3)
+  # to match tmux 2x2 grid layout. copywriting uses (pm=0, executor=1, reviewer=2).
+  local solo_panes_created=0
+  if [ "$task_type" = "solo" ]; then
+    solo_panes_created=1
   fi
 
   local pm_sid pm_provider pm_ctx
@@ -3181,10 +3365,13 @@ PY
   pm_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "pm" "$task_type")")
   [ -z "$pm_provider" ] && pm_provider="claude"
   pm_ctx=$(knowledge_agent_query "pm" "" "" "" "")
-  case "$launch_mode" in
-    ccb) ccb_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
-    bridge) bridge_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
-  esac
+  # Skip launch_pane if solo panes were already created upfront
+  if [ "$solo_panes_created" != "1" ]; then
+    case "$launch_mode" in
+      ccb) ccb_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
+      bridge) bridge_launch_pane "pm" "0" "$pm_provider" "$pm_sid" "$pm_ctx" ;;
+    esac
+  fi
   run_role_action_v51 "pm" "0" "$pm_sid" "$pm_provider" "$launch_mode" "$pm_ctx" "$task_type"
 
   if [ "$task_type" = "copywriting" ]; then
@@ -3193,17 +3380,20 @@ PY
     ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
     role_transition_v51 "pm" "0" "$pm_sid" "executor" "1" "$ex_sid" "$launch_mode" "$ex_provider" "false"
   else
+    # solo/multi_agent: designer=pane 1, executor=pane 2, reviewer=pane 3
+    local designer_idx=1
+    local executor_idx=2
     local designer_sid designer_provider designer_ctx ex_sid ex_provider
-    designer_sid="$("$SESSION_ID_GEN" "$TASK_ID" "designer" "1")"
+    designer_sid="$("$SESSION_ID_GEN" "$TASK_ID" "designer" "$designer_idx")"
     designer_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "designer" "$task_type")")
     [ -z "$designer_provider" ] && designer_provider="$pm_provider"
-    role_transition_v51 "pm" "0" "$pm_sid" "designer" "1" "$designer_sid" "$launch_mode" "$designer_provider" "true"
+    role_transition_v51 "pm" "0" "$pm_sid" "designer" "$designer_idx" "$designer_sid" "$launch_mode" "$designer_provider" "true"
     designer_ctx=$(knowledge_agent_query "designer" "pm" "$pm_sid" "" "")
-    run_role_action_v51 "designer" "1" "$designer_sid" "$designer_provider" "$launch_mode" "$designer_ctx" "$task_type"
+    run_role_action_v51 "designer" "$designer_idx" "$designer_sid" "$designer_provider" "$launch_mode" "$designer_ctx" "$task_type"
 
-    ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "1")"
+    ex_sid="$("$SESSION_ID_GEN" "$TASK_ID" "executor" "$executor_idx")"
     ex_provider=$(normalize_provider_v51 "$(resolve_provider_for_role "executor" "$task_type")")
-    role_transition_v51 "designer" "1" "$designer_sid" "executor" "1" "$ex_sid" "$launch_mode" "$ex_provider" "false"
+    role_transition_v51 "designer" "$designer_idx" "$designer_sid" "executor" "$executor_idx" "$ex_sid" "$launch_mode" "$ex_provider" "false"
   fi
 
   local att=1

@@ -1768,7 +1768,49 @@ function renderTask(data) {
           ${s.launch_mode_source ? `Source: ${escapeHtml(s.launch_mode_source)}` : '-'}
         </div>
       </div>
+      ${data.tmux_session ? `
+      <div class="info-card">
+        <div class="label">Tmux Session</div>
+        <div class="value" style="font-size:12px">
+          <code id="tmux-session-name">${escapeHtml(data.tmux_session)}</code>
+          <button class="btn" style="margin-left:6px;font-size:10px;padding:2px 6px"
+            onclick="navigator.clipboard.writeText('tmux attach -t ${escapeHtml(data.tmux_session)}').then(()=>this.textContent='Copied!').catch(()=>{})">
+            Copy attach cmd
+          </button>
+        </div>
+      </div>` : ''}
     </div>
+
+    ${(data.panes && data.panes.length > 0) ? `
+    <div style="margin-top:12px;margin-bottom:12px">
+      <h3 style="font-size:13px;margin:0 0 8px 0;color:var(--text-muted)">Pane Status</h3>
+      <table style="width:100%;font-size:12px;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border,#30363d)">
+            <th style="text-align:left;padding:4px 8px">Pane</th>
+            <th style="text-align:left;padding:4px 8px">Status</th>
+            <th style="text-align:left;padding:4px 8px">Session ID</th>
+            <th style="text-align:left;padding:4px 8px">Mode</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.panes.map(p => `
+            <tr style="border-bottom:1px solid var(--border-light,#21262d)">
+              <td style="padding:4px 8px;font-weight:600">${escapeHtml(p.pane || p.role || '-')}</td>
+              <td style="padding:4px 8px">
+                <span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;background:${
+                  p.status === 'running' ? '#3fb950' :
+                  p.status === 'done' ? '#8b949e' :
+                  p.status === 'waiting' ? '#d29922' : '#f85149'
+                }"></span>${escapeHtml(p.status || '-')}
+              </td>
+              <td style="padding:4px 8px;font-size:11px;color:var(--text-muted,#8b949e);font-family:monospace">${escapeHtml((p.session_id || '-').slice(-20))}</td>
+              <td style="padding:4px 8px">${p.launch_mode === 'ccb' ? '&#128065;' : '&#9881;'} ${escapeHtml(p.launch_mode || '-')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>` : ''}
 
     <div id="questions-for-user-container">
       ${s.state !== 'RUNNING' && Array.isArray(s.questions_for_user) && s.questions_for_user.length > 0 ? `
