@@ -2948,7 +2948,10 @@ run_role_action_v51() {
   timeout_s=$(json_read "$TASK_JSON" "role_timeout_seconds" "")
   if [ -z "$timeout_s" ]; then
     timeout_s=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
-    local role_timeout_cap="${RDLOOP_ROLE_TIMEOUT_CAP_SECONDS:-180}"
+  fi
+  # Only apply cap if explicitly set in environment (not a default 180)
+  if [ -n "${RDLOOP_ROLE_TIMEOUT_CAP_SECONDS:-}" ]; then
+    local role_timeout_cap="$RDLOOP_ROLE_TIMEOUT_CAP_SECONDS"
     if [[ "$timeout_s" =~ ^[0-9]+$ ]] && [[ "$role_timeout_cap" =~ ^[0-9]+$ ]] && [ "$timeout_s" -gt "$role_timeout_cap" ]; then
       timeout_s="$role_timeout_cap"
     fi
@@ -3006,6 +3009,17 @@ run_role_action_v51() {
 
   write_event_ext "role_action_finished" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"rc\":${role_rc},\"path\":\"${role_dir}\"}"
   if [ "$role_rc" != "0" ]; then
+    # Transient failures (timeout / daemon unavailable): retry once before pausing
+    if [ "$role_rc" = "124" ] || [ "$role_rc" = "127" ]; then
+      if [ "${_role_retry_done:-0}" != "1" ]; then
+        _role_retry_done=1
+        log_info "Role ${role} failed (rc=${role_rc}), retrying once..."
+        write_event_ext "role_action_retry" "{\"role\":\"${role}\",\"session_id\":\"${session_id}\",\"rc\":${role_rc},\"reason\":\"transient_retry\"}"
+        if [ "$role_rc" = "127" ]; then sleep 5; fi
+        run_role_action_v51 "$role" "$pane_idx" "$session_id" "$provider" "$launch_mode" "$context" "$task_type"
+        return
+      fi
+    fi
     enter_paused "PAUSED_ROLE_FAILED" \
       "Role ${role} failed (rc=${role_rc})." \
       "[\"Inspect out/<task_id>/roles/${role}-*/coder/run.log and retry.\"]" \

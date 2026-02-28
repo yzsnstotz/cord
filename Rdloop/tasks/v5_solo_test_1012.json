@@ -6,7 +6,7 @@
   "launch_mode_locked": false,
   "repo_path": "/Users/yzliu/work/Cord/test/v5.1_test",
   "base_ref": "main",
-  "goal": "establish a folder named \"v5.1_solo_test_1304\" in /Users/yzliu/work/cord/test/v5.1_test/ and place a text file with content of \"hello world\"",
+  "goal": "establish a folder named \"v5.1_solo_test_1347\" in /Users/yzliu/work/cord/test/v5.1_test/ and place a text file with content of \"hello world\"",
   "acceptance": [
     "n/a"
   ],

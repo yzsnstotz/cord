@@ -1067,7 +1067,7 @@ app.post('/api/run/create', requireWritable, (req, res) => {
       task_type: task_snapshot?.task_type || taskJson.task_type || 'solo',
       launch_mode: finalLaunchMode,
       launch_mode_locked: save_and_lock ? true : (task_snapshot?.launch_mode_locked ?? taskJson.launch_mode_locked ?? false),
-      launch_mode_source
+      launch_mode_source: launchModeSource
     }
   });
 });

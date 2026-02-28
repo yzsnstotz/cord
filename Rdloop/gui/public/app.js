@@ -3466,6 +3466,8 @@ function setExecutorType(type) {
     if (el) el.style.display = show ? '' : 'none';
   };
   showIf('section-role-models', true); // Always show, contains 'Make it Template'
+  showIf('solo-provider-wrap', type === 'solo_agent');
+  showIf('collab-roles-table', type !== 'solo_agent');
   showIf('collab-config-wrap', false); // legacy wrap
   showIf('section-repo-git', true);
   showIf('section-loop-config', type === 'solo_agent');
@@ -3830,10 +3832,19 @@ async function openNewSpecModal() {
 
         <div id="section-role-models" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <strong class="form-label" style="margin:0">Model Selection (per role)</strong>
+            <strong class="form-label" style="margin:0">Model Selection</strong>
             <button type="button" class="btn write-action" style="font-size:11px;padding:2px 8px" onclick="makeCurrentAsTemplate()">Make it Template</button>
           </div>
-          <div id="collab-roles-table" style="font-size:12px">
+          
+          <!-- Unified Solo Provider Selector (F1) -->
+          <div id="solo-provider-wrap" style="margin-bottom:8px">
+            <label class="form-label" style="font-size:11px">Provider</label>
+            <select id="modal-solo-provider" class="form-select" onchange="syncFormToJson()">
+              ${COLLAB_PROVIDERS.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(providerDisplayName(p))}</option>`).join('')}
+            </select>
+          </div>
+
+          <div id="collab-roles-table" style="font-size:12px;display:none">
             <table style="width:100%;border-collapse:collapse">
               <thead><tr><th style="text-align:left;padding-bottom:4px">Role</th><th style="text-align:left;padding-bottom:4px">Model / Provider</th></tr></thead>
               <tbody>
@@ -3849,16 +3860,6 @@ async function openNewSpecModal() {
         <div id="section-loop-config" style="margin-bottom:12px;display:none">
           <div style="padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
             <strong class="form-label">Agent Loop Config (v5.1)</strong>
-            <div style="margin-top:8px;margin-bottom:8px">
-              <label class="form-label" style="font-size:11px">Default provider</label>
-              <select id="modal-solo-provider" class="form-select" onchange="syncFormToJson()">
-                <option value="claude">claude</option>
-                <option value="codex">codex</option>
-                <option value="gemini">gemini</option>
-                <option value="opencode">opencode</option>
-                <option value="droid">droid</option>
-              </select>
-            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;margin-bottom:8px">
               <div>
                 <label class="form-label" style="font-size:11px">max_attempts</label>

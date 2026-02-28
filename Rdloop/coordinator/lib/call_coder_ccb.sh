@@ -159,6 +159,15 @@ bootstrap_ccb_provider() {
     env_prefix="${env_prefix} CCB_SESSION_FILE=\"${ccb_session_file}\""
   fi
 
+  # If we are already in TMUX, try to pop up a new window in the CURRENT session
+  if [ -n "${TMUX:-}" ]; then
+    local window_name="ccb-${provider}"
+    if tmux new-window -n "$window_name" -c "$bootstrap_dir" "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" -a \"$provider\"" >/dev/null 2>&1; then
+      echo "tmux window created in current session (name=${window_name})"
+      return 0
+    fi
+  fi
+
   if command -v tmux >/dev/null 2>&1; then
     tmux_session="rdloop_ccb_${provider}_$$_$(date +%s)"
     if tmux new-session -d -s "$tmux_session" -c "$bootstrap_dir" "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" -a \"$provider\"" >/dev/null 2>&1; then
