@@ -1805,7 +1805,9 @@ function renderTask(data) {
                 }"></span>${escapeHtml(p.status || '-')}
               </td>
               <td style="padding:4px 8px;font-size:11px;color:var(--text-muted,#8b949e);font-family:monospace">${escapeHtml((p.session_id || '-').slice(-20))}</td>
-              <td style="padding:4px 8px">${p.launch_mode === 'ccb' ? '&#128065;' : '&#9881;'} ${escapeHtml(p.launch_mode || '-')}</td>
+              <td style="padding:4px 8px">${(p.launch_mode === 'ccb' && data.tmux_session) ?
+                `<a href="#" style="text-decoration:none;cursor:pointer" onclick="fetch('/api/ccb/session/attach?session_name=${escapeHtml(data.tmux_session)}&pane_id=${encodeURIComponent(escapeHtml(data.tmux_session) + ':roles.' + data.panes.indexOf(p))}').then(r=>r.json()).then(d=>{if(!d.ok)alert(d.error||'Failed')}).catch(()=>{});return false" title="Open pane in terminal">&#128065;</a>` :
+                (p.launch_mode === 'ccb' ? '&#128065;' : '&#9881;')} ${escapeHtml(p.launch_mode || '-')}</td>
             </tr>
           `).join('')}
         </tbody>

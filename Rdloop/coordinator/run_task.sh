@@ -2002,6 +2002,10 @@ run_attempt() {
   local c_start c_fin coder_rc=0
   c_start=$(now_iso)
   write_event "$att_num" "CODER_STARTED" "coder=${coder_type}" "$att_dir" "$wt"
+  # v5.1: Update executor pane status to "running" for solo task flow
+  if [ "$task_type" = "solo" ]; then
+    upsert_task_state_pane "executor" "2" "running" "" "$launch_mode"
+  fi
 
   # Cursor uses cliapi (cursorcliapi 8000), same as other adapters; no queue CLI required
   local ifile; ifile=$(build_instruction "$att_dir" "$att_num" "$wt" "$base_ref" "$goal" "$acceptance")
@@ -2077,6 +2081,10 @@ run_attempt() {
   fi
   c_fin=$(now_iso)
   write_event "$att_num" "CODER_FINISHED" "rc=${coder_rc}" "$att_dir" "$wt"
+  # v5.1: Update executor pane status to "done" for solo task flow
+  if [ "$task_type" = "solo" ]; then
+    upsert_task_state_pane "executor" "2" "done" "${coder_session_id:-}" "$launch_mode"
+  fi
 
   # If coder wrote knowledge_entries in worktree, copy to attempt_dir for merge into final_summary later
   if [ -f "${wt}/.rdloop/knowledge_entries.json" ]; then
@@ -2238,6 +2246,10 @@ print(json.dumps(cs))
   local j_start j_fin judge_rc=0 j_retries=0
   j_start=$(now_iso)
   write_event "$att_num" "JUDGE_STARTED" "judge=${judge_type}" "$att_dir" "$wt"
+  # v5.1: Update reviewer pane status to "running" for solo task flow
+  if [ "$task_type" = "solo" ]; then
+    upsert_task_state_pane "reviewer" "3" "running" "" "$launch_mode"
+  fi
 
   # Check codex CLI for codex-cli / codex_cli
   if [ "$judge_type" = "codex_cli" ] || [ "$judge_type" = "codex-cli" ]; then
@@ -2423,6 +2435,10 @@ PY
 
   j_fin=$(now_iso)
   write_event "$att_num" "JUDGE_FINISHED" "rc=${judge_rc} valid=${jvalid} retries=${j_retries}" "$att_dir" "$wt"
+  # v5.1: Update reviewer pane status to "done" for solo task flow
+  if [ "$task_type" = "solo" ]; then
+    upsert_task_state_pane "reviewer" "3" "done" "${judge_session_id:-}" "$launch_mode"
+  fi
 
   if [ "$jvalid" != "1" ]; then
     local att_e; att_e=$(date +%s)
@@ -2984,6 +3000,14 @@ PY
 
   write_event_ext "tmux_session_created" "{\"tmux_session\":\"${tmux_session}\",\"num_panes\":${num_roles},\"provider\":\"${provider}\"}"
   log_info "Created tmux session '${tmux_session}' with ${num_roles} panes"
+
+  # Auto-open terminal attached to the tmux session
+  if [ "$(uname)" = "Darwin" ]; then
+    osascript -e "tell application \"Terminal\" to do script \"tmux attach -t ${tmux_session}\"" 2>/dev/null &
+  elif command -v gnome-terminal >/dev/null 2>&1; then
+    gnome-terminal -- tmux attach -t "$tmux_session" 2>/dev/null &
+  fi
+
   echo "$tmux_session"
 }
 
@@ -3166,9 +3190,9 @@ run_role_action_v51() {
 
   if [ "$role_script_suffix" = "ccb" ]; then
     if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" "${extra_ccb_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" --req-code "$req_code" ${extra_ccb_flags[@]+"${extra_ccb_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
     else
-      set +e; bash "$role_script" --session-id "$session_id" --req-code "$req_code" "${extra_ccb_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
+      set +e; bash "$role_script" --session-id "$session_id" --req-code "$req_code" ${extra_ccb_flags[@]+"${extra_ccb_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path" "$provider"; role_rc=$?; set -e
     fi
     if [ -f "${role_dir}/coder/stdout.log" ]; then
       extract_req_payload_segment "$req_code" "${role_dir}/coder/stdout.log" "${role_dir}/coder/req_payload.txt" "$role"
@@ -3180,9 +3204,9 @@ run_role_action_v51() {
       extra_bridge_flags=(--bridge-dir "$pre_bridge_dir")
     fi
     if [ -n "$tout" ]; then
-      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" "${extra_bridge_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+      set +e; $tout "$timeout_s" bash "$role_script" --session-id "$session_id" ${extra_bridge_flags[@]+"${extra_bridge_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
     else
-      set +e; bash "$role_script" --session-id "$session_id" "${extra_bridge_flags[@]}" "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
+      set +e; bash "$role_script" --session-id "$session_id" ${extra_bridge_flags[@]+"${extra_bridge_flags[@]}"} "$TASK_JSON" "$role_dir" "$(json_read "$TASK_JSON" "repo_path" "")" "$prompt_path"; role_rc=$?; set -e
     fi
   else
     if [ -n "$tout" ]; then
