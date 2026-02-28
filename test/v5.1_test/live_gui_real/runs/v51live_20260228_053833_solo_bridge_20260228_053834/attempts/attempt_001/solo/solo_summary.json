@@ -1,0 +1,10 @@
+{
+  "total_iterations": 1,
+  "steps": [
+    {
+      "step": "step_001",
+      "summary": "[BRIDGE][gemini] gask execution failed (rc=1).\nThe Gemini executor in solo bridge requires CCB daemon/session readiness.\nCheck: ccb gemini / ccb-ping gemini / session file /Users/yzliu/work/Cord/.ccb/.gemini-session\n",
+      "self_eval": "dead_loop"
+    }
+  ]
+}

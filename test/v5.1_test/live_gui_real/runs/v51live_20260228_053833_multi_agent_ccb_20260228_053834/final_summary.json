@@ -1,0 +1,23 @@
+{
+  "task_id": "v51live_20260228_053833_multi_agent_ccb_20260228_053834",
+  "state": "PAUSED",
+  "decision": "NEED_USER_INPUT",
+  "last_decision": "NEED_USER_INPUT",
+  "current_attempt": 1,
+  "max_attempts": 1,
+  "message": "coder timeout",
+  "questions_for_user": [
+    "coder timed out (rc=124). Increase timeout or investigate."
+  ],
+  "pause_category": "PAUSED_TIMEOUT",
+  "pause_reason_code": "PAUSED_CODER_TIMEOUT",
+  "final_head_commit": "",
+  "updated_at": "2026-02-27T20:42:37Z",
+  "state_version": 4,
+  "final_score_0_100": null,
+  "verdict_summary": null,
+  "paths": {
+    "status_json": "status.json",
+    "final_summary_json": "final_summary.json"
+  }
+}

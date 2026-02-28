@@ -1,0 +1,370 @@
+{
+    "task_spec_version": "v5.1.4",
+    "task_id": "RDLOOP-V51-GUI-OPT-001",
+    "title": "前端 GUI 优化：对齐 v5.1 字段（task_type/launch_mode/launch_mode_locked），补齐运行时 launch_mode 选择与任务编辑体验（接口字段严格一致）",
+    "positioning": {
+        "purpose": "在不改动核心执行逻辑（coordinator/tooling）的前提下，完善 Rdloop GUI 的任务编辑/运行体验，使其与 v5.1.* taskspec 约定字段保持一致：task_type、launch_mode、launch_mode_locked。",
+        "explicitly_not_covered_here": [
+            "Coordinator/run_task.sh 的路由迁移与真实执行落地（由 v5.1.2 处理）",
+            "session_id/req_code 的生成脚本与 CCB 边界解析落地（由 v5.1.2 处理）",
+            "Judge 评分体系变更（必须保持 JudgeVerdict v2：0~5）",
+            "Agent/.context 文档与规则体系升级（由 v5.1.3 处理）"
+        ],
+        "field_contract": {
+            "must_use": [
+                "task_type",
+                "launch_mode",
+                "launch_mode_locked"
+            ],
+            "deprecated_but_may_exist_in_legacy_tasks": [
+                "executor_type",
+                "session_mode",
+                "channel_type",
+                "run_surface",
+                "api_call",
+                "solo_agent"
+            ],
+            "rule": "GUI 保存 v5.1 任务时必须写入 task_type/launch_mode/launch_mode_locked；不得依赖 deprecated 字段才能保存或运行。"
+        }
+    },
+    "repo_context": {
+        "repo_root": "cord-5.1",
+        "gui_root": "Rdloop/gui",
+        "frontend_entry": "Rdloop/gui/src",
+        "backend_entry": "Rdloop/gui/server.js",
+        "assumptions": [
+            "当前 GUI TaskEditor 仍以 executor_type/session_mode 为主要编辑字段（需迁移）",
+            "GUI server 已有基础 API，但缺少 v5.1 运行时 launch_mode 选择与持久化接口"
+        ]
+    },
+    "scope": {
+        "in_scope": [
+            "Task Editor：新增/改造字段控件使其以 task_type/launch_mode/launch_mode_locked 为中心（字段名与 taskspec 严格一致）",
+            "Legacy 任务兼容：加载旧任务时在 UI 进行“只读展示+迁移预览”，保存时输出 v5.1 字段（不强制就地覆写旧字段）",
+            "Run 运行体验：当 launch_mode_locked=false 时，点击 Run 必须弹窗让用户选择 launch_mode（ccb/bridge），并将选择写入本次 run_record（不必写回 task.json，除非用户选择“保存为默认并锁定”）",
+            "字段校验：task_type/launch_mode 枚举校验、launch_mode_locked 布尔校验、缺失字段的修复提示",
+            "接口字段统一：前后端 API payload 字段命名统一为 task_type/launch_mode/launch_mode_locked；不得引入 alias 字段",
+            "可观测性：GUI 显示 v5.1 关键字段与其来源（task.json vs runtime selection），并能导出本次 run 的 resolved_task_view"
+        ],
+        "out_of_scope": [
+            "修改 coordinator 的实际执行参数或 tmux/pane 控制",
+            "实现 migration 脚本（migrate_task_json_v51.sh）本体（由 v5.1.2 处理）；本任务只做 UI 层迁移预览与兼容",
+            "新增复杂的账号/权限/多用户体系"
+        ]
+    },
+    "deliverables": [
+        {
+            "type": "gui",
+            "paths": [
+                "Rdloop/gui/src/TaskEditor.jsx",
+                "Rdloop/gui/src/components/* (如需要新增组件)",
+                "Rdloop/gui/src/lib/taskSchemaV51.ts (如项目使用 TS；若为 JS 可用 .js)"
+            ],
+            "description": "以 v5.1 字段为中心的任务编辑器：task_type + launch_mode + launch_mode_locked；并包含 legacy 迁移预览与校验提示。"
+        },
+        {
+            "type": "gui",
+            "paths": [
+                "Rdloop/gui/src/RunDialog.jsx (可新增)",
+                "Rdloop/gui/src/RunLauncher.jsx (可新增/改造)"
+            ],
+            "description": "Run 弹窗：当 launch_mode_locked=false 时强制选择 launch_mode；并支持“本次运行临时选择” vs “保存并锁定”。"
+        },
+        {
+            "type": "server",
+            "paths": [
+                "Rdloop/gui/server.js",
+                "Rdloop/gui/routes/* (如已有路由结构)"
+            ],
+            "description": "新增/调整 API：支持获取 schema、解析 legacy→v5.1 preview、创建 run_record（含 runtime launch_mode）。"
+        },
+        {
+            "type": "tests",
+            "paths": [
+                "Rdloop/gui/src/__tests__/task_editor_v51.test.*",
+                "Rdloop/gui/src/__tests__/run_dialog_launch_mode.test.*",
+                "Rdloop/gui/src/__tests__/legacy_task_migration_preview.test.*",
+                "Rdloop/gui/__tests__/server_api_contract_v51.test.*"
+            ],
+            "description": "前端组件测试 + API 合同测试：确保字段名一致与行为正确。"
+        },
+        {
+            "type": "evidence",
+            "required": [
+                "changes.diff 或 PR link",
+                "test_report.txt（命令+输出+结论）",
+                "screenshots/（可选，但建议包含 TaskEditor 与 RunDialog）"
+            ]
+        }
+    ],
+    "requirements": {
+        "functional": [
+            {
+                "id": "F1",
+                "description": "TaskEditor 保存 v5.1 任务：字段名与枚举严格一致",
+                "acceptance": [
+                    "TaskEditor 具备 Task Type 下拉：copywriting | solo | multi_agent（写入字段名 task_type）",
+                    "TaskEditor 具备 Launch Mode 下拉：ccb | bridge（写入字段名 launch_mode）",
+                    "TaskEditor 具备 Launch Mode Locked checkbox（写入字段名 launch_mode_locked，boolean）",
+                    "保存后的任务 JSON（或发送至后端的 payload）必须包含以上三字段；不得以 executor_type/session_mode 作为必填"
+                ]
+            },
+            {
+                "id": "F2",
+                "description": "Legacy 任务加载兼容：迁移预览 + 保存输出 v5.1",
+                "acceptance": [
+                    "加载含 executor_type/session_mode 的 legacy task 时，UI 显示“Legacy detected”提示",
+                    "UI 提供“迁移预览”区域：展示将写入的 task_type/launch_mode/launch_mode_locked（以及映射来源说明）",
+                    "用户点击 Save 时：输出 v5.1 字段；legacy 字段可保留但不得影响运行（UI 标记为 deprecated）"
+                ]
+            },
+            {
+                "id": "F3",
+                "description": "Run 流程：launch_mode_locked=false 时必须弹窗选择 launch_mode",
+                "acceptance": [
+                    "当 launch_mode_locked=true：点击 Run 不弹窗，直接使用 task.launch_mode",
+                    "当 launch_mode_locked=false：点击 Run 必须弹窗要求选择 launch_mode（ccb/bridge），默认值可取 task.launch_mode（若存在）否则为空强制选",
+                    "弹窗提供两种提交按钮：①Run once（只用于本次 run_record）②Save & Lock（写回 task.launch_mode 并将 launch_mode_locked=true 后再运行）",
+                    "本次运行的 resolved_task_view 明确记录 launch_mode 的来源：task_json 或 runtime_selection"
+                ]
+            },
+            {
+                "id": "F4",
+                "description": "接口字段一致：前后端 API 仅使用 v5.1 字段名，不引入 alias",
+                "acceptance": [
+                    "Run 创建接口 payload 中包含 task_type/launch_mode/launch_mode_locked（以及 runtime_overrides.launch_mode 如需要，但不得用 executor_type/session_mode）",
+                    "Server 返回 run_record 时包含 resolved_task_view（含最终 task_type/launch_mode/launch_mode_locked）",
+                    "所有前端状态管理统一使用上述字段名；任何兼容映射只允许在“legacy parser”内部函数中出现"
+                ]
+            },
+            {
+                "id": "F5",
+                "description": "字段校验与 UX：阻止错误配置进入 run",
+                "acceptance": [
+                    "task_type 非法值时：保存与运行均阻止，并给出可选值提示",
+                    "launch_mode 非法/缺失时：当 locked=true 阻止 Run；当 locked=false 必须在 RunDialog 里补全",
+                    "launch_mode_locked 非 boolean 时：UI 自动纠正为 boolean（或阻止保存并提示）"
+                ]
+            }
+        ],
+        "non_functional": [
+            {
+                "id": "N1",
+                "description": "不引入新的评分/通过阈值体系，保持 JudgeVerdict v2",
+                "acceptance": [
+                    "GUI 不出现 threshold 0~1、overall_score 0~10 的任何字段或展示逻辑",
+                    "若 GUI 展示 judge 结果：必须按现有 JudgeVerdict v2（0~5 + penalty/gated）字段展示（只读，不改 schema）"
+                ]
+            },
+            {
+                "id": "N2",
+                "description": "可回归：所有行为有测试覆盖",
+                "acceptance": [
+                    "TaskEditor 保存/加载 v5.1 字段具备组件测试",
+                    "RunDialog 的 locked/unlocked 行为具备组件测试",
+                    "Server API 合同具备测试：字段名、响应结构、错误码"
+                ]
+            }
+        ]
+    },
+    "api_contract": {
+        "principle": "字段名必须与 v5.1 taskspec 一致；server 允许 legacy 输入，但响应必须提供 v5.1 resolved_view。",
+        "endpoints": [
+            {
+                "method": "GET",
+                "path": "/api/task/schema/v5.1",
+                "response_json": {
+                    "version": "v5.1",
+                    "enums": {
+                        "task_type": [
+                            "copywriting",
+                            "solo",
+                            "multi_agent"
+                        ],
+                        "launch_mode": [
+                            "ccb",
+                            "bridge"
+                        ]
+                    },
+                    "required": [
+                        "task_type",
+                        "launch_mode",
+                        "launch_mode_locked"
+                    ]
+                }
+            },
+            {
+                "method": "POST",
+                "path": "/api/task/normalize/v5.1",
+                "request_json": {
+                    "task_json": "object"
+                },
+                "response_json": {
+                    "normalized_task": {
+                        "task_type": "copywriting|solo|multi_agent",
+                        "launch_mode": "ccb|bridge|null",
+                        "launch_mode_locked": "boolean",
+                        "deprecations": [
+                            {
+                                "field": "executor_type",
+                                "message": "deprecated"
+                            }
+                        ]
+                    },
+                    "mapping_notes": "string"
+                }
+            },
+            {
+                "method": "POST",
+                "path": "/api/run/create",
+                "request_json": {
+                    "task_id": "string",
+                    "task_snapshot": {
+                        "task_type": "copywriting|solo|multi_agent",
+                        "launch_mode": "ccb|bridge|null",
+                        "launch_mode_locked": "boolean"
+                    },
+                    "runtime_overrides": {
+                        "launch_mode": "ccb|bridge|null"
+                    }
+                },
+                "response_json": {
+                    "run_id": "string",
+                    "resolved_task_view": {
+                        "task_type": "copywriting|solo|multi_agent",
+                        "launch_mode": "ccb|bridge",
+                        "launch_mode_locked": "boolean",
+                        "launch_mode_source": "task_json|runtime_override"
+                    }
+                }
+            }
+        ],
+        "error_contract": [
+            {
+                "code": "ERR_TASK_INVALID_ENUM",
+                "when": "task_type/launch_mode 非法值",
+                "fields": [
+                    "field",
+                    "allowed_values",
+                    "message"
+                ]
+            },
+            {
+                "code": "ERR_LAUNCH_MODE_REQUIRED",
+                "when": "launch_mode_locked=true 且 launch_mode 缺失",
+                "fields": [
+                    "message"
+                ]
+            }
+        ]
+    },
+    "constraints": {
+        "must": [
+            "所有 v5.1 字段名必须严格一致：task_type / launch_mode / launch_mode_locked",
+            "不得在 GUI 侧引入新的“评分阈值 0~1”或 “overall_score 0~10”字段",
+            "Legacy 字段只能作为兼容输入存在；不得作为保存/运行的必需字段",
+            "RunDialog 在 unlocked 情况下必须强制选择 launch_mode（不可静默默认）"
+        ],
+        "should": [
+            "迁移预览尽量可解释（展示 mapping_notes），但不要求实现完整迁移脚本",
+            "组件层实现集中在 taskSchemaV51 工具函数，避免散落映射逻辑"
+        ]
+    },
+    "forbidden": [
+        "将 executor_type/session_mode 重新写回为核心字段（可保留但必须标记 deprecated）",
+        "在 API 中同时出现 launch_mode 与 channel_type/run_surface 的双重真相（必须统一以 launch_mode 为准）",
+        "在 UI 中提供“无 lock 且不选择 launch_mode 就直接运行”的路径"
+    ],
+    "acceptance_tests": [
+        {
+            "id": "AT1",
+            "name": "TaskEditor v5.1 保存字段一致性",
+            "steps": [
+                "在 TaskEditor 新建任务，选择 task_type=solo、launch_mode=ccb、launch_mode_locked=true",
+                "保存并检查输出 JSON/payload"
+            ],
+            "pass_criteria": [
+                "输出包含 task_type/launch_mode/launch_mode_locked 且值合法",
+                "不要求 executor_type/session_mode 才能保存"
+            ]
+        },
+        {
+            "id": "AT2",
+            "name": "Legacy 加载与迁移预览",
+            "steps": [
+                "加载包含 executor_type/session_mode 的 legacy task.json",
+                "查看 UI 的 migration preview",
+                "点击 Save"
+            ],
+            "pass_criteria": [
+                "UI 显示 Legacy detected + migration preview",
+                "保存后的输出包含 v5.1 三字段并可运行"
+            ]
+        },
+        {
+            "id": "AT3",
+            "name": "RunDialog 行为：locked vs unlocked",
+            "steps": [
+                "Case A：launch_mode_locked=true -> Run",
+                "Case B：launch_mode_locked=false -> Run"
+            ],
+            "pass_criteria": [
+                "Case A 不弹窗，直接创建 run_record，resolved_task_view.launch_mode_source=task_json",
+                "Case B 必弹窗且必须选择 launch_mode 才能继续，resolved_task_view.launch_mode_source=runtime_override 或 task_json（取决于选择）"
+            ]
+        },
+        {
+            "id": "AT4",
+            "name": "API 合同字段名一致性",
+            "steps": [
+                "对 /api/task/schema/v5.1、/api/task/normalize/v5.1、/api/run/create 跑合同测试",
+                "断言 response 中不出现 executor_type/session_mode 作为必需字段"
+            ],
+            "pass_criteria": [
+                "所有响应/请求字段符合 api_contract 定义",
+                "错误码与字段符合 error_contract"
+            ]
+        }
+    ],
+    "implementation_plan": {
+        "phases": [
+            {
+                "phase": "P1",
+                "name": "Schema 工具函数与 UI 控件",
+                "tasks": [
+                    "实现 taskSchemaV51：枚举/校验/legacy 识别/normalize（仅 UI 级）",
+                    "TaskEditor.jsx 重构：以 task_type/launch_mode/launch_mode_locked 为主",
+                    "Deprecated 字段展示：read-only + warning"
+                ]
+            },
+            {
+                "phase": "P2",
+                "name": "RunDialog 与运行时选择",
+                "tasks": [
+                    "新增 RunDialog（或改造现有 Run）逻辑实现 locked/unlocked 分支",
+                    "新增 /api/run/create 支持 runtime_overrides.launch_mode",
+                    "新增 resolved_task_view 输出"
+                ]
+            },
+            {
+                "phase": "P3",
+                "name": "合同测试与回归",
+                "tasks": [
+                    "补齐前端组件测试",
+                    "补齐 server api 合同测试",
+                    "产出 test_report.txt"
+                ]
+            }
+        ]
+    },
+    "evidence_bundle": {
+        "required_files": [
+            "task_spec.json (this file)",
+            "changes.diff OR PR link",
+            "test_report.txt（命令+输出+结论）"
+        ],
+        "nice_to_have": [
+            "TaskEditor/RunDialog 截图（含 legacy 预览与 unlocked 弹窗）"
+        ]
+    }
+}

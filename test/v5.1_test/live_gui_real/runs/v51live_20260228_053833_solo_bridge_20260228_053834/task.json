@@ -1,0 +1,38 @@
+{
+  "schema_version": "v1",
+  "task_id": "v51live_20260228_053833_solo_bridge_20260228_053834",
+  "executor_type": "solo_agent",
+  "workflow_mode": "solo",
+  "run_surface": "bridge",
+  "execution_mode": "auto",
+  "repo_path": "/Users/yzliu/work/Cord",
+  "base_ref": "main",
+  "goal": "Live real-provider routing test for v51live_20260228_053833_solo_bridge. Produce concise output.",
+  "acceptance": [
+    "Task runs end-to-end with real provider calls"
+  ],
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "coder_timeout_seconds": 240,
+  "judge_timeout_seconds": 240,
+  "attempt_context_mode": "fresh_each",
+  "constraints": [],
+  "allowed_paths": [],
+  "forbidden_globs": [
+    "**/.env",
+    "**/secrets*",
+    "**/*.pem"
+  ],
+  "coder": "ccb",
+  "judge": "ccb",
+  "coder_model": "gemini",
+  "judge_model": "gemini",
+  "collab_roles": {
+    "pm": "codex",
+    "designer": "gemini",
+    "executor": "codex",
+    "reviewer": "gemini"
+  },
+  "executor_instruction": "Write one short line confirming mode/provider path and stop.",
+  "task_code": "rdloop-1772224715-80178-2834"
+}

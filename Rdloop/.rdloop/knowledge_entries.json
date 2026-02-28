@@ -1,0 +1,4 @@
+{
+  "cord_test/hello.txt": "Text file containing the hello world content.",
+  ".rdloop/knowledge_entries.json": "Maps modified files to one-line summaries for this task."
+}

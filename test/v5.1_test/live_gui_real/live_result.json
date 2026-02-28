@@ -1,0 +1,112 @@
+{
+  "cases": [
+    {
+      "spec_id": "v51live_20260228_053833_copywriting_bridge",
+      "task_id": "v51live_20260228_053833_copywriting_bridge_20260228_053833",
+      "state": "PAUSED",
+      "pause_reason_code": "PAUSED_CODER_TIMEOUT",
+      "pause_category": "PAUSED_TIMEOUT",
+      "message": "coder timeout",
+      "event_counts": {
+        "ccb_call": 1,
+        "bridge_call": 0
+      },
+      "real_call_evidence": {
+        "coder_has_ccb_marker": true,
+        "coder_has_bridge_marker": false,
+        "judge_has_ccb_marker": false,
+        "judge_has_bridge_marker": false
+      }
+    },
+    {
+      "spec_id": "v51live_20260228_053833_copywriting_ccb",
+      "task_id": "v51live_20260228_053833_copywriting_ccb_20260228_053833",
+      "state": "PAUSED",
+      "pause_reason_code": "PAUSED_CODER_TIMEOUT",
+      "pause_category": "PAUSED_TIMEOUT",
+      "message": "coder timeout",
+      "event_counts": {
+        "ccb_call": 1,
+        "bridge_call": 0
+      },
+      "real_call_evidence": {
+        "coder_has_ccb_marker": true,
+        "coder_has_bridge_marker": false,
+        "judge_has_ccb_marker": false,
+        "judge_has_bridge_marker": false
+      }
+    },
+    {
+      "spec_id": "v51live_20260228_053833_multi_agent_bridge",
+      "task_id": "v51live_20260228_053833_multi_agent_bridge_20260228_053834",
+      "state": "PAUSED",
+      "pause_reason_code": "PAUSED_CODER_TIMEOUT",
+      "pause_category": "PAUSED_TIMEOUT",
+      "message": "coder timeout",
+      "event_counts": {
+        "ccb_call": 1,
+        "bridge_call": 0
+      },
+      "real_call_evidence": {
+        "coder_has_ccb_marker": true,
+        "coder_has_bridge_marker": false,
+        "judge_has_ccb_marker": false,
+        "judge_has_bridge_marker": false
+      }
+    },
+    {
+      "spec_id": "v51live_20260228_053833_multi_agent_ccb",
+      "task_id": "v51live_20260228_053833_multi_agent_ccb_20260228_053834",
+      "state": "PAUSED",
+      "pause_reason_code": "PAUSED_CODER_TIMEOUT",
+      "pause_category": "PAUSED_TIMEOUT",
+      "message": "coder timeout",
+      "event_counts": {
+        "ccb_call": 1,
+        "bridge_call": 0
+      },
+      "real_call_evidence": {
+        "coder_has_ccb_marker": true,
+        "coder_has_bridge_marker": false,
+        "judge_has_ccb_marker": false,
+        "judge_has_bridge_marker": false
+      }
+    },
+    {
+      "spec_id": "v51live_20260228_053833_solo_bridge",
+      "task_id": "v51live_20260228_053833_solo_bridge_20260228_053834",
+      "state": "PAUSED",
+      "pause_reason_code": "PAUSED_CODER_FAILED",
+      "pause_category": "PAUSED_INFRA",
+      "message": "Coder did not complete (rc=1). Test and judge were not run.",
+      "event_counts": {
+        "ccb_call": 0,
+        "bridge_call": 0
+      },
+      "real_call_evidence": {
+        "coder_has_ccb_marker": false,
+        "coder_has_bridge_marker": true,
+        "judge_has_ccb_marker": false,
+        "judge_has_bridge_marker": false
+      }
+    },
+    {
+      "spec_id": "v51live_20260228_053833_solo_ccb",
+      "task_id": "v51live_20260228_053833_solo_ccb_20260228_053834",
+      "state": "PAUSED",
+      "pause_reason_code": "PAUSED_CODER_TIMEOUT",
+      "pause_category": "PAUSED_TIMEOUT",
+      "message": "coder timeout",
+      "event_counts": {
+        "ccb_call": 1,
+        "bridge_call": 0
+      },
+      "real_call_evidence": {
+        "coder_has_ccb_marker": true,
+        "coder_has_bridge_marker": false,
+        "judge_has_ccb_marker": false,
+        "judge_has_bridge_marker": false
+      }
+    }
+  ]
+}

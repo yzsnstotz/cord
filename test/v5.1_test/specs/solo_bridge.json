@@ -1,0 +1,21 @@
+{
+  "schema_version": "v51",
+  "task_id": "v51_solo_bridge_real",
+  "task_type": "solo",
+  "launch_mode": "bridge",
+  "launch_mode_locked": true,
+  "collab_roles": {
+    "pm": "codex",
+    "designer": "codex",
+    "executor": "codex",
+    "reviewer": "codex"
+  },
+  "agent_config": {
+    "provider": "codex"
+  },
+  "repo_path": "/Users/yzliu/work/cord",
+  "goal": "Run solo role sequence in bridge mode for v5.1 real-data coordinator artifact verification.",
+  "acceptance": "All solo roles produce session lifecycle artifacts.",
+  "test_cmd": "true",
+  "max_attempts": 1
+}

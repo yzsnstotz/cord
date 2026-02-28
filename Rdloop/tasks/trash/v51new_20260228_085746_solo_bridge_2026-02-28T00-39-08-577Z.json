@@ -1,0 +1,31 @@
+{
+  "task_id": "v51new_20260228_085746_solo_bridge",
+  "schema_version": "v51",
+  "task_type": "solo",
+  "launch_mode": "bridge",
+  "launch_mode_locked": true,
+  "repo_path": "/Users/yzliu/work/Cord",
+  "base_ref": "main",
+  "goal": "v5.1 new task test: solo + bridge",
+  "acceptance": [
+    "task created with pure v5.1 fields"
+  ],
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "coder_timeout_seconds": 240,
+  "judge_timeout_seconds": 240,
+  "collab_roles": {
+    "pm": "gemini",
+    "designer": "gemini",
+    "executor": "gemini",
+    "reviewer": "gemini"
+  },
+  "agent_config": {
+    "provider": "gemini",
+    "max_attempts": 3,
+    "auto_pass_threshold": 0.85,
+    "knowledge_shards": []
+  },
+  "judge_enabled": true,
+  "created_at": "2026-02-27T23:57:46.897Z"
+}

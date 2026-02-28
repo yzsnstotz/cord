@@ -1,0 +1,20 @@
+{
+  "task_id": "v51_solo_bridge_real",
+  "state": "READY_FOR_REVIEW",
+  "current_attempt": 1,
+  "max_attempts": 1,
+  "pause_flag": false,
+  "last_decision": "READY_FOR_REVIEW",
+  "message": "v5.1 role flow complete",
+  "questions_for_user": [],
+  "pause_category": "",
+  "pause_reason_code": "",
+  "updated_at": "2026-02-27T20:27:18Z",
+  "state_version": 3,
+  "effective_max_attempts": 1,
+  "paths": {
+    "status_json": "status.json"
+  },
+  "rubric_version_used": null,
+  "last_user_input_ts_consumed": null
+}

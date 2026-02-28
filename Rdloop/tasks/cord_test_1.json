@@ -1,10 +1,12 @@
 {
   "schema_version": "v1",
   "task_id": "cord_test_1",
-  "task_type": "engineering_impl",
+  "task_type": "solo",
+  "launch_mode": "bridge",
+  "launch_mode_locked": false,
   "execution_mode": "auto",
   "channel_type": "ccb",
-  "repo_path": "/Users/yzliu/work/projects/cord_test/test_1/",
+  "repo_path": "/Users/yzliu/work/projects/cord_test/test_5.1/",
   "base_ref": "main",
   "goal": "please create a folder within the project folder, name \"hello-visible\" and a text file within the folder, input \"hello world\"",
   "acceptance": [],
@@ -20,18 +22,19 @@
     "**/secrets*",
     "**/*.pem"
   ],
-  "coder": "solo",
-  "judge": "solo",
+  "coder": "ccb",
+  "judge": "ccb",
   "coder_model": "gemini",
   "judge_model": "gemini",
-  "executor_instruction": "please create a folder within the project folder, name \"hello-visible\" and a text file within the folder, input \"hello world\"",
   "agent_config": {
     "max_attempts": 10,
     "auto_pass_threshold": 0.85,
-    "knowledge_shards": [],
-    "provider": "gemini"
+    "inspiration_trigger_attempts": 3,
+    "provider": "gemini",
+    "knowledge_shards": []
   },
-  "executor_type": "solo_agent",
-  "session_mode": "continuous",
-  "workflow_mode": "solo"
+  "executor_instruction": "please create a folder within the project folder, name \"hello-visible\" and a text file within the folder, input \"hello world\"",
+  "executor_type": "api_call",
+  "session_mode": "fresh",
+  "workflow_mode": "single"
 }

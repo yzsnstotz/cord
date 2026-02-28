@@ -1,0 +1,89 @@
+{
+  "generated_at_utc": "2026-02-27T20:28:18Z",
+  "test_root": "/Users/yzliu/work/cord/test/v5.1_test",
+  "note": "v5.1 run_task role-flow execution (session/pane/event deliverables)",
+  "cases": [
+    {
+      "task_id": "v51_copywriting_bridge_real",
+      "task_type": "copywriting",
+      "launch_mode": "bridge",
+      "state": "READY_FOR_REVIEW",
+      "decision": "READY_FOR_REVIEW",
+      "role_start_count": 3,
+      "role_transition_count": 2,
+      "ccb_call_count": 0,
+      "bridge_call_count": 3,
+      "pane_count": 3,
+      "deliverable_dir": "/Users/yzliu/work/cord/test/v5.1_test/out/v51_copywriting_bridge_real"
+    },
+    {
+      "task_id": "v51_copywriting_ccb_real",
+      "task_type": "copywriting",
+      "launch_mode": "ccb",
+      "state": "READY_FOR_REVIEW",
+      "decision": "READY_FOR_REVIEW",
+      "role_start_count": 3,
+      "role_transition_count": 2,
+      "ccb_call_count": 3,
+      "bridge_call_count": 0,
+      "pane_count": 3,
+      "deliverable_dir": "/Users/yzliu/work/cord/test/v5.1_test/out/v51_copywriting_ccb_real"
+    },
+    {
+      "task_id": "v51_multi_agent_bridge_real",
+      "task_type": "multi_agent",
+      "launch_mode": "bridge",
+      "state": "READY_FOR_REVIEW",
+      "decision": "READY_FOR_REVIEW",
+      "role_start_count": 4,
+      "role_transition_count": 3,
+      "ccb_call_count": 0,
+      "bridge_call_count": 4,
+      "pane_count": 4,
+      "deliverable_dir": "/Users/yzliu/work/cord/test/v5.1_test/out/v51_multi_agent_bridge_real"
+    },
+    {
+      "task_id": "v51_multi_agent_ccb_real",
+      "task_type": "multi_agent",
+      "launch_mode": "ccb",
+      "state": "READY_FOR_REVIEW",
+      "decision": "READY_FOR_REVIEW",
+      "role_start_count": 4,
+      "role_transition_count": 3,
+      "ccb_call_count": 4,
+      "bridge_call_count": 0,
+      "pane_count": 4,
+      "deliverable_dir": "/Users/yzliu/work/cord/test/v5.1_test/out/v51_multi_agent_ccb_real"
+    },
+    {
+      "task_id": "v51_solo_bridge_real",
+      "task_type": "solo",
+      "launch_mode": "bridge",
+      "state": "READY_FOR_REVIEW",
+      "decision": "READY_FOR_REVIEW",
+      "role_start_count": 4,
+      "role_transition_count": 3,
+      "ccb_call_count": 0,
+      "bridge_call_count": 4,
+      "pane_count": 4,
+      "deliverable_dir": "/Users/yzliu/work/cord/test/v5.1_test/out/v51_solo_bridge_real"
+    },
+    {
+      "task_id": "v51_solo_ccb_real",
+      "task_type": "solo",
+      "launch_mode": "ccb",
+      "state": "READY_FOR_REVIEW",
+      "decision": "READY_FOR_REVIEW",
+      "role_start_count": 4,
+      "role_transition_count": 3,
+      "ccb_call_count": 4,
+      "bridge_call_count": 0,
+      "pane_count": 4,
+      "deliverable_dir": "/Users/yzliu/work/cord/test/v5.1_test/out/v51_solo_ccb_real"
+    }
+  ],
+  "tooling_health": {
+    "ccb_mounted": "command not found (ccb-mounted)",
+    "ccb_ping_codex": "crash: TypeError from /Users/yzliu/.local/bin/ccb-ping (python union type syntax)"
+  }
+}

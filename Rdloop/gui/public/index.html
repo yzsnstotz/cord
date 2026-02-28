@@ -12,7 +12,14 @@
       <h1 style="margin:0;cursor:pointer" onclick="switchView('tasks')" title="Go to Tasks">rdloop</h1>
       <button type="button" class="btn" id="btn-settings" style="padding:4px 8px;font-size:12px" title="Settings">⚙ Settings</button>
     </div>
-    <div id="task-list"></div>
+    <div id="task-list-section" class="sidebar-section">
+      <div class="sidebar-header">Tasks</div>
+      <div id="task-list"></div>
+    </div>
+    <div id="template-list-section" class="sidebar-section">
+      <div class="sidebar-header">Templates</div>
+      <div id="template-list"></div>
+    </div>
   </div>
   <div id="main">
     <button type="button" class="sidebar-toggle" id="toggle-sidebar" title="Toggle Sidebar">
@@ -20,6 +27,7 @@
     </button>
     <div id="top-nav">
       <button type="button" id="nav-tasks" class="nav-tab active">Tasks</button>
+      <button type="button" id="nav-prompts" class="nav-tab">Prompt Center</button>
       <button type="button" id="nav-ccb" class="nav-tab">Agents</button>
       <button type="button" id="nav-simulator" class="nav-tab">Coordinator Simulator</button>
     </div>
@@ -28,6 +36,7 @@
         <h2>Select a task from the sidebar</h2>
         <p>Tasks are auto-refreshed every 2 seconds</p>
       </div>
+      <div id="prompts-panel" class="view-panel" style="display:none"></div>
       <div id="ccb-panel" class="view-panel" style="display:none"></div>
       <div id="simulator-panel" class="view-panel" style="display:none"></div>
     </div>

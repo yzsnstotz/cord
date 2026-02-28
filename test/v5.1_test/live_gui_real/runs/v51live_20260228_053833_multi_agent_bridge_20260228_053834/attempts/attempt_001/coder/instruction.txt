@@ -1,0 +1,13 @@
+=== CONTEXT ===
+
+=== END CONTEXT ===
+
+=== GOAL ===
+Live real-provider routing test for v51live_20260228_053833_multi_agent_bridge. Produce concise output.
+
+=== ACCEPTANCE CRITERIA ===
+["Task runs end-to-end with real provider calls"]
+
+=== KNOWLEDGE ENTRIES (optional) ===
+When you have finished implementing, write a JSON file at .rdloop/knowledge_entries.json (repo root): keys = relative paths of files you modified (e.g. src/auth.py), values = one-line summary of what the file does or what changed (e.g. "JWT auth. verify_token()."). Only include files you actually modified. If you did not modify any files, you may omit this file.
+

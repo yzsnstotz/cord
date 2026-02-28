@@ -6,6 +6,7 @@
 #   git_ops.sh create-branches <branch_init_spec.json>
 #   git_ops.sh merge-pr         <merge_decision.json>
 #   git_ops.sh review-prep      <task_slug> <contract_path>
+#   git_ops.sh role-commit      --task <task_id> --role <role> --message <msg> [--session-id <sid>] [--attempt-id <id>] [--repo <path>]
 
 set -euo pipefail
 
@@ -233,6 +234,66 @@ PYEOF
 }
 
 ##############################################################################
+# role-commit: stage + commit current role output (no-op when clean)
+##############################################################################
+cmd_role_commit() {
+  local task_id="" role="" msg="" repo_path="" session_id="" attempt_id=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --task|--task-id) task_id="${2:-}"; shift 2 ;;
+      --role) role="${2:-}"; shift 2 ;;
+      --message) msg="${2:-}"; shift 2 ;;
+      --session-id) session_id="${2:-}"; shift 2 ;;
+      --attempt-id) attempt_id="${2:-}"; shift 2 ;;
+      --repo|--repo-path) repo_path="${2:-}"; shift 2 ;;
+      *)
+        log_error "Unknown role-commit arg: $1"
+        exit 1
+        ;;
+    esac
+  done
+
+  [ -z "$task_id" ] && { log_error "role-commit requires --task"; exit 1; }
+  [ -z "$role" ] && { log_error "role-commit requires --role"; exit 1; }
+  [ -z "$msg" ] && { log_error "role-commit requires --message"; exit 1; }
+  [ -z "$session_id" ] && session_id="na"
+  [ -z "$attempt_id" ] && attempt_id="na"
+
+  if [ -z "$repo_path" ]; then
+    repo_path="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+  [ -z "$repo_path" ] && { log_error "role-commit could not resolve git repo path"; exit 1; }
+
+  if ! git -C "$repo_path" rev-parse --git-dir >/dev/null 2>&1; then
+    log_error "role-commit repo is not a git repository: ${repo_path}"
+    exit 1
+  fi
+
+  git -C "$repo_path" add -A
+
+  # no-op commit is not an error in role transition flow
+  if git -C "$repo_path" diff --cached --quiet; then
+    log_info "role-commit no-op: no changes for task=${task_id} role=${role}"
+    return 0
+  fi
+
+  local commit_msg="role/${role} task=${task_id} session=${session_id} attempt=${attempt_id}: ${msg}"
+  git -C "$repo_path" commit -m "$commit_msg" >/dev/null 2>&1 || {
+    # If commit failed because nothing to commit after hooks, still treat as no-op
+    if git -C "$repo_path" diff --cached --quiet; then
+      log_info "role-commit no-op after hooks: no staged changes"
+      return 0
+    fi
+    log_error "role-commit failed for task=${task_id} role=${role}"
+    exit 1
+  }
+
+  local sha=""
+  sha="$(git -C "$repo_path" rev-parse HEAD 2>/dev/null || true)"
+  log_info "role-commit success task=${task_id} role=${role} session_id=${session_id} attempt_id=${attempt_id} commit=${sha}"
+}
+
+##############################################################################
 # review-prep: generate structured review report
 ##############################################################################
 cmd_review_prep() {
@@ -386,8 +447,12 @@ case "${1:-}" in
     [ $# -lt 2 ] && { log_error "Usage: git_ops.sh review-prep <task_slug> [contract_path] [repo_path] [task_branch] [worker_branches]"; exit 1; }
     cmd_review_prep "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
     ;;
+  role-commit)
+    shift
+    cmd_role_commit "$@"
+    ;;
   *)
-    echo "Usage: git_ops.sh <create-branches|merge-pr|review-prep> [args...]"
+    echo "Usage: git_ops.sh <create-branches|merge-pr|review-prep|role-commit> [args...]"
     exit 1
     ;;
 esac

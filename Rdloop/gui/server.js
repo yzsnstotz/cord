@@ -20,6 +20,7 @@ const RDLOOP_CONFIG_PATH = path.resolve(__dirname, '..', 'rdloop.config.json');
 const CLIAPI_PROVIDERS_PATH = path.resolve(__dirname, '..', 'config', 'cliapi_providers.json');
 const WORKTREES_DIR = path.resolve(__dirname, '..', 'worktrees');
 const RDLOOP_ROOT = path.resolve(__dirname, '..');
+const CCB_ROOT = path.resolve(__dirname, '..', '..', 'CCB');
 const SIMULATOR_ROOT = path.join(RDLOOP_ROOT, 'Coordinator Simulator');
 const SIMULATOR_RUNS_DIR = path.join(SIMULATOR_ROOT, 'runs');
 const VALID_SIM_RUN_ID = /^sim_[A-Za-z0-9_-]+$/;
@@ -790,9 +791,10 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
     || readFile(path.join(coderDir, 'stdout.log'));
   const taskJson = readJSON(path.join(OUT_DIR, taskId, 'task.json'));
   const taskType = taskJson?.task_type || '';
+  const normalizedTaskType = String(taskType || '').toLowerCase() === 'copywrite' ? 'copywriting' : String(taskType || '');
   let judgePromptPath = path.join(PROMPTS_DIR, 'judge.prompt.md');
-  if (taskType && fs.existsSync(path.join(PROMPTS_DIR, `judge.prompt.${taskType}.md`))) {
-    judgePromptPath = path.join(PROMPTS_DIR, `judge.prompt.${taskType}.md`);
+  if (normalizedTaskType && fs.existsSync(path.join(PROMPTS_DIR, `judge.prompt.${normalizedTaskType}.md`))) {
+    judgePromptPath = path.join(PROMPTS_DIR, `judge.prompt.${normalizedTaskType}.md`);
   }
   const judgePromptText = fs.existsSync(judgePromptPath) ? readFile(judgePromptPath) : null;
 
@@ -2253,7 +2255,7 @@ app.get('/api/ccb/session-status', async (req, res) => {
   }
 });
 
-// POST /api/ccb/session/start — start CCB via native entry script (ccb <providers>); CCB manages tmux session, PATH, remain-on-exit
+// POST /api/ccb/session/start — start CCB via native entry script (ccb -a <providers>); CCB manages tmux session, PATH, remain-on-exit
 app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   if (os.platform() === 'win32') {
     return res.status(400).json({ error: 'CCB session management is not supported on Windows.' });
@@ -2343,7 +2345,7 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
   }
 
   // Run CCB inside a real terminal so tmux can attach to a TTY (headless spawn fails with "open terminal failed: not a terminal")
-  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" ' + validProviders.map(p => p.replace(/"/g, '\\"')).join(' ');
+  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" -a ' + validProviders.map(p => p.replace(/"/g, '\\"')).join(' ');
   if (os.platform() === 'darwin') {
     const script = 'tell application "Terminal" to do script "' + cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
     spawn('osascript', ['-e', script], { stdio: 'ignore', detached: true }).unref();
@@ -2352,7 +2354,7 @@ app.post('/api/ccb/session/start', requireWritable, async (req, res) => {
     const args = term === 'gnome-terminal' ? ['--', 'bash', '-c', cmd] : (term === 'konsole' ? ['-e', 'bash -c "' + cmd.replace(/"/g, '\\"') + '"'] : ['-e', cmd]);
     spawn(term, args, { stdio: 'ignore', detached: true }).unref();
   }
-  appendToCcbGuiLog('start_spawn', { via: 'terminal', cmd: 'cd ' + workDir + ' && python3 ccb ' + validProviders.join(' ') });
+  appendToCcbGuiLog('start_spawn', { via: 'terminal', cmd: 'cd ' + workDir + ' && python3 ccb -a ' + validProviders.join(' ') });
 
   let stderrChunks = [];
   // No child stderr to capture; CCB runs in the opened terminal
@@ -2516,7 +2518,7 @@ app.get('/api/ccb/session/attach', async (req, res) => {
   res.json({ ok: true, session: sessionName, message: 'Terminal window should open; attach with: ' + attachCmd });
 });
 
-// POST /api/ccb/session/open-terminal — open Terminal.app (or system terminal) and run ccb <providers> in it so user sees a terminal and session is created there
+// POST /api/ccb/session/open-terminal — open Terminal.app (or system terminal) and run ccb -a <providers> in it so user sees a terminal and session is created there
 // P20: If an active CCB instance exists (lock file + PID alive), attach to its tmux session instead of starting a new one; if stale lock, remove it then start.
 app.post('/api/ccb/session/open-terminal', requireWritable, async (req, res) => {
   if (os.platform() === 'win32') {
@@ -2574,7 +2576,7 @@ app.post('/api/ccb/session/open-terminal', requireWritable, async (req, res) => 
     }
   }
 
-  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" ' + providers.map(p => p.replace(/"/g, '\\"')).join(' ');
+  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" -a ' + providers.map(p => p.replace(/"/g, '\\"')).join(' ');
   if (os.platform() === 'darwin') {
     const script = 'tell application "Terminal" to do script "' + cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
     spawn('osascript', ['-e', script], { stdio: 'ignore', detached: true }).unref();
@@ -2583,10 +2585,10 @@ app.post('/api/ccb/session/open-terminal', requireWritable, async (req, res) => 
     const attachCmd = term === 'gnome-terminal' ? ['--', 'bash', '-c', cmd] : (term === 'konsole' ? ['-e', 'bash -c "' + cmd.replace(/"/g, '\\"') + '"'] : ['-e', cmd]);
     spawn(term, attachCmd, { stdio: 'ignore', detached: true }).unref();
   }
-  res.json({ ok: true, action: 'started', message: 'Terminal should open with: cd ' + workDir + ' && ccb ' + providers.join(' '), ...(cleanedStale ? { cleaned_stale: true } : {}) });
+  res.json({ ok: true, action: 'started', message: 'Terminal should open with: cd ' + workDir + ' && ccb -a ' + providers.join(' '), ...(cleanedStale ? { cleaned_stale: true } : {}) });
 });
 
-// POST /api/ccb/session/open-wezterm — open WezTerm and run ccb <providers> (all agents in one WezTerm window)
+// POST /api/ccb/session/open-wezterm — open WezTerm and run ccb -a <providers> (all agents in one WezTerm window)
 app.post('/api/ccb/session/open-wezterm', requireWritable, async (req, res) => {
   if (os.platform() === 'win32') {
     return res.status(400).json({ error: 'Open WezTerm from GUI is not supported on Windows.', hint: 'Run WezTerm manually and execute ccb in it.' });
@@ -2632,7 +2634,7 @@ app.post('/api/ccb/session/open-wezterm', requireWritable, async (req, res) => {
   if (!fs.existsSync(workDir) || !fs.statSync(workDir).isDirectory()) {
     return res.status(400).json({ error: 'Work directory does not exist', work_dir: workDir });
   }
-  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" ' + providers.map(p => p.replace(/"/g, '\\"')).join(' ');
+  const cmd = 'cd "' + workDir.replace(/"/g, '\\"') + '" && python3 "' + ccbScript.replace(/"/g, '\\"') + '" -a ' + providers.map(p => p.replace(/"/g, '\\"')).join(' ');
   spawn(weztermBin, ['start', '--', 'bash', '-c', cmd], {
     env: { ...env, CCB_TERMINAL: 'wezterm' },
     stdio: 'ignore',
@@ -2799,7 +2801,7 @@ app.post('/api/ccb/session/restart', requireWritable, async (req, res) => {
   const validProviders = providers.filter(p => CCB_PROVIDERS.includes(p));
   if (ccbScript && validProviders.length > 0) {
     const noTmuxEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !['TMUX', 'TMUX_PANE', 'WEZTERM_PANE'].includes(k)));
-    const child = spawn('python3', [ccbScript, ...validProviders], {
+    const child = spawn('python3', [ccbScript, '-a', ...validProviders], {
       env: { ...noTmuxEnv, CCB_GUI_LAUNCH: '1' },
       cwd: fs.existsSync(workDir) ? workDir : process.cwd(),
       stdio: 'ignore',
@@ -4379,6 +4381,32 @@ function validatePromptName(name) {
   return VALID_PROMPT_NAME.test(name) && !name.includes('..') && !name.includes('/') && !name.includes('\\');
 }
 
+function normalizePromptNameAlias(name) {
+  let out = String(name || '').trim();
+  if (!out) return '';
+  if (out.endsWith('.json')) out = out.slice(0, -5) + '.md';
+  out = out.replace(/copywrite/g, 'copywriting');
+  return out;
+}
+
+function resolvePromptRef(name, opts = {}) {
+  const forWrite = opts.forWrite === true;
+  const normalized = normalizePromptNameAlias(name);
+  const candidates = [];
+  if (normalized) candidates.push(normalized);
+  if (normalized && normalized.startsWith('judge.prompt.') && normalized.endsWith('.md') && normalized !== 'judge.prompt.md') {
+    candidates.push('judge.prompt.md');
+  }
+  const uniq = [...new Set(candidates)];
+  for (const candidate of uniq) {
+    if (!validatePromptName(candidate)) continue;
+    const filepath = path.resolve(PROMPTS_DIR, candidate);
+    if (!filepath.startsWith(PROMPTS_DIR + path.sep) && filepath !== PROMPTS_DIR) continue;
+    if (forWrite || fs.existsSync(filepath)) return { name: candidate, filepath };
+  }
+  return null;
+}
+
 function applyRunSurfaceOverrideToTaskJson(taskPath, requestedRunSurface) {
   if (!requestedRunSurface) return { ok: true, applied: false };
   if (!['bridge', 'visual_ccb'].includes(requestedRunSurface)) {
@@ -4442,6 +4470,344 @@ function atomicWriteText(filepath, content) {
   }
 }
 
+function toIsoNoMs(dateLike) {
+  try {
+    return new Date(dateLike).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  } catch {
+    return null;
+  }
+}
+
+function isPathWithin(root, candidate) {
+  const absRoot = path.resolve(root);
+  const absCandidate = path.resolve(candidate);
+  return absCandidate === absRoot || absCandidate.startsWith(absRoot + path.sep);
+}
+
+function listAncestorAgentsFiles() {
+  const files = [];
+  let cur = path.resolve(RDLOOP_ROOT);
+  while (true) {
+    const candidate = path.join(cur, 'AGENTS.md');
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      files.push(candidate);
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return [...new Set(files)];
+}
+
+function describePromptTemplate(name) {
+  if (name === 'system_prompt.md') return 'Base system instruction used by orchestration flows.';
+  if (name === 'coder.prompt.md') return 'Coder role instruction template used to build coder requests.';
+  if (name === 'judge.prompt.md') return 'Judge role instruction template used to evaluate attempts.';
+  if (name.startsWith('judge.prompt.') && name.endsWith('.md')) return 'Task-type-specific judge template; falls back to judge.prompt.md when absent.';
+  return 'Prompt template stored under Rdloop/prompts/.';
+}
+
+function describeCcbPromptFile(relPath) {
+  if (relPath.startsWith('config/agents-md-ccb.md')) return 'CCB template injected into workspace AGENTS.md.';
+  if (relPath.startsWith('config/claude-md-ccb.md')) return 'CCB template injected into CLAUDE.md instructions.';
+  if (relPath.startsWith('config/clinerules-ccb.md')) return 'CCB template injected into .clinerules.';
+  if (relPath.includes('/SKILL.md')) return 'CCB skill instruction file used by coding-agent providers.';
+  if (relPath.endsWith('/ask.md')) return 'Provider-specific ask prompt wrapper/instruction.';
+  if (relPath.endsWith('.md')) return 'CCB markdown instruction/prompt file involved in agent workflow.';
+  return 'CCB instruction artifact.';
+}
+
+function collectCcbPromptEntries() {
+  const entries = [];
+  if (!fs.existsSync(CCB_ROOT) || !fs.statSync(CCB_ROOT).isDirectory()) return entries;
+  const relSet = new Set();
+  const fixed = [
+    'config/agents-md-ccb.md',
+    'config/claude-md-ccb.md',
+    'config/clinerules-ccb.md'
+  ];
+  fixed.forEach((r) => relSet.add(r));
+
+  const skillRoots = ['codex_skills', 'claude_skills', 'droid_skills'];
+  for (const sr of skillRoots) {
+    const root = path.join(CCB_ROOT, sr);
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
+    const stack = [root];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      let children = [];
+      try { children = fs.readdirSync(cur); } catch { children = []; }
+      for (const name of children) {
+        const p = path.join(cur, name);
+        let st = null;
+        try { st = fs.statSync(p); } catch {}
+        if (!st) continue;
+        if (st.isDirectory()) {
+          stack.push(p);
+          continue;
+        }
+        if (!st.isFile()) continue;
+        if (name === 'SKILL.md' || name === 'ask.md' || (name.endsWith('.md') && p.includes(`${path.sep}references${path.sep}`)) || (name.endsWith('.md') && p.includes(`${path.sep}templates${path.sep}`))) {
+          const rel = path.relative(CCB_ROOT, p).split(path.sep).join('/');
+          relSet.add(rel);
+        }
+      }
+    }
+  }
+
+  for (const rel of [...relSet].sort()) {
+    const abs = path.join(CCB_ROOT, rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;
+    let stat = null;
+    try { stat = fs.statSync(abs); } catch {}
+    entries.push({
+      target: `ccb:${abs}`,
+      name: `CCB/${rel}`,
+      category: 'CCB Prompt/Instruction Sources',
+      brief: describeCcbPromptFile(rel),
+      editable: true,
+      size: stat ? stat.size : 0,
+      updated_at: stat ? toIsoNoMs(stat.mtime) : null
+    });
+  }
+  return entries;
+}
+
+function collectTaskPromptArtifacts(taskId, taskDir) {
+  const entries = [];
+  if (!taskId || !taskDir || !fs.existsSync(taskDir)) return entries;
+  let attemptDirs = [];
+  try {
+    attemptDirs = fs.readdirSync(taskDir)
+      .filter((d) => /^attempt_\d{3}$/.test(d))
+      .sort((a, b) => Number(a.slice(8)) - Number(b.slice(8)));
+  } catch {
+    attemptDirs = [];
+  }
+  const fileDefs = [
+    { rel: 'coder/prompt.txt', brief: 'Final coder handoff prompt assembled by coordinator.' },
+    { rel: 'coder/instruction.txt', brief: 'Legacy mirror of coder prompt for compatibility.' },
+    { rel: 'judge/prompt.txt', brief: 'Judge template selected for this attempt.' },
+    { rel: 'judge/request.txt', brief: 'Full judge request payload (prompt plus evidence JSON).' }
+  ];
+  for (const ad of attemptDirs) {
+    for (const def of fileDefs) {
+      const relPath = `${ad}/${def.rel}`;
+      const fullPath = path.join(taskDir, relPath);
+      if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) continue;
+      let stat = null;
+      try { stat = fs.statSync(fullPath); } catch {}
+      entries.push({
+        target: `task:${taskId}:${relPath}`,
+        name: relPath,
+        category: 'Task Runtime Artifacts',
+        brief: def.brief,
+        editable: true,
+        size: stat ? stat.size : 0,
+        updated_at: stat ? toIsoNoMs(stat.mtime) : null
+      });
+    }
+  }
+  return entries;
+}
+
+function resolvePromptCenterTask(taskId) {
+  if (taskId) {
+    if (!VALID_TASK_ID.test(taskId)) return { error: 'Invalid task_id format' };
+    const td = findTaskDir(taskId);
+    if (!td) return { error: `Task not found: ${taskId}` };
+    return { task_id: taskId, task_dir: td };
+  }
+  if (!fs.existsSync(OUT_DIR)) return { task_id: null, task_dir: null };
+  let latest = null;
+  try {
+    const dirs = fs.readdirSync(OUT_DIR);
+    for (const d of dirs) {
+      const dp = path.join(OUT_DIR, d);
+      if (!fs.existsSync(dp) || !fs.statSync(dp).isDirectory()) continue;
+      const tj = path.join(dp, 'task.json');
+      if (!fs.existsSync(tj)) continue;
+      const stat = fs.statSync(dp);
+      if (!latest || stat.mtimeMs > latest.mtimeMs) latest = { dir: dp, mtimeMs: stat.mtimeMs };
+    }
+  } catch {}
+  if (!latest) return { task_id: null, task_dir: null };
+  let taskIdFromJson = path.basename(latest.dir);
+  try {
+    const tj = readJSON(path.join(latest.dir, 'task.json'));
+    if (tj && typeof tj.task_id === 'string' && tj.task_id.trim()) taskIdFromJson = tj.task_id.trim();
+  } catch {}
+  return { task_id: taskIdFromJson, task_dir: latest.dir };
+}
+
+function resolvePromptCenterTarget(target) {
+  const raw = String(target || '');
+  if (!raw) return null;
+
+  if (raw.startsWith('prompts:')) {
+    const name = raw.slice('prompts:'.length).trim();
+    if (!validatePromptName(name)) return null;
+    const filepath = path.resolve(PROMPTS_DIR, name);
+    if (!isPathWithin(PROMPTS_DIR, filepath)) return null;
+    return { kind: 'prompt_template', name, filepath };
+  }
+
+  if (raw.startsWith('agents:')) {
+    const abs = path.resolve(raw.slice('agents:'.length).trim());
+    if (path.basename(abs) !== 'AGENTS.md') return null;
+    const allowed = new Set(listAncestorAgentsFiles().map((p) => path.resolve(p)));
+    if (!allowed.has(abs)) return null;
+    return { kind: 'agents', name: path.basename(path.dirname(abs)) + '/AGENTS.md', filepath: abs };
+  }
+
+  if (raw.startsWith('task:')) {
+    const m = /^task:([^:]+):(.+)$/.exec(raw);
+    if (!m) return null;
+    const taskId = m[1];
+    const relPath = m[2];
+    if (!VALID_TASK_ID.test(taskId)) return null;
+    if (!/^attempt_\d{3}\/(coder\/(prompt\.txt|instruction\.txt)|judge\/(prompt\.txt|request\.txt))$/.test(relPath)) {
+      return null;
+    }
+    const taskDir = findTaskDir(taskId);
+    if (!taskDir) return null;
+    const filepath = path.resolve(taskDir, relPath);
+    if (!isPathWithin(taskDir, filepath)) return null;
+    return { kind: 'task_artifact', name: relPath, filepath, task_id: taskId };
+  }
+  if (raw.startsWith('ccb:')) {
+    const abs = path.resolve(raw.slice('ccb:'.length).trim());
+    if (!isPathWithin(CCB_ROOT, abs)) return null;
+    if (!abs.endsWith('.md')) return null;
+    const rel = path.relative(CCB_ROOT, abs).split(path.sep).join('/');
+    return { kind: 'ccb_prompt_source', name: `CCB/${rel}`, filepath: abs };
+  }
+  return null;
+}
+
+// GET /api/prompt-center — prompt inventory for templates + runtime artifacts + AGENTS.md chain
+app.get('/api/prompt-center', (req, res) => {
+  const requestedTaskId = String(req.query.task_id || '').trim();
+  const resolvedTask = resolvePromptCenterTask(requestedTaskId || null);
+  if (resolvedTask.error) {
+    return res.status(404).json({ error: resolvedTask.error });
+  }
+
+  const entries = [];
+
+  for (const abs of listAncestorAgentsFiles()) {
+    let stat = null;
+    try { stat = fs.statSync(abs); } catch {}
+    entries.push({
+      target: `agents:${abs}`,
+      name: path.relative(path.dirname(RDLOOP_ROOT), abs).split(path.sep).join('/'),
+      category: 'Global Instruction Files',
+      brief: 'Workspace-level instruction file that can inject task rules and constraints.',
+      editable: true,
+      size: stat ? stat.size : 0,
+      updated_at: stat ? toIsoNoMs(stat.mtime) : null
+    });
+  }
+
+  let promptFiles = [];
+  try { promptFiles = fs.readdirSync(PROMPTS_DIR); } catch {}
+  for (const name of promptFiles.sort()) {
+    if (!validatePromptName(name)) continue;
+    const fp = path.join(PROMPTS_DIR, name);
+    if (!fs.existsSync(fp) || !fs.statSync(fp).isFile()) continue;
+    let stat = null;
+    try { stat = fs.statSync(fp); } catch {}
+    entries.push({
+      target: `prompts:${name}`,
+      name,
+      category: 'Prompt Templates',
+      brief: describePromptTemplate(name),
+      editable: true,
+      size: stat ? stat.size : 0,
+      updated_at: stat ? toIsoNoMs(stat.mtime) : null
+    });
+  }
+
+  // Keep Prompt Center focused on durable system/template instruction sources.
+  // Exclude per-task runtime artifacts (attempt_*/coder|judge/*.txt).
+  entries.push(...collectCcbPromptEntries());
+
+  entries.sort((a, b) => {
+    const c = String(a.category || '').localeCompare(String(b.category || ''));
+    if (c !== 0) return c;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+
+  return res.json({
+    intro: 'Prompt Center shows the files that inject instructions into coder/judge requests. Edit carefully: changes can affect upcoming attempts immediately.',
+    task_id: resolvedTask.task_id || null,
+    entries
+  });
+});
+
+// GET /api/prompt-center/file?target=... — read one prompt-center file
+app.get('/api/prompt-center/file', (req, res) => {
+  const target = String(req.query.target || '');
+  const resolved = resolvePromptCenterTarget(target);
+  if (!resolved) return res.status(400).json({ error: 'Invalid target' });
+  if (!fs.existsSync(resolved.filepath)) return res.status(404).json({ error: 'File not found' });
+  try {
+    const content = fs.readFileSync(resolved.filepath, 'utf8');
+    let updatedAt = null;
+    try { updatedAt = toIsoNoMs(fs.statSync(resolved.filepath).mtime); } catch {}
+    return res.json({
+      target,
+      name: resolved.name,
+      kind: resolved.kind,
+      filepath: resolved.filepath,
+      content,
+      updated_at: updatedAt
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/prompt-center/file — save one prompt-center file
+app.put('/api/prompt-center/file', requireWritable, (req, res) => {
+  const target = String(req.body?.target || '');
+  const content = req.body?.content;
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
+  const resolved = resolvePromptCenterTarget(target);
+  if (!resolved) return res.status(400).json({ error: 'Invalid target' });
+
+  let backupPath = null;
+  if (fs.existsSync(resolved.filepath)) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    backupPath = resolved.filepath + '.bak.' + ts;
+    try { fs.copyFileSync(resolved.filepath, backupPath); } catch { backupPath = null; }
+  }
+
+  try {
+    atomicWriteText(resolved.filepath, content);
+    auditLog({
+      action: 'prompt_center_save',
+      target,
+      kind: resolved.kind,
+      name: resolved.name,
+      size: content.length,
+      backup: backupPath
+    });
+    let updatedAt = null;
+    try { updatedAt = toIsoNoMs(fs.statSync(resolved.filepath).mtime); } catch {}
+    return res.json({
+      ok: true,
+      target,
+      name: resolved.name,
+      updated_at: updatedAt,
+      backup: backupPath ? path.basename(backupPath) : null
+    });
+  } catch (err) {
+    auditLog({ action: 'prompt_center_save_failed', target, error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/prompts — list all .md files in prompts/ (D1)
 app.get('/api/prompts', (req, res) => {
   try {
@@ -4468,15 +4834,11 @@ app.get('/api/prompts', (req, res) => {
 
 // GET /api/prompts/:name — read a prompt file (D1)
 app.get('/api/prompts/:name', (req, res) => {
-  const { name } = req.params;
-  if (!validatePromptName(name)) {
+  const resolved = resolvePromptRef(req.params.name, { forWrite: false });
+  if (!resolved) {
     return res.status(400).json({ error: 'Invalid prompt file name' });
   }
-  const filepath = path.resolve(PROMPTS_DIR, name);
-  // Path traversal check (D2)
-  if (!filepath.startsWith(PROMPTS_DIR + path.sep) && filepath !== PROMPTS_DIR) {
-    return res.status(400).json({ error: 'Path traversal denied' });
-  }
+  const { name, filepath } = resolved;
   if (!fs.existsSync(filepath)) {
     return res.status(404).json({ error: 'Prompt not found' });
   }
@@ -4492,15 +4854,11 @@ app.get('/api/prompts/:name', (req, res) => {
 
 // PUT /api/prompts/:name — save a prompt file (D1/D2). K7-1: READ_ONLY blocks; K7-2: overwrite confirmed by client.
 app.put('/api/prompts/:name', requireWritable, (req, res) => {
-  const { name } = req.params;
-  if (!validatePromptName(name)) {
+  const resolved = resolvePromptRef(req.params.name, { forWrite: true });
+  if (!resolved) {
     return res.status(400).json({ error: 'Invalid prompt file name' });
   }
-  const filepath = path.resolve(PROMPTS_DIR, name);
-  // Path traversal check (D2)
-  if (!filepath.startsWith(PROMPTS_DIR + path.sep) && filepath !== PROMPTS_DIR) {
-    return res.status(400).json({ error: 'Path traversal denied' });
-  }
+  const { name, filepath } = resolved;
   const { content } = req.body;
   if (typeof content !== 'string') {
     return res.status(400).json({ error: 'content must be a string' });

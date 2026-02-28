@@ -1,0 +1,3 @@
+[BRIDGE][gemini] gask execution failed (rc=1).
+The Gemini executor in solo bridge requires CCB daemon/session readiness.
+Check: ccb gemini / ccb-ping gemini / session file /Users/yzliu/work/Cord/.ccb/.gemini-session

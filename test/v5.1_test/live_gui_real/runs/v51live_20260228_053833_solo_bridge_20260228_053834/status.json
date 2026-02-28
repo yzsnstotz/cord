@@ -1,0 +1,27 @@
+{
+  "task_id": "v51live_20260228_053833_solo_bridge_20260228_053834",
+  "state": "PAUSED",
+  "current_attempt": 1,
+  "max_attempts": 1,
+  "pause_flag": false,
+  "last_decision": "NEED_USER_INPUT",
+  "message": "Coder did not complete (rc=1). Test and judge were not run.",
+  "questions_for_user": [
+    "Coder step failed (rc=1). Check coder/run.log and adapter (cliapi gateway); then use Run Next to retry."
+  ],
+  "pause_category": "PAUSED_INFRA",
+  "pause_reason_code": "PAUSED_CODER_FAILED",
+  "updated_at": "2026-02-27T20:38:42Z",
+  "state_version": 4,
+  "effective_max_attempts": 1,
+  "paths": {
+    "status_json": "status.json"
+  },
+  "rubric_version_used": null,
+  "last_user_input_ts_consumed": null,
+  "last_transition": {
+    "consume_attempt": true,
+    "reason_key": "PAUSED_CODER_FAILED",
+    "triggered_at": "2026-02-27T20:38:42Z"
+  }
+}

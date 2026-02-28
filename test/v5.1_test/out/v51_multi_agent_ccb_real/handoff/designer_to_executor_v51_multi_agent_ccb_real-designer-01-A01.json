@@ -1,0 +1,10 @@
+{
+  "task_id": "v51_multi_agent_ccb_real",
+  "from_role": "designer",
+  "from_session_id": "v51_multi_agent_ccb_real-designer-01-A01",
+  "to_role": "executor",
+  "to_session_id": "v51_multi_agent_ccb_real-executor-02-A02",
+  "commit_sha": "71af3e2595a6dab6ef13ef521474163f9680313c",
+  "launch_mode": "ccb",
+  "ts": "2026-02-27T20:27:19Z"
+}

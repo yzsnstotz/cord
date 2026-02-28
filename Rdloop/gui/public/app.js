@@ -8,6 +8,7 @@
 
 let currentTaskId = null;
 let currentAttempt = null;
+let promptCenterSelectedTarget = '';
 
 // B1-1: activeTab persisted in sessionStorage
 let activeTab = sessionStorage.getItem('rdloop_activeTab') || 'coordinator';
@@ -55,6 +56,97 @@ const TAB_LOG_MAP = {
   judge: 'judge.log'
 };
 
+const TEMPLATES = {
+  hello_world: {
+    schema_version: 'v1',
+    task_id: 'my_task',
+    task_type: 'solo',
+    launch_mode: 'bridge',
+    launch_mode_locked: false,
+    repo_path: 'dummy_repo',
+    base_ref: 'main',
+    goal: 'Describe what the task should achieve',
+    acceptance: 'Describe acceptance criteria',
+    test_cmd: 'true',
+    max_attempts: 3,
+    coder: 'mock',
+    judge: 'mock',
+    constraints: [],
+    created_at: '',
+    target_type: 'external_repo',
+    allowed_paths: [],
+    forbidden_globs: ['**/.env', '**/secrets*', '**/*.pem'],
+    coder_timeout_seconds: 600,
+    judge_timeout_seconds: 300,
+    test_timeout_seconds: 300
+  },
+  requirements_doc: {
+    schema_version: 'v1',
+    task_id: 'req_doc_task',
+    task_type: 'solo',
+    launch_mode: 'bridge',
+    launch_mode_locked: false,
+    repo_path: 'dummy_repo',
+    base_ref: 'main',
+    goal: 'Write a product requirements document',
+    acceptance: 'All dimensions score above threshold',
+    test_cmd: 'true',
+    max_attempts: 3,
+    coder: 'mock',
+    judge: 'mock',
+    scoring_mode: 'rubric_analytic',
+    constraints: [],
+    created_at: '',
+    target_type: 'external_repo',
+    allowed_paths: [],
+    forbidden_globs: ['**/.env']
+  },
+  engineering_impl: {
+    schema_version: 'v1',
+    task_id: 'eng_impl_task',
+    task_type: 'solo',
+    launch_mode: 'bridge',
+    launch_mode_locked: false,
+    repo_path: 'dummy_repo',
+    base_ref: 'main',
+    goal: 'Implement the feature described in the requirements',
+    acceptance: 'Tests pass, code review score above threshold',
+    test_cmd: './run_tests.sh',
+    max_attempts: 5,
+    coder: 'mock',
+    judge: 'mock',
+    scoring_mode: 'rubric_analytic',
+    constraints: [],
+    created_at: '',
+    target_type: 'external_repo',
+    allowed_paths: [],
+    forbidden_globs: ['**/.env', '**/secrets*']
+  }
+};
+
+function renderTemplates() {
+  const list = document.getElementById('template-list');
+  if (!list) return;
+  list.innerHTML = Object.entries(TEMPLATES).map(([id, tpl]) => `
+    <div class="task-item" onclick="openNewSpecModalWithTemplate('${id}')">
+      <div class="task-id">${escapeHtml(id)}</div>
+      <div class="task-meta">
+        <span class="task-state-tag">${escapeHtml(tpl.task_type)}</span>
+        <span style="font-size:11px;color:#8b949e">Template</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function openNewSpecModalWithTemplate(templateId) {
+  await openNewSpecModal();
+  const templateSelect = document.getElementById('modal-template');
+  if (templateSelect) {
+    templateSelect.value = templateId;
+    applyTemplate();
+  }
+}
+
 // ================================================================
 // E2: C0-1: XSS prevention — escapeHtml applied to ALL dynamic content
 // ================================================================
@@ -86,6 +178,8 @@ function getV51Schema() {
   };
 }
 
+const LEGACY_TASK_FIELDS = ['executor_type', 'workflow_mode', 'session_mode', 'channel_type', 'run_surface', 'execution_mode'];
+
 function mapLegacyExecutorTypeToTaskType(execType) {
   switch (execType) {
     case 'api_call': return 'copywriting';
@@ -114,6 +208,29 @@ function inferLaunchModeFromLegacy(spec) {
   return 'bridge'; // default
 }
 
+function normalizeTaskTypeAlias(taskType) {
+  const t = String(taskType || '').trim().toLowerCase();
+  if (t === 'copywrite') return 'copywriting';
+  return t;
+}
+
+function normalizeProviderFromAny(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (!v) return '';
+  if (v === 'codex' || v === 'codex-cli' || v === 'codex_cli') return 'codex';
+  if (v === 'gemini' || v === 'gemini-cli' || v === 'antigravity' || v === 'antigravity-cli' || v === 'googleantigravity') return 'gemini';
+  if (v === 'claude' || v === 'claude-cli' || v === 'claude_bridge') return 'claude';
+  if (v === 'opencode' || v === 'opencode-cli') return 'opencode';
+  if (v === 'droid' || v === 'droid-cli') return 'droid';
+  return v;
+}
+
+function stripLegacyFields(spec) {
+  const out = { ...(spec || {}) };
+  LEGACY_TASK_FIELDS.forEach((f) => { if (out[f] !== undefined) delete out[f]; });
+  return out;
+}
+
 /** 
  * Returns a normalized v5.1 view of a spec. 
  * If fields missing, attempts to infer from legacy.
@@ -121,6 +238,7 @@ function inferLaunchModeFromLegacy(spec) {
 function normalizeSpecToV51(spec) {
   const out = { ...(spec || {}) };
   const notes = [];
+  out.task_type = normalizeTaskTypeAlias(out.task_type);
   
   if (!out.task_type) {
     const fromExec = mapLegacyExecutorTypeToTaskType(out.executor_type);
@@ -137,14 +255,13 @@ function normalizeSpecToV51(spec) {
   if (out.launch_mode_locked === undefined) {
     out.launch_mode_locked = false;
   }
-  
-  return { spec: out, notes };
+
+  return { spec: stripLegacyFields(out), notes };
 }
 
 function isLegacyTask(spec) {
   if (!spec) return false;
-  const legacyFields = ['executor_type', 'workflow_mode', 'session_mode', 'channel_type', 'run_surface', 'execution_mode'];
-  return legacyFields.some(f => spec[f] !== undefined);
+  return LEGACY_TASK_FIELDS.some(f => spec[f] !== undefined);
 }
 
 // Badge helper (state display only — no user content)
@@ -218,6 +335,13 @@ function normalizeRoleProvider(provider) {
   return p;
 }
 
+function resolveSettingsDefaultProvider(defaultCoder, defaultCoderModel, fallback) {
+  const coderNorm = normalizeProviderFromAny(defaultCoder || '');
+  const modelNorm = normalizeProviderFromAny(defaultCoderModel || '');
+  if (coderNorm === 'ccb') return modelNorm || fallback;
+  return coderNorm || fallback;
+}
+
 async function openSettingsPanel() {
   const old = document.getElementById('settings-modal');
   if (old) old.remove();
@@ -242,9 +366,10 @@ async function openSettingsPanel() {
   settingsConfigSnapshot = { ...cfg };
   const agentRoot = (cfg.agent_root && cfg.agent_root.length) ? cfg.agent_root : '';
   const ccbPath = (cfg.ccb_path && cfg.ccb_path.length) ? cfg.ccb_path : '';
-  const defaultRunSurface = cfg.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
-  const coderSel = buildAdapterSelector('settings-coder', cfg.default_coder || '', cfg.default_coder_model || '');
-  const judgeSel = buildAdapterSelector('settings-judge', cfg.default_judge || '', cfg.default_judge_model || '');
+  const defaultLaunchMode = cfg.default_run_surface === 'visual_ccb' ? 'ccb' : 'bridge';
+  const defaultCoderProvider = resolveSettingsDefaultProvider(cfg.default_coder, cfg.default_coder_model, 'codex');
+  const defaultJudgeProvider = resolveSettingsDefaultProvider(cfg.default_judge, cfg.default_judge_model, 'gemini');
+  const settingsProviderOptions = ALLOWED_ROLE_PROVIDERS.map((p) => `<option value="${escapeHtml(p)}">${escapeHtml(providerDisplayName(p))}</option>`).join('');
 
   const rolesHtml = Array.isArray(roles) && roles.length
     ? roles.map(r => {
@@ -280,10 +405,10 @@ async function openSettingsPanel() {
         </div>
 
         <div style="margin-bottom:12px">
-          <label class="form-label">Default run surface (used only when "Use default" is checked at Run)</label>
-          <select id="settings-run-surface" class="form-select" style="width:auto;margin-top:6px">
-            <option value="bridge" ${defaultRunSurface === 'bridge' ? 'selected' : ''}>Non-visible (bridge / solo_bridge)</option>
-            <option value="visual_ccb" ${defaultRunSurface === 'visual_ccb' ? 'selected' : ''}>Visible (CCB session)</option>
+          <label class="form-label">Default launch mode (used when "Use default" is enabled at Run)</label>
+          <select id="settings-default-launch-mode" class="form-select" style="width:auto;margin-top:6px">
+            <option value="bridge" ${defaultLaunchMode === 'bridge' ? 'selected' : ''}>bridge (non-visible)</option>
+            <option value="ccb" ${defaultLaunchMode === 'ccb' ? 'selected' : ''}>ccb (visible CCB session)</option>
           </select>
         </div>
 
@@ -312,21 +437,18 @@ async function openSettingsPanel() {
           <span id="settings-roles-msg" style="margin-left:8px;font-size:12px;color:#3fb950"></span>
         </div>
 
-        <div style="margin-bottom:12px">
-          <label class="form-label">Execution channel (v3.3)</label>
-          <select id="adapter-settings-channel-type" class="form-select" style="width:auto;margin-bottom:6px" onchange="onSettingsChannelChange()">
-            ${CHANNEL_TYPES.map(c => `<option value="${escapeHtml(c.value)}" ${c.value === (inferChannelFromAdapter(cfg.default_coder)) ? 'selected' : ''}>${escapeHtml(c.label)} — ${escapeHtml(c.tag)}</option>`).join('')}
-          </select>
-        </div>
-
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
           <div>
-            <label class="form-label">Default Coder</label>
-            <div id="settings-coder-wrap">${buildAdapterSelector('settings-coder', cfg.default_coder || '', cfg.default_coder_model || '', inferChannelFromAdapter(cfg.default_coder))}</div>
+            <label class="form-label">Default Coder Provider</label>
+            <select id="adapter-settings-coder" class="form-select">
+              ${settingsProviderOptions}
+            </select>
           </div>
           <div>
-            <label class="form-label">Default Judge</label>
-            <div id="settings-judge-wrap">${buildAdapterSelector('settings-judge', cfg.default_judge || '', cfg.default_judge_model || '', inferChannelFromAdapter(cfg.default_judge))}</div>
+            <label class="form-label">Default Judge Provider</label>
+            <select id="adapter-settings-judge" class="form-select">
+              ${settingsProviderOptions}
+            </select>
           </div>
         </div>
 
@@ -344,8 +466,10 @@ async function openSettingsPanel() {
   if (agentRootEl) {
     agentRootEl.addEventListener('blur', validateSettingsAgentRoot);
   }
-  refreshModelSelector('settings-coder').catch(() => {});
-  refreshModelSelector('settings-judge').catch(() => {});
+  const coderSelect = document.getElementById('adapter-settings-coder');
+  const judgeSelect = document.getElementById('adapter-settings-judge');
+  if (coderSelect) coderSelect.value = defaultCoderProvider;
+  if (judgeSelect) judgeSelect.value = defaultJudgeProvider;
 }
 
 async function submitAgentRoles() {
@@ -459,40 +583,34 @@ async function submitSettings() {
     if (agentRootEl) agentRootEl.value = s.agent_root || '';
     const ccbPathEl = document.getElementById('settings-ccb-path');
     if (ccbPathEl) ccbPathEl.value = s.ccb_path || '';
-    const runSurfaceEl = document.getElementById('settings-run-surface');
-    if (runSurfaceEl) runSurfaceEl.value = s.default_run_surface === 'visual_ccb' ? 'visual_ccb' : 'bridge';
-    const ch = inferChannelFromAdapter(s.default_coder);
-    const channelEl = document.getElementById('adapter-settings-channel-type');
-    if (channelEl) channelEl.value = ch;
-    const coderWrap = document.getElementById('settings-coder-wrap');
-    const judgeWrap = document.getElementById('settings-judge-wrap');
-    if (coderWrap) coderWrap.innerHTML = buildAdapterSelector('settings-coder', s.default_coder || '', s.default_coder_model || '', ch);
-    if (judgeWrap) judgeWrap.innerHTML = buildAdapterSelector('settings-judge', s.default_judge || '', s.default_judge_model || '', ch);
+    const launchModeEl = document.getElementById('settings-default-launch-mode');
+    if (launchModeEl) launchModeEl.value = s.default_run_surface === 'visual_ccb' ? 'ccb' : 'bridge';
+    const coderSel = document.getElementById('adapter-settings-coder');
+    const judgeSel = document.getElementById('adapter-settings-judge');
+    if (coderSel) coderSel.value = resolveSettingsDefaultProvider(s.default_coder, s.default_coder_model, 'codex');
+    if (judgeSel) judgeSel.value = resolveSettingsDefaultProvider(s.default_judge, s.default_judge_model, 'gemini');
     const weztermCb = document.getElementById('settings-use-wezterm-for-all');
     if (weztermCb) weztermCb.checked = s.use_wezterm_for_all === true;
-    refreshModelSelector('settings-coder').catch(() => {});
-    refreshModelSelector('settings-judge').catch(() => {});
   }
 
   const agentRoot = (document.getElementById('settings-agent-root')?.value ?? '').trim();
   const ccbPath = (document.getElementById('settings-ccb-path')?.value ?? '').trim();
-  const default_run_surface = document.getElementById('settings-run-surface')?.value || 'bridge';
-  const default_coder = document.getElementById('adapter-settings-coder')?.value ?? null;
-  const default_judge = document.getElementById('adapter-settings-judge')?.value ?? null;
-  const default_coder_model = document.getElementById('adapter-settings-coder-model')?.value?.trim() || null;
-  const default_judge_model = document.getElementById('adapter-settings-judge-model')?.value?.trim() || null;
-  const channelType = document.getElementById('adapter-settings-channel-type')?.value || 'coding-agent-cli';
+  const selectedLaunchMode = document.getElementById('settings-default-launch-mode')?.value || 'bridge';
+  const default_run_surface = selectedLaunchMode === 'ccb' ? 'visual_ccb' : 'bridge';
+  const default_coder = normalizeProviderFromAny(document.getElementById('adapter-settings-coder')?.value ?? '');
+  const default_judge = normalizeProviderFromAny(document.getElementById('adapter-settings-judge')?.value ?? '');
+  const snapshot = settingsConfigSnapshot || {};
+  const default_coder_model = normalizeProviderFromAny(snapshot.default_coder || '') === default_coder
+    ? (snapshot.default_coder_model || null)
+    : null;
+  const default_judge_model = normalizeProviderFromAny(snapshot.default_judge || '') === default_judge
+    ? (snapshot.default_judge_model || null)
+    : null;
   const use_wezterm_for_all = document.getElementById('settings-use-wezterm-for-all')?.checked === true;
-  let payloadCoder = default_coder || null;
-  let payloadJudge = default_judge || null;
-  let payloadCoderModel = default_coder_model || null;
-  let payloadJudgeModel = default_judge_model || null;
-  if (channelType === 'ccb') {
-    payloadCoder = 'ccb';
-    payloadJudge = 'ccb';
-    payloadCoderModel = default_coder || 'codex';
-    payloadJudgeModel = default_judge || 'codex';
-  }
+  const payloadCoder = default_coder || null;
+  const payloadJudge = default_judge || null;
+  const payloadCoderModel = default_coder_model;
+  const payloadJudgeModel = default_judge_model;
   const payload = {
     agent_root: agentRoot || '',
     ccb_path: ccbPath || '',
@@ -567,14 +685,23 @@ function dismissCcbBanner() {
 
 function switchView(view) {
   const isTasks = view === 'tasks';
+  const isPrompts = view === 'prompts';
   const isCcb = view === 'ccb';
   const isSimulator = view === 'simulator';
   document.getElementById('content').style.display = isTasks ? 'block' : 'none';
+  document.getElementById('prompts-panel').style.display = isPrompts ? 'block' : 'none';
   document.getElementById('ccb-panel').style.display = isCcb ? 'block' : 'none';
   document.getElementById('simulator-panel').style.display = isSimulator ? 'block' : 'none';
   document.getElementById('nav-tasks').classList.toggle('active', isTasks);
+  document.getElementById('nav-prompts').classList.toggle('active', isPrompts);
   document.getElementById('nav-ccb').classList.toggle('active', isCcb);
   document.getElementById('nav-simulator').classList.toggle('active', isSimulator);
+  if (isPrompts) {
+    renderPromptCenterPanel();
+    stopCcbPanelPolling();
+    stopSimulatorPanelPolling();
+    return;
+  }
   if (isCcb) {
     renderCcbPanel();
     startCcbPanelPolling();
@@ -2278,13 +2405,13 @@ const CHANNEL_TYPES = [
   { value: 'cliapi-proxy', label: 'CLIProxyAPI', tag: '文本补全' },
   { value: 'ccb', label: 'CCB', tag: '需启动 CCB session' }
 ];
-const AGENT_CLI_OPTIONS = ['claude-cli', 'codex-cli', 'cursor-cli'];
+const AGENT_CLI_OPTIONS = ['codex', 'gemini', 'claude', 'opencode', 'droid'];
 const CCB_PROVIDER_OPTIONS = ['codex', 'gemini'];
 
 function inferChannelFromAdapter(adapterName) {
   if (!adapterName) return 'coding-agent-cli';
   if (adapterName === 'ccb') return 'ccb';
-  if (AGENT_CLI_OPTIONS.includes(adapterName)) return 'coding-agent-cli';
+  if (AGENT_CLI_OPTIONS.includes(adapterName) || ['codex-cli', 'claude-cli', 'cursor-cli', 'antigravity-cli'].includes(String(adapterName || '').toLowerCase())) return 'coding-agent-cli';
   return 'cliapi-proxy';
 }
 
@@ -2314,7 +2441,7 @@ function buildAdapterSelectorOnly(role, selectedName) {
 // Cliapi: provider + optional model (second-level) selector. selectedModel = model id or ''
 // v3.3 P14: When channelType is coding-agent-cli, only show CLI options (no model). When ccb, show provider dropdown (codex/gemini); store coder=ccb, coder_model=provider.
 function buildAdapterSelector(role, selectedProvider, selectedModel, channelTypeOptional) {
-  const channel = channelTypeOptional != null ? channelTypeOptional : (document.getElementById('adapter-channel-type') || document.getElementById('adapter-settings-channel-type'))?.value || 'coding-agent-cli';
+  const channel = channelTypeOptional != null ? channelTypeOptional : (document.getElementById('adapter-channel-type')?.value || 'coding-agent-cli');
   if (channel === 'ccb') {
     const selCodex = (selectedProvider === 'ccb' && selectedModel === 'codex') || selectedProvider === 'codex' ? 'selected' : '';
     const selGemini = (selectedProvider === 'ccb' && selectedModel === 'gemini') || selectedProvider === 'gemini' ? 'selected' : '';
@@ -2329,9 +2456,10 @@ function buildAdapterSelector(role, selectedProvider, selectedModel, channelType
     </div>`;
   }
   if (channel === 'coding-agent-cli') {
+    const selectedNorm = normalizeProviderFromAny(selectedProvider || '');
     const options = AGENT_CLI_OPTIONS.map(name => {
-      const sel = name === (selectedProvider || '') ? 'selected' : '';
-      return `<option value="${escapeHtml(name)}" ${sel}>${escapeHtml(name)}</option>`;
+      const sel = name === selectedNorm ? 'selected' : '';
+      return `<option value="${escapeHtml(name)}" ${sel}>${escapeHtml(providerDisplayName(name))}</option>`;
     }).join('');
     return `
     <div class="adapter-row-${role}" style="display:flex;flex-direction:column;gap:6px">
@@ -2977,17 +3105,6 @@ function syncJsonToForm() {
   } catch (_) { /* invalid JSON, ignore */ }
 }
 
-function onSettingsChannelChange() {
-  const channel = document.getElementById('adapter-settings-channel-type')?.value || 'coding-agent-cli';
-  const coderWrap = document.getElementById('settings-coder-wrap');
-  const judgeWrap = document.getElementById('settings-judge-wrap');
-  const cfg = settingsConfigSnapshot || {};
-  if (coderWrap) coderWrap.innerHTML = buildAdapterSelector('settings-coder', cfg.default_coder || '', cfg.default_coder_model || '', channel);
-  if (judgeWrap) judgeWrap.innerHTML = buildAdapterSelector('settings-judge', cfg.default_judge || '', cfg.default_judge_model || '', channel);
-  refreshModelSelector('settings-coder').catch(() => {});
-  refreshModelSelector('settings-judge').catch(() => {});
-}
-
 // A4: Build rubric thresholds UI
 function buildThresholdsUI(taskType, existingThresholds) {
   const rubric = cachedRubric[taskType];
@@ -3214,6 +3331,136 @@ function applyCollabRolesToForm(collabRoles) {
   });
 }
 
+function renderValidationErrors(errEl, errors) {
+  if (!errEl) {
+    errEl = document.getElementById('modal-form-error') || document.getElementById('modal-json-error');
+  }
+  if (!errEl) return;
+  const list = (errors || []).filter(Boolean);
+  if (list.length === 0) {
+    errEl.textContent = '';
+    return;
+  }
+  errEl.innerHTML = `Please fix the following:<br>${list.map(e => `• ${escapeHtml(e)}`).join('<br>')}`;
+  try {
+    errEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch {}
+}
+
+function buildCollabRolesForTaskType(taskType, fallbackSpec) {
+  const t = normalizeTaskTypeAlias(taskType);
+  const fromSpec = normalizeCollabRolesMap((fallbackSpec && fallbackSpec.collab_roles) || {});
+  if (t === 'copywriting') {
+    const execUi = normalizeProviderFromAny(document.getElementById('adapter-coder')?.value || fromSpec.executor || '');
+    const revUi = normalizeProviderFromAny(document.getElementById('adapter-judge')?.value || fromSpec.reviewer || '');
+    return {
+      executor: execUi || 'codex',
+      reviewer: revUi || 'gemini'
+    };
+  }
+  if (t === 'solo') {
+    const p = normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || fromSpec.pm || fromSpec.executor || 'codex') || 'codex';
+    return { pm: p, designer: p, executor: p, reviewer: p };
+  }
+  if (t === 'multi_agent') {
+    const ui = collectCollabRolesFromForm() || {};
+    const merged = { ...fromSpec, ...ui };
+    return {
+      pm: normalizeProviderFromAny(merged.pm || ''),
+      designer: normalizeProviderFromAny(merged.designer || ''),
+      executor: normalizeProviderFromAny(merged.executor || ''),
+      reviewer: normalizeProviderFromAny(merged.reviewer || '')
+    };
+  }
+  return fromSpec;
+}
+
+function normalizeToV51SavePayload(rawSpec, taskId) {
+  const { spec: normalized } = normalizeSpecToV51(rawSpec || {});
+  const out = stripLegacyFields({ ...normalized });
+  out.task_id = taskId;
+
+  const uiTaskType = normalizeTaskTypeAlias(document.getElementById('modal-task-type')?.value || out.task_type);
+  if (uiTaskType) out.task_type = uiTaskType;
+  // Launch mode is chosen at run time, not in New/Edit forms.
+  out.launch_mode = 'bridge';
+  out.launch_mode_locked = false;
+
+  // Keep provider terminology consistent in v5.1 payload.
+  if (out.coder !== undefined) delete out.coder;
+  if (out.judge !== undefined) delete out.judge;
+  if (out.coder_model !== undefined) delete out.coder_model;
+  if (out.judge_model !== undefined) delete out.judge_model;
+  if (out.channel_type !== undefined) delete out.channel_type;
+
+  // Normalize common fields from the visible form inputs.
+  const rp = (document.getElementById('modal-repo-path')?.value || out.repo_path || '').trim();
+  if (rp) out.repo_path = rp;
+  const br = (document.getElementById('modal-base-ref')?.value || out.base_ref || 'main').trim();
+  if (br) out.base_ref = br;
+  const goal = (document.getElementById('modal-instruction')?.value || out.goal || '').trim();
+  const soloGoal = (document.getElementById('modal-solo-executor-instruction')?.value || out.executor_instruction || '').trim();
+  out.goal = goal || soloGoal || '';
+  if (soloGoal) out.executor_instruction = soloGoal;
+
+  const testCmd = (document.getElementById('modal-test-cmd')?.value || out.test_cmd || 'true').trim();
+  out.test_cmd = testCmd || 'true';
+  const ma = parseInt(document.getElementById('modal-max-attempts')?.value || out.max_attempts || '3', 10);
+  out.max_attempts = Number.isFinite(ma) ? Math.min(50, Math.max(1, ma)) : 3;
+
+  const acceptanceVal = (document.getElementById('modal-acceptance')?.value || '').trim();
+  if (acceptanceVal) out.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
+
+  const coderTimeoutVal = parseInt(document.getElementById('modal-coder-timeout')?.value || out.coder_timeout_seconds || '600', 10);
+  const judgeTimeoutVal = parseInt(document.getElementById('modal-judge-timeout')?.value || out.judge_timeout_seconds || '300', 10);
+  if (Number.isFinite(coderTimeoutVal)) out.coder_timeout_seconds = Math.min(3600, Math.max(60, coderTimeoutVal));
+  if (Number.isFinite(judgeTimeoutVal)) out.judge_timeout_seconds = Math.min(3600, Math.max(60, judgeTimeoutVal));
+
+  const roles = buildCollabRolesForTaskType(out.task_type, out);
+  if (roles && Object.keys(roles).length > 0) out.collab_roles = roles;
+
+  const soloProvider = normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || out.agent_config?.provider || '');
+  out.agent_config = {
+    ...(out.agent_config || {}),
+    provider: soloProvider || normalizeProviderFromAny(out.collab_roles?.executor || '') || 'codex',
+    max_attempts: out.agent_config?.max_attempts || out.max_attempts || 3,
+    auto_pass_threshold: out.agent_config?.auto_pass_threshold || 0.85,
+    knowledge_shards: Array.isArray(out.agent_config?.knowledge_shards) ? out.agent_config.knowledge_shards : getSelectedKnowledgeShards()
+  };
+  return out;
+}
+
+function validateV51SpecForSave(spec) {
+  const errors = [];
+  const s = spec || {};
+  const { task_types, launch_modes } = getV51Schema();
+  if (!s.task_id || !/^[A-Za-z0-9_-]+$/.test(String(s.task_id))) errors.push('Task ID is required and must use letters/numbers/_/-.');
+  if (!s.task_type || !task_types.includes(s.task_type)) errors.push(`Task Type is required (${task_types.join(', ')}).`);
+  if (!s.launch_mode || !launch_modes.includes(s.launch_mode)) errors.push(`Launch Mode is required (${launch_modes.join(', ')}).`);
+  if (typeof s.launch_mode_locked !== 'boolean') errors.push('Launch Mode Locked must be true/false.');
+  if (!String(s.goal || '').trim()) errors.push('Instruction / Goal is required.');
+  if (!String(s.test_cmd || '').trim()) errors.push('test_cmd is required.');
+  if (!Number.isInteger(Number(s.max_attempts)) || Number(s.max_attempts) < 1 || Number(s.max_attempts) > 50) errors.push('max_attempts must be an integer between 1 and 50.');
+
+  const roles = s.collab_roles || {};
+  if (s.task_type === 'copywriting') {
+    if (!roles.executor || !roles.reviewer) errors.push('Copywriting requires Executor and Reviewer providers.');
+  }
+  if (s.task_type === 'solo') {
+    const required = ['pm', 'designer', 'executor', 'reviewer'];
+    const vals = required.map(k => normalizeProviderFromAny(roles[k] || '')).filter(Boolean);
+    if (vals.length !== required.length) errors.push('Solo requires PM/Designer/Executor/Reviewer providers.');
+    if (new Set(vals).size > 1) errors.push('Solo requires one same provider for all roles.');
+  }
+  if (s.task_type === 'multi_agent') {
+    const required = ['pm', 'designer', 'executor', 'reviewer'];
+    required.forEach((k) => {
+      if (!normalizeProviderFromAny(roles[k] || '')) errors.push(`Multi-agent requires collab_roles.${k}.`);
+    });
+  }
+  return errors;
+}
+
 // A2-1: Open "New Task" modal (A6: apply saved default adapters when no template selected)
 async function openNewSpecModal() {
   await loadAdapters();
@@ -3238,77 +3485,10 @@ async function openNewSpecModal() {
   const COLLAB_PROVIDERS = ['claude', 'codex', 'gemini', 'opencode', 'droid'];
   const COLLAB_ROLES = COLLAB_ROLE_KEYS.map(key => ({
     key,
-    label: COLLAB_ROLE_LABELS[key],
     provider: collabRoleDefaults[key] || DEFAULT_COLLAB_ROLE_PROVIDERS[key]
   }));
 
-  const TEMPLATES = {
-    hello_world: {
-      schema_version: 'v1',
-      task_id: 'my_task',
-      task_type: 'solo',
-      launch_mode: 'bridge',
-      launch_mode_locked: false,
-      repo_path: 'dummy_repo',
-      base_ref: 'main',
-      goal: 'Describe what the task should achieve',
-      acceptance: 'Describe acceptance criteria',
-      test_cmd: 'true',
-      max_attempts: 3,
-      coder: 'mock',
-      judge: 'mock',
-      constraints: [],
-      created_at: '',
-      target_type: 'external_repo',
-      allowed_paths: [],
-      forbidden_globs: ['**/.env', '**/secrets*', '**/*.pem'],
-      coder_timeout_seconds: 600,
-      judge_timeout_seconds: 300,
-      test_timeout_seconds: 300
-    },
-    requirements_doc: {
-      schema_version: 'v1',
-      task_id: 'req_doc_task',
-      task_type: 'solo',
-      launch_mode: 'bridge',
-      launch_mode_locked: false,
-      repo_path: 'dummy_repo',
-      base_ref: 'main',
-      goal: 'Write a product requirements document',
-      acceptance: 'All dimensions score above threshold',
-      test_cmd: 'true',
-      max_attempts: 3,
-      coder: 'mock',
-      judge: 'mock',
-      scoring_mode: 'rubric_analytic',
-      constraints: [],
-      created_at: '',
-      target_type: 'external_repo',
-      allowed_paths: [],
-      forbidden_globs: ['**/.env']
-    },
-    engineering_impl: {
-      schema_version: 'v1',
-      task_id: 'eng_impl_task',
-      task_type: 'solo',
-      launch_mode: 'bridge',
-      launch_mode_locked: false,
-      repo_path: 'dummy_repo',
-      base_ref: 'main',
-      goal: 'Implement the feature described in the requirements',
-      acceptance: 'Tests pass, code review score above threshold',
-      test_cmd: './run_tests.sh',
-      max_attempts: 5,
-      coder: 'mock',
-      judge: 'mock',
-      scoring_mode: 'rubric_analytic',
-      constraints: [],
-      created_at: '',
-      target_type: 'external_repo',
-      allowed_paths: [],
-      forbidden_globs: ['**/.env', '**/secrets*']
-    }
-  };
+  window._specTemplates = TEMPLATES;
 
   const modalHtml = `
     <div id="spec-modal" class="modal-overlay" onclick="if(event.target===this)closeModal()">
@@ -3321,7 +3501,7 @@ async function openNewSpecModal() {
           <div id="migration-preview" style="font-size:11px; margin-top:8px; opacity:0.8; font-family:monospace"></div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
+        <div style="display:grid; grid-template-columns: 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
           <div>
             <label class="form-label">Task Type (v5.1)</label>
             <select id="modal-task-type" class="form-select" onchange="syncFormToJson(); onTaskTypeChange()">
@@ -3330,18 +3510,8 @@ async function openNewSpecModal() {
               <option value="multi_agent">multi_agent (collaborative)</option>
             </select>
           </div>
-          <div>
-            <label class="form-label">Launch Mode (v5.1)</label>
-            <select id="modal-launch-mode" class="form-select" onchange="syncFormToJson()">
-              <option value="bridge">bridge (non-visible)</option>
-              <option value="ccb">ccb (visible tmux)</option>
-            </select>
-          </div>
-          <div style="display:flex; align-items:center; padding-top:20px">
-            <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer">
-              <input type="checkbox" id="modal-launch-mode-locked" onchange="syncFormToJson()">
-              <span class="form-label" style="display:inline; margin:0">Mode Locked</span>
-            </label>
+          <div style="font-size:12px;color:#8b949e">
+            Run mode is selected at start time (Run button), not in task editing.
           </div>
         </div>
 
@@ -3372,18 +3542,6 @@ async function openNewSpecModal() {
           <label class="form-label">Task ID</label>
           <input type="text" id="modal-task-id" class="form-input" placeholder="my_new_task"
             pattern="[A-Za-z0-9_-]+" title="Alphanumeric, underscore, hyphen only" oninput="syncFormToJson()">
-        </div>
-
-        <div style="margin-bottom:12px">
-          <label class="form-label">Type</label>
-          <select id="modal-task-type" class="form-select" onchange="onTaskTypeChange(); syncFormToJson()">
-            <option value="">— none —</option>
-            <option value="requirements_doc">requirements_doc</option>
-            <option value="engineering_impl">engineering_impl</option>
-            <option value="douyin_script">douyin_script</option>
-            <option value="storyboard">storyboard</option>
-            <option value="paid_mini_drama">paid_mini_drama</option>
-          </select>
         </div>
 
         <div id="section-attempt-context" style="margin-bottom:12px">
@@ -3585,6 +3743,8 @@ async function openNewSpecModal() {
           </div>
         </details>
 
+        <div id="modal-form-error" style="color:#f85149;font-size:12px;margin:8px 0;min-height:16px"></div>
+
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn" onclick="closeModal()">Cancel</button>
           <button class="btn btn-primary write-action" onclick="saveNewSpec(event)">Save</button>
@@ -3693,268 +3853,45 @@ async function saveNewSpec(e) {
   const btn = e ? e.currentTarget : null;
   const taskId = (document.getElementById('modal-task-id')?.value || '').trim();
   const jsonStr = (document.getElementById('modal-spec-json')?.value || '').trim();
-  const errEl = document.getElementById('modal-json-error');
+  const errEl = document.getElementById('modal-form-error') || document.getElementById('modal-json-error');
   if (errEl) errEl.textContent = '';
-
   if (!taskId || !/^[A-Za-z0-9_-]+$/.test(taskId)) {
-    if (errEl) errEl.textContent = 'Invalid task_id: alphanumeric, underscore, hyphen only';
-    return;
-  }
-  const buildFromForm = !jsonStr || jsonStr.trim() === '';
-  if (buildFromForm) {
-    const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
-    const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-    if (!instruction && !soloExecutorInstruction) {
-      if (errEl) errEl.textContent = 'instruction / goal is required (or solo executor instructions)';
-      return;
-    }
-  }
-
-  // Ensure executor type is captured if it was changed
-  const execTypeEl = document.getElementById('modal-executor-type');
-  if (execTypeEl) _currentExecutorType = execTypeEl.value;
-  const sessionModeEl = document.getElementById('modal-session-mode');
-  if (sessionModeEl) _currentSessionMode = sessionModeEl.value;
-
-  const taskTypeVal = document.getElementById('modal-task-type')?.value;
-  const launchModeVal = document.getElementById('modal-launch-mode')?.value;
-  const { task_types, launch_modes } = getV51Schema();
-
-  if (taskTypeVal && !task_types.includes(taskTypeVal)) {
-    if (errEl) errEl.textContent = 'Invalid task_type. Allowed: ' + task_types.join(', ');
-    return;
-  }
-  if (launchModeVal && !launch_modes.includes(launchModeVal)) {
-    if (errEl) errEl.textContent = 'Invalid launch_mode. Allowed: ' + launch_modes.join(', ');
+    renderValidationErrors(errEl, ['Task ID is required and must use letters/numbers/_/-.']);
     return;
   }
 
   setButtonLoading(btn, true);
   try {
-    // E3: JSON syntax validation
-    let spec;
+    let spec = {};
     if (jsonStr) {
       try {
         spec = JSON.parse(jsonStr);
       } catch (e) {
-        if (errEl) errEl.textContent = 'JSON syntax error: ' + e.message;
-        setButtonLoading(btn, false);
+        renderValidationErrors(errEl, ['JSON syntax error: ' + e.message]);
         return;
       }
-    } else {
-      // Build from form fields
-      const taskType = document.getElementById('modal-task-type')?.value || undefined;
-      const channelType = document.getElementById('adapter-channel-type')?.value || 'coding-agent-cli';
-      let coder = document.getElementById('adapter-coder')?.value || 'mock';
-      let judge = document.getElementById('adapter-judge')?.value || 'mock';
-      let coderModel = document.getElementById('adapter-coder-model')?.value?.trim();
-      let judgeModel = document.getElementById('adapter-judge-model')?.value?.trim();
-      if (channelType === 'ccb') {
-        coder = 'ccb';
-        judge = 'ccb';
-        coderModel = document.getElementById('adapter-coder')?.value || 'codex';
-        judgeModel = document.getElementById('adapter-judge')?.value || 'codex';
-      }
-      const instruction = (document.getElementById('modal-instruction')?.value || '').trim();
-      const soloExecutorInstruction = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-      const goal = instruction || soloExecutorInstruction || '';
-      const acceptanceLines = (document.getElementById('modal-acceptance')?.value || '').split(/\n/).map(s => s.trim()).filter(Boolean);
-      const acceptance = acceptanceLines.length ? acceptanceLines : [];
-      const testCmd = (document.getElementById('modal-test-cmd')?.value || 'true').trim();
-      const maxAttempts = Math.min(10, Math.max(1, parseInt(document.getElementById('modal-max-attempts')?.value || '3', 10) || 3));
-      const apRaw = (document.getElementById('modal-allowed-paths')?.value || '').trim();
-      const allowedPaths = apRaw ? apRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
-      const fgRaw = (document.getElementById('modal-forbidden-globs')?.value || '').trim();
-      const forbiddenGlobs = fgRaw ? fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : ['**/.env', '**/secrets*', '**/*.pem'];
-      const coderTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-coder-timeout')?.value || '600', 10) || 600));
-      const judgeTimeout = Math.min(3600, Math.max(60, parseInt(document.getElementById('modal-judge-timeout')?.value || '300', 10) || 300));
-      const constraintsRaw = (document.getElementById('modal-constraints')?.value || '').trim();
-      const constraints = constraintsRaw ? constraintsRaw.split(/\n/).map(s => s.trim()).filter(Boolean) : [];
-      spec = {
-        schema_version: 'v1',
-        task_id: taskId,
-        task_type: taskType || undefined,
-        execution_mode: 'auto',
-        channel_type: channelType,
-        repo_path: document.getElementById('modal-repo-path')?.value?.trim() || undefined,
-        base_ref: document.getElementById('modal-base-ref')?.value?.trim() || 'main',
-        coder,
-        judge,
-        ...(coderModel ? { coder_model: coderModel } : {}),
-        ...(judgeModel ? { judge_model: judgeModel } : {}),
-        goal: goal || '',
-        acceptance: acceptance,
-        test_cmd: testCmd || 'true',
-        max_attempts: maxAttempts,
-        attempt_context_mode: document.getElementById('modal-attempt-context-mode')?.value || 'fresh_each',
-        constraints: constraints,
-        allowed_paths: allowedPaths,
-        forbidden_globs: forbiddenGlobs,
-        coder_timeout_seconds: coderTimeout,
-        judge_timeout_seconds: judgeTimeout,
-        created_at: new Date().toISOString()
-      };
-      if (soloExecutorInstruction) spec.executor_instruction = soloExecutorInstruction;
-      // A4: read thresholds
-      if (taskType) {
-        const thresholds = readThresholdsFromUI(taskType);
-        if (thresholds) spec.rubric_thresholds = thresholds;
-      }
+    }
+    const payload = normalizeToV51SavePayload(spec, taskId);
+    const formErrors = validateV51SpecForSave(payload);
+    if (formErrors.length > 0) {
+      renderValidationErrors(errEl, formErrors);
+      return;
     }
 
-    // Override task_id, adapter, and model from form controls if JSON was provided
-    spec.task_id = taskId;
-    const channelTypeVal = document.getElementById('adapter-channel-type')?.value;
-    if (channelTypeVal) spec.channel_type = channelTypeVal;
-    let coderVal = document.getElementById('adapter-coder')?.value;
-    let judgeVal = document.getElementById('adapter-judge')?.value;
-    let coderModelVal = document.getElementById('adapter-coder-model')?.value;
-    let judgeModelVal = document.getElementById('adapter-judge-model')?.value;
-    if (channelTypeVal === 'ccb') {
-      spec.coder = 'ccb';
-      spec.judge = 'ccb';
-      spec.coder_model = coderVal || 'codex';
-      spec.judge_model = judgeVal || 'codex';
-    } else {
-      if (coderVal) spec.coder = coderVal;
-      if (judgeVal) spec.judge = judgeVal;
-      if (coderModelVal) spec.coder_model = coderModelVal; else if (spec.coder_model !== undefined) delete spec.coder_model;
-      if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
-    }
-    const taskTypeVal = document.getElementById('modal-task-type')?.value;
-    if (taskTypeVal) spec.task_type = taskTypeVal;
-    const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
-    if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
-    if (_currentExecutorType === 'multi_agent') {
-      const roles = collectCollabRolesFromForm();
-      if (roles) spec.collab_roles = roles;
-    }
-    // Repo & Git from form
-    const rp = document.getElementById('modal-repo-path')?.value?.trim();
-    if (rp !== undefined && rp !== '') spec.repo_path = rp;
-    const br = document.getElementById('modal-base-ref')?.value?.trim();
-    if (br !== undefined && br !== '') spec.base_ref = br;
-    const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
-    if (instructionVal) spec.goal = instructionVal;
-    const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-    if (soloExecutorInstructionVal) spec.executor_instruction = soloExecutorInstructionVal;
-    const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
-    if (acceptanceVal) spec.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
-    const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
-    if (testCmdVal !== undefined && testCmdVal !== '') spec.test_cmd = testCmdVal;
-    const maxAttemptsVal = document.getElementById('modal-max-attempts')?.value;
-    if (maxAttemptsVal !== undefined && maxAttemptsVal !== '') spec.max_attempts = Math.min(10, Math.max(1, parseInt(maxAttemptsVal, 10) || 3));
-    const coderTimeoutVal = document.getElementById('modal-coder-timeout')?.value;
-    if (coderTimeoutVal !== undefined && coderTimeoutVal !== '') spec.coder_timeout_seconds = Math.min(3600, Math.max(60, parseInt(coderTimeoutVal, 10) || 600));
-    const judgeTimeoutVal = document.getElementById('modal-judge-timeout')?.value;
-    if (judgeTimeoutVal !== undefined && judgeTimeoutVal !== '') spec.judge_timeout_seconds = Math.min(3600, Math.max(60, parseInt(judgeTimeoutVal, 10) || 300));
-    const constraintsVal = (document.getElementById('modal-constraints')?.value || '').trim();
-    if (constraintsVal) spec.constraints = constraintsVal.split(/\n/).map(s => s.trim()).filter(Boolean);
-    const apRaw = document.getElementById('modal-allowed-paths')?.value?.trim();
-    if (apRaw) {
-      if (apRaw.startsWith('[')) { try { spec.allowed_paths = JSON.parse(apRaw); } catch {} }
-      else { spec.allowed_paths = apRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
-    }
-    const fgRaw = document.getElementById('modal-forbidden-globs')?.value?.trim();
-    if (fgRaw) {
-      if (fgRaw.startsWith('[')) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
-      else { spec.forbidden_globs = fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
-    }
-    // A4: merge thresholds (api_call only)
-    if (spec.task_type && _currentExecutorType === 'api_call') {
-      const thresholds = readThresholdsFromUI(spec.task_type);
-      if (thresholds) spec.rubric_thresholds = thresholds;
-    }
-
-    // v5.0: executor_type + session_mode (replaces workflow_mode)
-    spec.executor_type = _currentExecutorType;
-    spec.session_mode = _currentSessionMode || document.getElementById('modal-session-mode')?.value || 'fresh';
-    // Legacy compat: keep workflow_mode for backward compat
-    spec.workflow_mode = _currentWorkflowMode;
-    if (_currentExecutorType === 'api_call') {
-      spec.execution_mode = 'auto';
-    } else if (_currentExecutorType === 'solo_agent') {
-      if (spec.run_surface !== undefined) delete spec.run_surface;
-      spec.execution_mode = 'auto';
-      const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-      if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
-      const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
-      spec.coder_model = soloProvider;
-      spec.judge_model = soloProvider;
-      spec.coder = 'solo';
-      spec.judge = 'solo';
-      spec.agent_config = {
-        max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
-        auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
-        knowledge_shards: getSelectedKnowledgeShards(),
-        provider: soloProvider
-      };
-      const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
-      if (testCmdSolo) spec.test_cmd = testCmdSolo;
-    } else if (_currentExecutorType === 'multi_agent') {
-      spec.run_surface = 'visual_ccb';
-      spec.execution_mode = 'semi-auto';
-      spec.coder = 'ccb';
-      spec.judge = 'ccb';
-      const roles = collectCollabRolesFromForm();
-      if (roles) spec.collab_roles = roles;
-    }
-    if (_currentExecutorType !== 'api_call') {
-      if (spec.rubric_thresholds !== undefined) delete spec.rubric_thresholds;
-      if (spec.scoring_mode !== undefined) delete spec.scoring_mode;
-    }
-    if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
-      delete spec.collab_roles;
-    }
-    const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
-    if (knEnabled) {
-      spec.knowledge_enabled = true;
-      const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
-      const rp2 = (document.getElementById('modal-repo-path')?.value || '').trim();
-      spec.knowledge_project_path = kp || normalizeKnowledgePath(rp2);
-      spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
-      spec.agent_config = {
-        ...(spec.agent_config || {}),
-        knowledge_shards: getSelectedKnowledgeShards()
-      };
-    } else {
-      if (spec.knowledge_enabled !== undefined) delete spec.knowledge_enabled;
-      if (spec.knowledge_project_path !== undefined) delete spec.knowledge_project_path;
-      if (spec.knowledge_provider !== undefined) delete spec.knowledge_provider;
-    }
-
-    // v5.1.4: Normalize to new fields (F1)
-    const { spec: v51Spec, notes } = normalizeSpecToV51(spec);
-    
-    // Final overrides from UI
-    v51Spec.task_id = taskId;
-    const uiTaskType = document.getElementById('modal-task-type')?.value;
-    if (uiTaskType) v51Spec.task_type = uiTaskType;
-    
-    const uiLaunchMode = document.getElementById('modal-launch-mode')?.value;
-    if (uiLaunchMode) v51Spec.launch_mode = uiLaunchMode;
-    
-    const uiLaunchModeLocked = document.getElementById('modal-launch-mode-locked')?.checked;
-    if (uiLaunchModeLocked !== undefined) v51Spec.launch_mode_locked = uiLaunchModeLocked;
-
-    const res = await fetch('/api/task_specs', {
+    const res = await fetch('/api/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: taskId, spec: v51Spec })
+      body: JSON.stringify(payload)
     });
     const result = await res.json();
     if (!res.ok) {
-      errEl.textContent = result.error || 'Validation failed';
-      if (Array.isArray(result.errors) && result.errors.length) {
-        errEl.innerHTML = escapeHtml(result.error || 'Validation failed') + '<br>' + result.errors.map(e => '• ' + escapeHtml(e)).join('<br>');
-      }
-      setButtonLoading(btn, false);
+      renderValidationErrors(errEl, (Array.isArray(result.errors) && result.errors.length) ? result.errors : [result.error || 'Validation failed']);
       return;
     }
     closeModal();
     loadTaskSpecs();
   } catch (e) {
-    errEl.textContent = 'Save failed: ' + (e.message || String(e));
+    renderValidationErrors(errEl, ['Save failed: ' + (e.message || String(e))]);
   } finally {
     setButtonLoading(btn, false);
   }
@@ -4017,7 +3954,7 @@ async function openEditSpecModal(taskId) {
           </div>
         </div>
 
-        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
+        <div style="display:grid; grid-template-columns: 1fr; gap:12px; margin-bottom:12px; padding:12px; background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px">
           <div>
             <label class="form-label">Task Type (v5.1)</label>
             <select id="modal-task-type" class="form-select" onchange="syncFormToJson(); onTaskTypeChange()">
@@ -4026,18 +3963,8 @@ async function openEditSpecModal(taskId) {
               <option value="multi_agent" ${nSpec.task_type === 'multi_agent' ? 'selected' : ''}>multi_agent</option>
             </select>
           </div>
-          <div>
-            <label class="form-label">Launch Mode (v5.1)</label>
-            <select id="modal-launch-mode" class="form-select" onchange="syncFormToJson()">
-              <option value="bridge" ${nSpec.launch_mode === 'bridge' ? 'selected' : ''}>bridge</option>
-              <option value="ccb" ${nSpec.launch_mode === 'ccb' ? 'selected' : ''}>ccb</option>
-            </select>
-          </div>
-          <div style="display:flex; align-items:center; padding-top:20px">
-            <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer">
-              <input type="checkbox" id="modal-launch-mode-locked" ${nSpec.launch_mode_locked ? 'checked' : ''} onchange="syncFormToJson()">
-              <span class="form-label" style="display:inline; margin:0">Mode Locked</span>
-            </label>
+          <div style="font-size:12px;color:#8b949e">
+            Run mode is selected at start time (Run button), not in task editing.
           </div>
         </div>
 
@@ -4259,8 +4186,10 @@ async function openEditSpecModal(taskId) {
           </div>
         </details>
 
+        <div id="modal-form-error" style="color:#f85149;font-size:12px;margin:8px 0;min-height:16px"></div>
+
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
-          ${spec.task_type ? `<button class="btn write-action" style="margin-right:auto;font-size:12px" onclick="openPromptForTaskType('${escapeHtml(spec.task_type)}')">Edit judge.prompt.${escapeHtml(spec.task_type)}.md</button>` : ''}
+          ${nSpec.task_type ? `<button class="btn write-action" style="margin-right:auto;font-size:12px" onclick="openPromptForTaskType('${escapeHtml(nSpec.task_type)}')">Edit judge.prompt.${escapeHtml(nSpec.task_type)}.md</button>` : ''}
           <button class="btn" onclick="closeModal()">Cancel</button>
           <button class="btn btn-primary write-action" onclick="saveEditSpec('${escapeHtml(taskId)}')">Save</button>
         </div>
@@ -4288,161 +4217,117 @@ async function openEditSpecModal(taskId) {
 
 // A2-5: Save edited spec
 async function saveEditSpec(taskId) {
-  const jsonStr = (document.getElementById('modal-spec-json').value || '').trim();
-  const errEl = document.getElementById('modal-json-error');
-  errEl.textContent = '';
+  const btn = document.querySelector('#spec-modal .btn.btn-primary.write-action');
+  const jsonStr = (document.getElementById('modal-spec-json')?.value || '').trim();
+  const errEl = document.getElementById('modal-form-error') || document.getElementById('modal-json-error');
+  if (errEl) errEl.textContent = '';
 
-  // E3: JSON syntax validation
-  let spec;
-  try {
-    spec = JSON.parse(jsonStr);
-  } catch (e) {
-    errEl.textContent = 'JSON syntax error: ' + e.message;
-    return;
+  let spec = {};
+  if (jsonStr) {
+    try {
+      spec = JSON.parse(jsonStr);
+    } catch (e) {
+      renderValidationErrors(errEl, ['JSON syntax error: ' + e.message]);
+      return;
+    }
   }
 
-  // Override fields from form controls (adapter + model same as saveNewSpec)
-  const channelTypeVal = document.getElementById('adapter-channel-type')?.value;
-  if (channelTypeVal) spec.channel_type = channelTypeVal;
-  let coderVal = document.getElementById('adapter-coder')?.value;
-  let judgeVal = document.getElementById('adapter-judge')?.value;
-  let coderModelVal = document.getElementById('adapter-coder-model')?.value;
-  let judgeModelVal = document.getElementById('adapter-judge-model')?.value;
-  if (channelTypeVal === 'ccb') {
-    spec.coder = 'ccb';
-    spec.judge = 'ccb';
-    spec.coder_model = coderVal || 'codex';
-    spec.judge_model = judgeVal || 'codex';
-  } else {
-    if (coderVal) spec.coder = coderVal;
-    if (judgeVal) spec.judge = judgeVal;
-    if (coderModelVal) spec.coder_model = coderModelVal; else if (spec.coder_model !== undefined) delete spec.coder_model;
-    if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
-  }
-  const taskTypeVal = document.getElementById('modal-task-type')?.value;
-  if (taskTypeVal) spec.task_type = taskTypeVal;
+  const payload = normalizeToV51SavePayload(spec, taskId);
   const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
-  if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
-  if (_currentExecutorType === 'multi_agent') {
-    const roles = collectCollabRolesFromForm();
-    if (roles) spec.collab_roles = roles;
-  } else if (spec.collab_roles !== undefined) delete spec.collab_roles;
-  spec.task_id = taskId;
-
-  // Repo & Git and structured fields from form
-  const rp = document.getElementById('modal-repo-path')?.value?.trim();
-  if (rp !== undefined && rp !== '') spec.repo_path = rp;
-  const br = document.getElementById('modal-base-ref')?.value?.trim();
-  if (br !== undefined && br !== '') spec.base_ref = br;
+  if (attemptContextModeVal) payload.attempt_context_mode = attemptContextModeVal;
   const instructionVal = (document.getElementById('modal-instruction')?.value || '').trim();
-  if (instructionVal) spec.goal = instructionVal;
   const soloExecutorInstructionVal = (document.getElementById('modal-solo-executor-instruction')?.value || '').trim();
-  if (soloExecutorInstructionVal) spec.executor_instruction = soloExecutorInstructionVal;
-  else if (spec.executor_instruction !== undefined) delete spec.executor_instruction;
+  if (instructionVal) payload.goal = instructionVal;
+  if (soloExecutorInstructionVal) payload.executor_instruction = soloExecutorInstructionVal;
+  else if (payload.executor_instruction !== undefined) delete payload.executor_instruction;
   const acceptanceVal = document.getElementById('modal-acceptance')?.value?.trim();
-  if (acceptanceVal) spec.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
+  if (acceptanceVal) payload.acceptance = acceptanceVal.split(/\n/).map(s => s.trim()).filter(Boolean);
   const testCmdVal = document.getElementById('modal-test-cmd')?.value?.trim();
-  if (testCmdVal !== undefined && testCmdVal !== '') spec.test_cmd = testCmdVal;
+  if (testCmdVal !== undefined && testCmdVal !== '') payload.test_cmd = testCmdVal;
   const maxAttemptsVal = document.getElementById('modal-max-attempts')?.value;
-  if (maxAttemptsVal !== undefined && maxAttemptsVal !== '') spec.max_attempts = Math.min(10, Math.max(1, parseInt(maxAttemptsVal, 10) || 3));
+  if (maxAttemptsVal !== undefined && maxAttemptsVal !== '') payload.max_attempts = Math.min(50, Math.max(1, parseInt(maxAttemptsVal, 10) || 3));
   const coderTimeoutVal = document.getElementById('modal-coder-timeout')?.value;
-  if (coderTimeoutVal !== undefined && coderTimeoutVal !== '') spec.coder_timeout_seconds = Math.min(3600, Math.max(60, parseInt(coderTimeoutVal, 10) || 600));
+  if (coderTimeoutVal !== undefined && coderTimeoutVal !== '') payload.coder_timeout_seconds = Math.min(3600, Math.max(60, parseInt(coderTimeoutVal, 10) || 600));
   const judgeTimeoutVal = document.getElementById('modal-judge-timeout')?.value;
-  if (judgeTimeoutVal !== undefined && judgeTimeoutVal !== '') spec.judge_timeout_seconds = Math.min(3600, Math.max(60, parseInt(judgeTimeoutVal, 10) || 300));
+  if (judgeTimeoutVal !== undefined && judgeTimeoutVal !== '') payload.judge_timeout_seconds = Math.min(3600, Math.max(60, parseInt(judgeTimeoutVal, 10) || 300));
   const constraintsVal = (document.getElementById('modal-constraints')?.value || '').trim();
-  if (constraintsVal) spec.constraints = constraintsVal.split(/\n/).map(s => s.trim()).filter(Boolean);
+  if (constraintsVal) payload.constraints = constraintsVal.split(/\n/).map(s => s.trim()).filter(Boolean);
+  else if (payload.constraints !== undefined) delete payload.constraints;
   const apRaw = document.getElementById('modal-allowed-paths')?.value?.trim();
   if (apRaw) {
-    if (apRaw.startsWith('[')) { try { spec.allowed_paths = JSON.parse(apRaw); } catch {} }
-    else { spec.allowed_paths = apRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
+    if (apRaw.startsWith('[')) { try { payload.allowed_paths = JSON.parse(apRaw); } catch {} }
+    else { payload.allowed_paths = apRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
+  } else if (payload.allowed_paths !== undefined) {
+    delete payload.allowed_paths;
   }
   const fgRaw = document.getElementById('modal-forbidden-globs')?.value?.trim();
   if (fgRaw) {
-    if (fgRaw.startsWith('[')) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
-    else { spec.forbidden_globs = fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
+    if (fgRaw.startsWith('[')) { try { payload.forbidden_globs = JSON.parse(fgRaw); } catch {} }
+    else { payload.forbidden_globs = fgRaw.split(/\n/).map(s => s.trim()).filter(Boolean); }
+  } else if (payload.forbidden_globs !== undefined) {
+    delete payload.forbidden_globs;
   }
 
-  // A4: merge thresholds from UI
-  if (spec.task_type && _currentExecutorType === 'api_call') {
-    const thresholds = readThresholdsFromUI(spec.task_type);
-    if (thresholds) spec.rubric_thresholds = thresholds;
-  }
-  spec.executor_type = _currentExecutorType;
-  spec.session_mode = _currentSessionMode || document.getElementById('modal-session-mode')?.value || defaultSessionModeForExecutor(_currentExecutorType);
-  spec.workflow_mode = _currentWorkflowMode;
-  if (_currentExecutorType === 'api_call') {
-    if (spec.run_surface !== undefined) delete spec.run_surface;
-    spec.execution_mode = 'auto';
-  } else if (_currentExecutorType === 'solo_agent') {
-    if (spec.run_surface !== undefined) delete spec.run_surface;
-    spec.execution_mode = 'auto';
-    if (soloExecutorInstructionVal) spec.goal = soloExecutorInstructionVal;
-    const soloProvider = (document.getElementById('modal-solo-provider')?.value || '').trim() || 'claude';
-    spec.coder_model = soloProvider;
-    spec.judge_model = soloProvider;
-    spec.coder = 'solo';
-    spec.judge = 'solo';
-    spec.agent_config = {
-      max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || '10', 10),
-      auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
-      knowledge_shards: getSelectedKnowledgeShards(),
-      provider: soloProvider
-    };
-    const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
-    if (testCmdSolo) spec.test_cmd = testCmdSolo;
-  } else if (_currentExecutorType === 'multi_agent') {
-    spec.run_surface = 'visual_ccb';
-    spec.execution_mode = 'semi-auto';
-    spec.coder = 'ccb';
-    spec.judge = 'ccb';
-    const roles = collectCollabRolesFromForm();
-    if (roles) spec.collab_roles = roles;
-  }
-  if (_currentExecutorType !== 'api_call') {
-    if (spec.rubric_thresholds !== undefined) delete spec.rubric_thresholds;
-    if (spec.scoring_mode !== undefined) delete spec.scoring_mode;
-  }
-  if (_currentExecutorType !== 'multi_agent' && spec.collab_roles !== undefined) {
-    delete spec.collab_roles;
+  if (payload.task_type) {
+    const thresholds = readThresholdsFromUI(payload.task_type);
+    if (thresholds) payload.rubric_thresholds = thresholds;
   }
   const knEnabled = document.getElementById('modal-knowledge-enabled')?.checked;
   if (knEnabled) {
-    spec.knowledge_enabled = true;
+    payload.knowledge_enabled = true;
     const kp = (document.getElementById('modal-knowledge-project')?.value || '').trim();
     const rp2 = (document.getElementById('modal-repo-path')?.value || '').trim();
-    spec.knowledge_project_path = kp || normalizeKnowledgePath(rp2);
-    spec.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
-    spec.agent_config = {
-      ...(spec.agent_config || {}),
+    payload.knowledge_project_path = kp || normalizeKnowledgePath(rp2);
+    payload.knowledge_provider = (document.getElementById('modal-knowledge-provider')?.value || 'codex').trim() || 'codex';
+    payload.agent_config = {
+      ...(payload.agent_config || {}),
       knowledge_shards: getSelectedKnowledgeShards()
     };
-  } else if (spec.knowledge_enabled !== undefined) {
-    delete spec.knowledge_enabled;
-    if (spec.knowledge_project_path !== undefined) delete spec.knowledge_project_path;
-    if (spec.knowledge_provider !== undefined) delete spec.knowledge_provider;
+  } else if (payload.knowledge_enabled !== undefined) {
+    delete payload.knowledge_enabled;
+    if (payload.knowledge_project_path !== undefined) delete payload.knowledge_project_path;
+    if (payload.knowledge_provider !== undefined) delete payload.knowledge_provider;
   }
-  if (spec.executor_type === 'solo_agent' && soloExecutorInstructionVal && !instructionVal) {
-    spec.goal = soloExecutorInstructionVal;
+  if (payload.task_type === 'solo') {
+    payload.agent_config = {
+      ...(payload.agent_config || {}),
+      max_attempts: parseInt(document.getElementById('modal-max-iterations')?.value || String(payload.max_attempts || 3), 10),
+      auto_pass_threshold: parseFloat(document.getElementById('modal-auto-pass-threshold')?.value || '0.85'),
+      provider: normalizeProviderFromAny(document.getElementById('modal-solo-provider')?.value || payload.agent_config?.provider || payload.collab_roles?.executor || 'codex') || 'codex',
+      knowledge_shards: getSelectedKnowledgeShards()
+    };
+    const testCmdSolo = (document.getElementById('modal-test-cmd-solo')?.value || '').trim();
+    if (testCmdSolo) payload.test_cmd = testCmdSolo;
+    if (soloExecutorInstructionVal && !instructionVal) payload.goal = soloExecutorInstructionVal;
+  }
+  if (payload.rubric_thresholds !== undefined && payload.task_type !== 'copywriting') {
+    delete payload.rubric_thresholds;
   }
 
+  const formErrors = validateV51SpecForSave(payload);
+  if (formErrors.length > 0) {
+    renderValidationErrors(errEl, formErrors);
+    return;
+  }
+
+  setButtonLoading(btn, true);
   try {
-    const res = await fetch(`/api/task_specs/${encodeURIComponent(taskId)}`, {
-      method: 'PUT',
+    const res = await fetch('/api/tasks', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ spec })
+      body: JSON.stringify(payload)
     });
     const result = await res.json();
     if (!res.ok) {
-      errEl.textContent = result.error || 'Validation failed';
-      if (Array.isArray(result.errors) && result.errors.length) {
-        errEl.innerHTML = escapeHtml(result.error || 'Validation failed') + '<br>' + result.errors.map(e => '• ' + escapeHtml(e)).join('<br>');
-      }
+      renderValidationErrors(errEl, (Array.isArray(result.errors) && result.errors.length) ? result.errors : [result.error || 'Validation failed']);
       return;
     }
     closeModal();
     loadTaskSpecs();
   } catch (e) {
-    errEl.textContent = 'Save failed: ' + (e.message || String(e));
+    renderValidationErrors(errEl, ['Save failed: ' + (e.message || String(e))]);
+  } finally {
+    setButtonLoading(btn, false);
   }
 }
 
@@ -4493,11 +4378,12 @@ async function loadPrompts() {
     const res = await fetch('/api/prompts');
     const data = await res.json();
     if (data.error) { list.innerHTML = `<div style="padding:6px 12px;font-size:12px;color:#f85149">${escapeHtml(data.error)}</div>`; return; }
-    if (!Array.isArray(data) || data.length === 0) {
+    const prompts = Array.isArray(data) ? data : (Array.isArray(data.prompts) ? data.prompts : []);
+    if (prompts.length === 0) {
       list.innerHTML = '<div style="padding:6px 12px;font-size:12px;color:#8b949e">No prompts found</div>';
       return;
     }
-    list.innerHTML = data.map(p => `
+    list.innerHTML = prompts.map(p => `
       <div class="sidebar-item" onclick="viewPrompt(${JSON.stringify(p.name)})" style="cursor:pointer">
         <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
         <span style="font-size:10px;color:#8b949e;margin-left:4px">${escapeHtml(String(Math.round((p.size||0)/1024*10)/10))}KB</span>
@@ -4524,7 +4410,7 @@ async function viewPrompt(name) {
           <div id="prompt-save-notice" style="font-size:12px;color:#3fb950;margin-top:4px;min-height:16px"></div>
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
             <button class="btn" onclick="closePromptModal()">Cancel</button>
-            <button class="btn btn-primary write-action" onclick="savePrompt(${JSON.stringify(escapeHtml(name))})">Save</button>
+            <button class="btn btn-primary write-action" onclick="savePrompt(${JSON.stringify(name)})">Save</button>
           </div>
         </div>
       </div>`;
@@ -4570,30 +4456,198 @@ async function savePrompt(name) {
 // D2: Open prompt for the task_type of a spec (from edit modal)
 async function openPromptForTaskType(taskType) {
   if (!taskType) { alert('No task_type selected'); return; }
-  const name = `judge.prompt.${taskType}.md`;
-  await viewPrompt(name);
+  const normalized = normalizeTaskTypeAlias(taskType);
+  const preferred = `judge.prompt.${normalized}.md`;
+  const fallback = 'judge.prompt.md';
+  try {
+    const res = await fetch('/api/prompts');
+    const data = await res.json();
+    const prompts = Array.isArray(data) ? data : (Array.isArray(data.prompts) ? data.prompts : []);
+    const names = new Set(prompts.map(p => p?.name).filter(Boolean));
+    if (names.has(preferred)) {
+      await viewPrompt(preferred);
+      return;
+    }
+    if (names.has(fallback)) {
+      await viewPrompt(fallback);
+      return;
+    }
+  } catch (_) {
+    // fallback below
+  }
+  await viewPrompt(preferred);
 }
 
-// Sidebar: add Prompts section
-function renderPromptsSection() {
-  const sidebar = document.getElementById('sidebar');
-  if (!sidebar) return;
-  if (document.getElementById('prompts-section')) return;
+function formatPromptCenterSize(size) {
+  const n = Number(size || 0);
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-  const section = document.createElement('div');
-  section.id = 'prompts-section';
-  section.innerHTML = `
-    <div style="padding:12px 12px 4px;display:flex;justify-content:space-between;align-items:center">
-      <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px">Prompts</div>
-      <button class="btn" style="padding:2px 8px;font-size:11px" onclick="loadPrompts()">↺</button>
-    </div>
-    <div id="prompts-list" style="max-height:180px;overflow-y:auto;border-bottom:1px solid #30363d"></div>
-    <div style="padding:4px 12px 12px;font-size:11px;color:#8b949e;font-style:italic">
-      From prompts/
-    </div>
-  `;
-  sidebar.appendChild(section);
-  loadPrompts();
+function renderPromptCenterEntryList(entries) {
+  const list = document.getElementById('prompt-center-list');
+  if (!list) return;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    list.innerHTML = '<div style="padding:10px;color:#8b949e;font-size:12px">No prompt files found.</div>';
+    return;
+  }
+
+  let lastCategory = '';
+  const rows = [];
+  for (const item of entries) {
+    const category = String(item?.category || 'Other');
+    if (category !== lastCategory) {
+      rows.push(`<div style="padding:8px 10px 4px;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.4px">${escapeHtml(category)}</div>`);
+      lastCategory = category;
+    }
+    const selected = promptCenterSelectedTarget === item.target;
+    rows.push(`
+      <button type="button" class="btn" onclick='openPromptCenterFile(${JSON.stringify(item.target)})'
+        style="display:block;width:100%;text-align:left;border-radius:0;border-left:3px solid ${selected ? '#58a6ff' : 'transparent'};background:${selected ? '#1f2937' : 'transparent'};padding:8px 10px;border-top:1px solid #21262d">
+        <div style="font-size:12px;color:#c9d1d9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.name || '')}</div>
+        <div style="font-size:11px;color:#8b949e;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.brief || '')}</div>
+      </button>`);
+  }
+  list.innerHTML = rows.join('');
+}
+
+async function openPromptCenterFile(target) {
+  if (!target) return;
+  const notice = document.getElementById('prompt-center-save-notice');
+  if (notice) notice.textContent = '';
+  promptCenterSelectedTarget = target;
+  const contentEl = document.getElementById('prompt-center-editor');
+  const metaEl = document.getElementById('prompt-center-meta');
+  const titleEl = document.getElementById('prompt-center-title');
+  if (contentEl) contentEl.value = '';
+  if (metaEl) metaEl.textContent = 'Loading...';
+  if (titleEl) titleEl.textContent = 'Loading...';
+  renderPromptCenterEntryList(window._promptCenterEntries || []);
+
+  try {
+    const res = await fetch(`/api/prompt-center/file?target=${encodeURIComponent(target)}`);
+    const data = await res.json();
+    if (!res.ok) {
+      if (metaEl) metaEl.textContent = data.error || 'Failed to load file.';
+      return;
+    }
+    if (titleEl) titleEl.textContent = data.name || '(unnamed)';
+    if (metaEl) metaEl.textContent = `${data.filepath || ''}${data.updated_at ? ` · updated ${data.updated_at}` : ''}`;
+    if (contentEl) contentEl.value = data.content || '';
+    const saveBtn = document.getElementById('prompt-center-save-btn');
+    if (saveBtn) saveBtn.dataset.target = target;
+  } catch (e) {
+    if (metaEl) metaEl.textContent = `Load failed: ${e.message || String(e)}`;
+  }
+}
+
+async function savePromptCenterFile() {
+  const btn = document.getElementById('prompt-center-save-btn');
+  const target = btn?.dataset?.target || '';
+  const content = document.getElementById('prompt-center-editor')?.value;
+  const notice = document.getElementById('prompt-center-save-notice');
+  if (!target || content === undefined) return;
+  if (!confirm('Overwrite this prompt file? This action will be recorded in the audit log.')) return;
+  if (notice) {
+    notice.textContent = '';
+    notice.style.color = '#8b949e';
+  }
+  try {
+    const res = await fetch('/api/prompt-center/file', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, content })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (notice) { notice.style.color = '#f85149'; notice.textContent = data.error || 'Save failed'; }
+      return;
+    }
+    if (notice) {
+      notice.style.color = '#3fb950';
+      notice.textContent = data.backup ? `Saved. Backup: ${data.backup}` : 'Saved.';
+    }
+    await refreshPromptCenter();
+    await openPromptCenterFile(target);
+  } catch (e) {
+    if (notice) { notice.style.color = '#f85149'; notice.textContent = 'Save error: ' + (e.message || String(e)); }
+  }
+}
+
+async function refreshPromptCenter() {
+  const taskId = currentTaskId ? String(currentTaskId) : '';
+  const query = taskId ? `?task_id=${encodeURIComponent(taskId)}` : '';
+  const list = document.getElementById('prompt-center-list');
+  const intro = document.getElementById('prompt-center-intro');
+  const scope = document.getElementById('prompt-center-scope');
+  if (list) list.innerHTML = '<div style="padding:10px;color:#8b949e;font-size:12px">Loading prompts...</div>';
+
+  try {
+    const res = await fetch(`/api/prompt-center${query}`);
+    const data = await res.json();
+    if (!res.ok) {
+      if (list) list.innerHTML = `<div style="padding:10px;color:#f85149;font-size:12px">${escapeHtml(data.error || 'Failed to load prompt center')}</div>`;
+      return;
+    }
+    if (intro) intro.textContent = data.intro || '';
+    if (scope) {
+      scope.textContent = data.task_id
+        ? `Runtime scope: task ${data.task_id}${taskId && data.task_id !== taskId ? ` (fallback from selected ${taskId})` : ''}`
+        : 'Runtime scope: no task run artifacts detected yet.';
+    }
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    window._promptCenterEntries = entries;
+    if (!promptCenterSelectedTarget || !entries.some((e) => e.target === promptCenterSelectedTarget)) {
+      promptCenterSelectedTarget = entries[0]?.target || '';
+    }
+    renderPromptCenterEntryList(entries);
+    if (promptCenterSelectedTarget) {
+      await openPromptCenterFile(promptCenterSelectedTarget);
+    } else {
+      const titleEl = document.getElementById('prompt-center-title');
+      const metaEl = document.getElementById('prompt-center-meta');
+      const contentEl = document.getElementById('prompt-center-editor');
+      if (titleEl) titleEl.textContent = 'No file selected';
+      if (metaEl) metaEl.textContent = '';
+      if (contentEl) contentEl.value = '';
+    }
+  } catch (e) {
+    if (list) list.innerHTML = `<div style="padding:10px;color:#f85149;font-size:12px">Load failed: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+function renderPromptCenterPanel() {
+  const wrap = document.getElementById('prompts-panel');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div style="padding:16px">
+      <h2 style="margin:0 0 8px">Prompt Center</h2>
+      <div id="prompt-center-intro" style="font-size:13px;color:#8b949e;line-height:1.45;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div id="prompt-center-scope" style="font-size:12px;color:#8b949e"></div>
+        <div style="display:flex;gap:8px">
+          <button type="button" class="btn" onclick="promptCenterSelectedTarget='';refreshPromptCenter()">Reload</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:minmax(300px,36%) 1fr;gap:12px;min-height:calc(100vh - 240px);align-items:start">
+        <div style="border:1px solid #30363d;border-radius:8px;overflow:auto;background:#0d1117;max-height:calc(100vh - 240px)">
+          <div id="prompt-center-list"></div>
+        </div>
+        <div style="border:1px solid #30363d;border-radius:8px;padding:12px;background:#0d1117;display:flex;flex-direction:column;min-height:0;position:sticky;top:12px;max-height:calc(100vh - 240px)">
+          <div id="prompt-center-title" style="font-size:14px;font-weight:600;margin-bottom:4px">No file selected</div>
+          <div id="prompt-center-meta" style="font-size:12px;color:#8b949e;margin-bottom:8px;word-break:break-all"></div>
+          <textarea id="prompt-center-editor" class="code-editor" style="flex:1;min-height:260px;width:100%;box-sizing:border-box"></textarea>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:8px">
+            <div id="prompt-center-save-notice" style="font-size:12px;min-height:16px;color:#8b949e"></div>
+            <button type="button" id="prompt-center-save-btn" class="btn btn-primary write-action" onclick="savePromptCenterFile()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  refreshPromptCenter();
+  updateReadOnlyBanner();
 }
 
 // ================================================================
@@ -5388,11 +5442,12 @@ async function refreshSimulatorPanelContent(force = false) {
 // Initial load (K7-1: load health for read_only first so banner and button state are correct)
 loadHealth().then(() => {
   loadTasks();
+  renderTemplates();
   renderSpecsSection();
-  renderPromptsSection();
   updateReadOnlyBanner();
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsPanel);
   document.getElementById('nav-tasks')?.addEventListener('click', () => switchView('tasks'));
+  document.getElementById('nav-prompts')?.addEventListener('click', () => switchView('prompts'));
   document.getElementById('nav-ccb')?.addEventListener('click', () => switchView('ccb'));
   document.getElementById('nav-simulator')?.addEventListener('click', () => switchView('simulator'));
 });

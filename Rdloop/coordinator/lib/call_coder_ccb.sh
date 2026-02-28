@@ -161,7 +161,7 @@ bootstrap_ccb_provider() {
 
   if command -v tmux >/dev/null 2>&1; then
     tmux_session="rdloop_ccb_${provider}_$$_$(date +%s)"
-    if tmux new-session -d -s "$tmux_session" -c "$bootstrap_dir" "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" \"$provider\"" >/dev/null 2>&1; then
+    if tmux new-session -d -s "$tmux_session" -c "$bootstrap_dir" "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" -a \"$provider\"" >/dev/null 2>&1; then
       echo "tmux bootstrap started (session=${tmux_session})"
       return 0
     fi
@@ -169,7 +169,7 @@ bootstrap_ccb_provider() {
 
   if [ "$(uname -s)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
     local launch_cmd apple_cmd
-    launch_cmd="cd \"$bootstrap_dir\" && ${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" \"$provider\""
+    launch_cmd="cd \"$bootstrap_dir\" && ${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" -a \"$provider\""
     apple_cmd="$(printf '%s' "$launch_cmd" | sed 's/\\/\\\\/g; s/\"/\\"/g')"
     if osascript -e "tell application \"Terminal\" to do script \"${apple_cmd}\"" >/dev/null 2>&1; then
       echo "terminal bootstrap started (Darwin/Terminal)"
@@ -177,7 +177,7 @@ bootstrap_ccb_provider() {
     fi
   fi
 
-  out="$(cd "$bootstrap_dir" && eval "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" \"$provider\" </dev/null" 2>&1 | sed -n '1,30p' || true)"
+  out="$(cd "$bootstrap_dir" && eval "${env_prefix} CCB_GUI_LAUNCH=1 \"$launcher\" -a \"$provider\" </dev/null" 2>&1 | sed -n '1,30p' || true)"
   [ -n "$out" ] && echo "$out" | tr '\n' ' ' | sed 's/  */ /g'
   return 0
 }

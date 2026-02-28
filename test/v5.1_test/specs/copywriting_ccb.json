@@ -1,0 +1,19 @@
+{
+  "schema_version": "v51",
+  "task_id": "v51_copywriting_ccb_real",
+  "task_type": "copywriting",
+  "launch_mode": "ccb",
+  "launch_mode_locked": true,
+  "collab_roles": {
+    "executor": "codex",
+    "reviewer": "codex"
+  },
+  "agent_config": {
+    "provider": "codex"
+  },
+  "repo_path": "/Users/yzliu/work/cord",
+  "goal": "Create a short product copy draft and review loop for v5.1 ccb flow validation.",
+  "acceptance": "Role flow reaches READY_FOR_REVIEW with session and pane artifacts.",
+  "test_cmd": "true",
+  "max_attempts": 1
+}

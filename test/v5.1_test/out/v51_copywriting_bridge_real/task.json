@@ -1,0 +1,21 @@
+{
+  "schema_version": "v51",
+  "task_id": "v51_copywriting_bridge_real",
+  "task_type": "copywriting",
+  "launch_mode": "bridge",
+  "launch_mode_locked": true,
+  "collab_roles": {
+    "executor": "codex",
+    "reviewer": "codex"
+  },
+  "agent_config": {
+    "provider": "codex"
+  },
+  "repo_path": "/Users/yzliu/work/cord",
+  "goal": "Create a short product copy draft and review loop for v5.1 bridge flow validation.",
+  "acceptance": "Role flow reaches READY_FOR_REVIEW with session and pane artifacts.",
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "created_at": "2026-02-27T20:27:12Z",
+  "task_code": "de68239c-e150-4dab-8f40-064724a2d583"
+}

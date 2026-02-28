@@ -1,0 +1,333 @@
+{
+  "_meta": {
+    "version": "taskspec_v5.1.1",
+    "generated_at": "2026-02-28",
+    "based_on": "integrated_architecture_v5_1.md",
+    "changelog": [
+      "v5.1.1: 根据代码与文档 Gap 分析，修正 8 处不符项",
+      "废弃 executor_type / session_mode 字段，统一为 task_type / launch_mode",
+      "BranchInitSpec.workers[].executor_type → task_type",
+      "PR description 模板字段对齐 v5.1",
+      "AGENT.md Rule Router 缺失 task_type 路由条目标注",
+      "design_contract.md Scope 注释仍引用旧字段名，已标注待修正",
+      "session_mgmt.md loop context rebuild 仍含旧字段引用，已标注待修正",
+      "collab_context.md Role Assignment 缺 pm 与 designer 行为约束补全",
+      "git_collab.md 缺 role-commit 子命令说明，已补全"
+    ]
+  },
+
+  "task_schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "TaskSpec v5.1.1",
+    "description": "rdloop coordinator 任务规格，支持三种 task_type 和双启动通道",
+    "type": "object",
+    "required": ["task_id", "task_type", "launch_mode", "launch_mode_locked", "repo_path", "goal", "acceptance", "test_cmd"],
+    "additionalProperties": false,
+    "properties": {
+      "task_id":            { "type": "string", "pattern": "^T[0-9]+$", "description": "任务唯一标识，如 T01" },
+      "task_type":          { "type": "string", "enum": ["copywriting", "solo", "multi_agent"], "description": "v5.1 三种任务类型，废弃旧 executor_type" },
+      "launch_mode":        { "type": "string", "enum": ["ccb", "bridge"], "description": "本次任务启动通道，ccb=可视化，bridge=暗箱" },
+      "launch_mode_locked": { "type": "boolean", "description": "true=直接使用 Settings 预设，false=run 时弹出选择" },
+      "judge_enabled":      { "type": "boolean", "default": true, "description": "是否启用 Reviewer 质量评审 pane" },
+      "agent_config": {
+        "type": "object",
+        "required": ["max_attempts", "auto_pass_threshold", "knowledge_shards", "provider"],
+        "additionalProperties": false,
+        "properties": {
+          "max_attempts":            { "type": "integer", "minimum": 1, "default": 5, "description": "Executor attempt 最大轮次" },
+          "auto_pass_threshold":     { "type": "number", "minimum": 0, "maximum": 1, "default": 0.85, "description": "Reviewer 自动通过分数阈值（0-1 归一化）" },
+          "knowledge_shards":        { "type": "array", "items": { "type": "string" }, "description": "需要加载的 knowledge shard 名称列表" },
+          "provider":                { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "droid"], "description": "默认 coding agent provider（solo 模式所有角色共用此值）" },
+          "inspiration_trigger_attempts": { "type": "integer", "minimum": 1, "default": 3, "description": "触发 Inspiration pane 的 attempt 轮次阈值" }
+        }
+      },
+      "collab_roles": {
+        "type": "object",
+        "description": "各角色使用的 agent provider。copywriting 只填 executor+reviewer；solo 所有角色值相同（应等于 agent_config.provider）；multi_agent 各角色可不同",
+        "properties": {
+          "pm":          { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "droid"] },
+          "designer":    { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "droid"] },
+          "executor":    { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "droid"] },
+          "reviewer":    { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "droid"] },
+          "inspiration": { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "droid"] }
+        },
+        "additionalProperties": false
+      },
+      "repo_path":   { "type": "string", "description": "git 仓库绝对路径" },
+      "goal":        { "type": "string", "description": "一句话目标描述" },
+      "acceptance":  { "type": "string", "description": "验收标准，供 Reviewer pane 作评审依据" },
+      "test_cmd":    { "type": "string", "description": "客观测试命令，coordinator 执行，rc 不可绕过" }
+    },
+
+    "if_task_type_constraints": {
+      "_comment": "以下约束由 coordinator run_task.sh 在运行时校验，schema 层作为注释说明",
+      "copywriting": {
+        "required_collab_roles": ["executor", "reviewer"],
+        "forbidden_collab_roles": ["designer"],
+        "panes": ["pm", "executor", "reviewer"]
+      },
+      "solo": {
+        "required_collab_roles": ["pm", "executor", "reviewer"],
+        "constraint": "所有角色的 provider 必须等于 agent_config.provider",
+        "panes": ["pm", "designer", "executor", "reviewer"],
+        "pane_context": "每个 pane 上下文完全独立，禁止跨 pane 共享历史"
+      },
+      "multi_agent": {
+        "required_collab_roles": ["pm", "designer", "executor", "reviewer"],
+        "constraint": "各角色 provider 可不同，designer 阶段必须输出 design_contract.md",
+        "panes": ["pm", "designer", "executor", "reviewer"]
+      }
+    }
+  },
+
+  "task_examples": {
+    "copywriting_example": {
+      "task_id": "T01",
+      "task_type": "copywriting",
+      "launch_mode": "bridge",
+      "launch_mode_locked": false,
+      "judge_enabled": true,
+      "agent_config": {
+        "max_attempts": 3,
+        "auto_pass_threshold": 0.80,
+        "knowledge_shards": ["brand_voice", "style_guide"],
+        "provider": "claude",
+        "inspiration_trigger_attempts": 2
+      },
+      "collab_roles": {
+        "executor": "claude",
+        "reviewer": "codex"
+      },
+      "repo_path": "/Users/yzliu/work/myproject",
+      "goal": "为新产品发布撰写首页 Hero 文案（标题 + 副标题 + CTA）",
+      "acceptance": "文案与品牌调性吻合，CTA 行动意图明确，无语法错误，Reviewer 评分 >= 8.0",
+      "test_cmd": "echo 'copywriting: no test_cmd required' && exit 0"
+    },
+    "solo_example": {
+      "task_id": "T02",
+      "task_type": "solo",
+      "launch_mode": "ccb",
+      "launch_mode_locked": true,
+      "judge_enabled": true,
+      "agent_config": {
+        "max_attempts": 5,
+        "auto_pass_threshold": 0.85,
+        "knowledge_shards": ["auth", "api"],
+        "provider": "claude",
+        "inspiration_trigger_attempts": 3
+      },
+      "collab_roles": {
+        "pm":          "claude",
+        "designer":    "claude",
+        "executor":    "claude",
+        "reviewer":    "claude"
+      },
+      "repo_path": "/Users/yzliu/work/myproject",
+      "goal": "实现 JWT token 刷新接口 POST /auth/refresh",
+      "acceptance": "接口返回新 access_token；过期 token 返回 401；unit test 覆盖 happy path + expired case",
+      "test_cmd": "cd /Users/yzliu/work/myproject && npm test -- --testPathPattern=auth"
+    },
+    "multi_agent_example": {
+      "task_id": "T03",
+      "task_type": "multi_agent",
+      "launch_mode": "bridge",
+      "launch_mode_locked": false,
+      "judge_enabled": true,
+      "agent_config": {
+        "max_attempts": 5,
+        "auto_pass_threshold": 0.85,
+        "knowledge_shards": ["auth", "api", "db_schema"],
+        "provider": "claude",
+        "inspiration_trigger_attempts": 3
+      },
+      "collab_roles": {
+        "pm":          "claude",
+        "designer":    "claude",
+        "executor":    "claude",
+        "reviewer":    "codex",
+        "inspiration": "gemini"
+      },
+      "repo_path": "/Users/yzliu/work/myproject",
+      "goal": "拆分 auth 模块：Worker A 实现 token service，Worker B 实现 API middleware",
+      "acceptance": "verifyToken / refreshToken 按 design_contract 导出；API 路由保护通过；无跨 worker 文件污染；test_cmd rc=0",
+      "test_cmd": "cd /Users/yzliu/work/myproject && npm test"
+    }
+  },
+
+  "branch_init_spec_schema": {
+    "_comment": "v5.1.1: workers[].executor_type → workers[].task_type，与 task.json 字段对齐",
+    "type": "object",
+    "required": ["type", "task_slug", "date", "repo_path", "base_ref", "workers"],
+    "properties": {
+      "type":      { "type": "string", "const": "BranchInitSpec" },
+      "task_slug": { "type": "string", "description": "分支命名用的描述性 slug，无空格特殊字符" },
+      "date":      { "type": "string", "pattern": "^[0-9]{8}$", "description": "YYYYMMDD 格式" },
+      "repo_path": { "type": "string" },
+      "base_ref":  { "type": "string", "default": "main" },
+      "workers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["task_id", "task_type", "label"],
+          "properties": {
+            "task_id":   { "type": "string" },
+            "task_type": {
+              "type": "string",
+              "enum": ["copywriting", "solo", "multi_agent"],
+              "_breaking_change": "v5.1.1: 原字段名 executor_type（api_call|solo_agent|multi_agent）已废弃，统一为 task_type"
+            },
+            "label": { "type": "string", "description": "worker 分支后缀，如 executor-a / content / reviewer" }
+          }
+        }
+      }
+    },
+    "example": {
+      "type": "BranchInitSpec",
+      "task_slug": "auth-refresh",
+      "date": "20260228",
+      "repo_path": "/Users/yzliu/work/myproject",
+      "base_ref": "main",
+      "workers": [
+        { "task_id": "T02", "task_type": "solo",        "label": "executor-01" },
+        { "task_id": "T03", "task_type": "multi_agent", "label": "executor-A"  },
+        { "task_id": "T03", "task_type": "multi_agent", "label": "executor-B"  }
+      ]
+    }
+  },
+
+  "merge_decision_schema": {
+    "type": "object",
+    "required": ["type", "task_id", "verdict", "repo_path", "worker_branch", "task_branch"],
+    "properties": {
+      "type":           { "type": "string", "const": "MergeDecision" },
+      "task_id":        { "type": "string" },
+      "verdict":        { "type": "string", "enum": ["approve", "request_changes"] },
+      "repo_path":      { "type": "string" },
+      "worker_branch":  { "type": "string" },
+      "task_branch":    { "type": "string" },
+      "blocking_issues":{ "type": "array", "items": { "type": "string" }, "default": [] },
+      "merge_after":    { "type": "array", "items": { "type": "string" }, "default": [] }
+    }
+  },
+
+  "session_id_format": {
+    "pattern": "{task_id}-{role}-{pane_idx:02d}-{unix_ts}",
+    "examples": [
+      "T01-pm-00-1740700800",
+      "T01-executor-01-1740700800",
+      "T01-reviewer-00-1740700900"
+    ],
+    "req_code_derivation": "RC-{sha256(session_id)[:8].upper()}",
+    "req_code_example": "RC-A3F8B21C",
+    "usage": {
+      "ccb":    "req_code 植入指令模板作为输出边界标记 [RDLOOP_REQ:{req_code}:START/END]",
+      "bridge": "session_id 直接作为 bridge 请求跟踪键"
+    }
+  },
+
+  "verdict_schema": {
+    "type": "object",
+    "required": ["overall_score", "pass", "next_instructions"],
+    "properties": {
+      "overall_score":    { "type": "number", "minimum": 0, "maximum": 10 },
+      "dimensions": {
+        "type": "object",
+        "properties": {
+          "correctness":     { "type": "number" },
+          "completeness":    { "type": "number" },
+          "style":           { "type": "number" },
+          "security":        { "type": "number" },
+          "maintainability": { "type": "number" },
+          "test_coverage":   { "type": "number" },
+          "plan_adherence":  { "type": "number" }
+        }
+      },
+      "pass":               { "type": "boolean", "description": "overall_score >= auto_pass_threshold AND rc==0" },
+      "next_instructions":  { "type": "string", "description": "供下次 Executor attempt 参考的改进建议" },
+      "blocking_issues":    { "type": "array", "items": { "type": "string" }, "default": [] }
+    }
+  },
+
+  "pr_description_template": {
+    "_comment": "v5.1.1: 字段 executor_type → task_type，session_mode 字段删除",
+    "template": "## Task\ntask_id: {task_id} | task_type: {task_type} | launch_mode: {launch_mode}\n\n## 产出摘要\n[solo / multi_agent: 实现了什么，关键决策]\n[copywriting: 最终版本内容摘要 + 迭代轮次 + 最终 reviewer 评分]\n\n## 质量评分（judge 启用时填写）\n- reviewer overall: {score} / 10\n- 关键维度: correctness={c}, completeness={co}, style={s}\n\n## 接口实现情况（multi_agent 填写）\n- [x] {export_name}({params}): {return_type}\n\n## 偏离契约说明（如有）\n- 无 / [原因]\n\n## 已知欠债（如有）\n- [描述临时实现、设计上的不完整之处]\n\n## 验证\n- [x] test_cmd 通过 / 手动验证场景: [描述]"
+  },
+
+  "gap_analysis": {
+    "_description": "代码实现 vs v5.1 架构文档的不符项清单，共 8 项",
+    "gaps": [
+      {
+        "id": "GAP-01",
+        "severity": "CRITICAL",
+        "file": "Agent/.context/AGENT.md",
+        "current_version": "v2.0",
+        "required_version": "v2.1",
+        "description": "AGENT.md 版本号仍为 v2.0，架构文档要求升级至 v2.1",
+        "detail": "Rule Router 缺少 task_type 路由条目；Quick Rules 缺少 solo 模式 pane 独立性约束（禁止跨 pane 共享上下文）",
+        "fix": "1) 版本号改为 v2.1；2) Rule Router 新增行：'task_type 路由（solo/copywriting/multi_agent）→ 参考 run_task.sh task_type routing'；3) Quick Rules 补充：'solo pane → 每角色独立 pane，禁止共享历史上下文'"
+      },
+      {
+        "id": "GAP-02",
+        "severity": "CRITICAL",
+        "file": "Agent/.context/rules/git_collab.md",
+        "current_version": "v2.0",
+        "description": "BranchInitSpec 中 workers[].executor_type 字段仍为旧命名，与 v5.1 要求的 task_type 不符",
+        "detail": "git_collab.md 中 BranchInitSpec JSON 示例使用 executor_type: api_call | solo_agent | multi_agent，v5.1 已废弃此字段，统一为 task_type: copywriting | solo | multi_agent",
+        "fix": "将 BranchInitSpec.workers[].executor_type 字段重命名为 task_type，枚举值改为 copywriting | solo | multi_agent；同时删除 PR description 模板中的 session_mode 字段"
+      },
+      {
+        "id": "GAP-03",
+        "severity": "CRITICAL",
+        "file": "Agent/.context/rules/git_collab.md",
+        "description": "缺少 role-commit 子命令说明",
+        "detail": "v5.1 新增 git_ops.sh role-commit 子命令，用于角色切换时提交当前阶段产出。现有 git_collab.md 的 Coordinator Responsibilities 列表中无此条目",
+        "fix": "在 Coordinator Responsibilities 添加：'5. git_ops.sh role-commit — 角色切换时提交当前角色阶段产出到对应 worker 分支；commit message 格式：role/{role}[{phase}]: {description}'"
+      },
+      {
+        "id": "GAP-04",
+        "severity": "HIGH",
+        "file": "Agent/.context/rules/design_contract.md",
+        "description": "Scope 注释仍引用废弃字段名 executor_type: multi_agent",
+        "detail": "第一行注释：'This rule applies only to executor_type: multi_agent tasks'，应改为 task_type: multi_agent",
+        "fix": "将 'executor_type: multi_agent' 替换为 'task_type: multi_agent'；同时在 Scope 注释中补充 copywriting 任务明确跳过 Designer 阶段的说明"
+      },
+      {
+        "id": "GAP-05",
+        "severity": "HIGH",
+        "file": "Agent/.context/rules/session_mgmt.md",
+        "description": "loop context rebuild 章节仍引用废弃字段 executor_type 和 session_mode",
+        "detail": "_meta.json 描述为 'contains: task_id, goal, acceptance, executor_type, session_mode, attempt count'，v5.1 已将 executor_type→task_type，session_mode 删除",
+        "fix": "将 _meta.json 字段列表改为：'task_id, goal, acceptance, task_type, launch_mode, attempt_count'；删除 session_mode 引用"
+      },
+      {
+        "id": "GAP-06",
+        "severity": "HIGH",
+        "file": "Agent/.context/rules/startup.md",
+        "description": "启动流程缺少 git_collab 模式的识别与路由",
+        "detail": "STEP 1 — Operating Mode 只有 cli_collab / solo 两种分支，无 git_collab 路由。v5.1 架构中 git_collab 是主要工作模式，应在 startup.md 中有明确的激活条件",
+        "fix": "STEP 1 补充：'if git_collab explicitly requested → load git_collab.md, KEEP full session; mode=git_collab'；并说明 git_collab 与 cli_collab 的互斥关系"
+      },
+      {
+        "id": "GAP-07",
+        "severity": "MEDIUM",
+        "file": "Agent/.context/rules/collab_context.md",
+        "description": "Role Assignment 表格缺少 v5.1 新增的 pane 独立性约束和角色切换由 coordinator 控制的说明",
+        "detail": "collab_context.md v2.0 的 WORKER RULES 未提及：1) solo 模式下同一 agent 扮演多角色时各 pane 上下文独立；2) 角色切换由 coordinator 控制，workers 不能自行触发下一角色",
+        "fix": "WORKER RULES 增加：'在 solo 模式中，你只扮演当前 pane 对应的角色，不感知其他 pane 的历史；角色切换由 coordinator 决定，不可自行请求切换'"
+      },
+      {
+        "id": "GAP-08",
+        "severity": "MEDIUM",
+        "file": "Agent/.context/rules/ (missing files)",
+        "description": "v5.1 要求新增的两个规则文件 rules/solo_pane.md 和 rules/launch_mode.md 尚未创建",
+        "detail": "架构文档第 9.3 节和第 12.1 节明确要求新增这两个文件。当前代码目录中不存在这两个文件",
+        "fix": "需新建：1) rules/solo_pane.md：solo 模式 pane 独立性规范，禁止跨 pane 共享上下文；2) rules/launch_mode.md：CCB/Bridge 通道规范，coordinator 绝对调度权声明；并在 AGENT.md Rule Router 中添加对应触发条目"
+      }
+    ],
+    "not_in_scope": [
+      "coordinator/run_task.sh、git_ops.sh、loop_lifecycle.sh、server.js 等 Rdloop 目录文件未包含在 zip 中，无法比对",
+      "tools/session_id_gen.sh、tools/req_code_gen.sh 等新增工具脚本未包含在 zip 中，无法比对",
+      "GUI src/ 组件（Task Type 下拉、Pane 状态面板、Launch Mode 对话框）未包含在 zip 中，无法比对"
+    ]
+  }
+}

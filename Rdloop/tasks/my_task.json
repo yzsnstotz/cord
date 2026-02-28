@@ -1,7 +1,7 @@
 {
-  "schema_version": "v1",
+  "schema_version": "v51",
   "task_id": "my_task",
-  "task_type": "engineering_impl",
+  "task_type": "multi_agent",
   "execution_mode": "semi-auto",
   "channel_type": "ccb",
   "repo_path": "/Users/yzliu/work/projects/cord_test/",
@@ -25,10 +25,12 @@
   "coder_model": "codex",
   "judge_model": "codex",
   "collab_roles": {
-    "executor": "codex",
-    "reviewer": "gemini",
+    "pm": "codex",
     "designer": "codex",
-    "inspiration": "codex"
+    "executor": "codex",
+    "reviewer": "gemini"
   },
-  "created_at": "2026-02-25T05:18:35.241Z"
+  "created_at": "2026-02-25T05:18:35.241Z",
+  "launch_mode": "ccb",
+  "launch_mode_locked": false
 }

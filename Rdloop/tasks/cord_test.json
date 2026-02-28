@@ -1,7 +1,7 @@
 {
-  "schema_version": "v1",
+  "schema_version": "v51",
   "task_id": "cord_test",
-  "task_type": "engineering_impl",
+  "task_type": "solo",
   "execution_mode": "auto",
   "channel_type": "ccb",
   "repo_path": "/Users/yzliu/work/projects/cord_test/",
@@ -31,9 +31,14 @@
     "knowledge_shards": [],
     "provider": "codex"
   },
-  "executor_type": "solo_agent",
-  "session_mode": "continuous",
-  "workflow_mode": "solo",
   "knowledge_enabled": true,
-  "knowledge_project_path": ""
+  "knowledge_project_path": "",
+  "launch_mode": "bridge",
+  "launch_mode_locked": false,
+  "collab_roles": {
+    "pm": "codex",
+    "designer": "codex",
+    "executor": "codex",
+    "reviewer": "codex"
+  }
 }

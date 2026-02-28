@@ -1,0 +1,243 @@
+{
+    "task_spec_version": "v5.1.3",
+    "task_id": "RDLOOP-V51-AGENT-UPGRADE-001",
+    "title": "Agent 体系升级补丁：对齐 v5.1 task_type/launch_mode/solo pane 规则，补齐 git_collab 协议与 PR 模板（保持 Judge v2 评分体系）",
+    "positioning": {
+        "purpose": "从 taskspec_v5.1.1 中抽取“可用但 v5.1.2 未覆盖”的部分，聚焦 Agent/.context 体系升级（规则路由、git_collab 协议、PR 模板、solo pane/launch_mode 规则文件）。",
+        "explicitly_not_covered_here": [
+            "Coordinator/run_task.sh 路由迁移与 launch_mode 选择/锁定实现",
+            "Rdloop/tools/session_id_gen.sh / req_code_gen.sh 具体落地",
+            "GUI TaskEditor 的 task_type/launch_mode/locked 控件实现",
+            "任何与 v5.1.2 重复的 coordinator/tools/gui 代码改动"
+        ],
+        "dependency": {
+            "related_task_spec": "taskspec_v5.1.2",
+            "dependency_type": "parallel-complement",
+            "note": "v5.1.3 仅负责 Agent 体系与协议文档/校验脚本；v5.1.2 负责真正代码层落地（coordinator/tools/gui）。"
+        }
+    },
+    "repo_context": {
+        "repo_root": "cord-5.1",
+        "agent_root": "Agent/.context",
+        "rdloop_judge_schema_reference": "Rdloop/schemas/judge_verdict_v2.json (0~5 评分体系)",
+        "current_observation": [
+            "Agent/.context/AGENT.md 版本仍为 v2.0",
+            "Agent/.context/rules/git_collab.md 仍使用 executor_type/session_mode 与 X/10 judge 分数展示",
+            "Agent/.context/rules/startup.md 未显式路由 git_collab 模式",
+            "Agent/.context/rules/ 目录缺少 solo_pane.md 与 launch_mode.md"
+        ]
+    },
+    "scope": {
+        "in_scope": [
+            "升级 Agent/.context/AGENT.md：版本号 v2.1 + Rule Router 增补（task_type 路由、launch_mode 路由、solo pane 独立性）",
+            "修订 Agent/.context/rules/git_collab.md：BranchInitSpec 字段 executor_type→task_type；删除 session_mode 字段；PR 模板对齐 task_type/launch_mode；Judge 分数展示改为 JudgeVerdict v2（0~5）",
+            "修订 Agent/.context/rules/design_contract.md：Scope 注释 executor_type→task_type，并明确 copywriting 跳过 Designer 阶段（如适用）",
+            "修订 Agent/.context/rules/session_mgmt.md：去除 executor_type/session_mode 叙述，替换为 task_type/launch_mode/attempt_count",
+            "修订 Agent/.context/rules/startup.md：在 STEP 1 增加 git_collab 激活条件与与 cli_collab/solo 的互斥关系",
+            "修订 Agent/.context/rules/collab_context.md：补充 solo pane 独立性约束 + 角色切换由 coordinator 控制（worker 不可自触发）",
+            "新增 Agent/.context/rules/solo_pane.md：solo 模式 pane 独立性规范（硬约束）",
+            "新增 Agent/.context/rules/launch_mode.md：CCB/Bridge 通道规范（coordinator 绝对调度权、边界标记约束、会话跟踪约束）",
+            "新增一个轻量校验脚本：扫描 Agent 规则文档是否仍出现废弃字段（executor_type/session_mode/api_call/solo_agent 等），并验证必需规则文件存在"
+        ],
+        "out_of_scope": [
+            "任何 Rdloop/coordinator、Rdloop/tools、Rdloop/gui 的功能实现（由 v5.1.2 处理）",
+            "把 BranchInitSpec/MergeDecision 变成 coordinator 可执行的强校验（这里仅做 Agent 协议文档与 schema 文件的“可选附带”）",
+            "更改 JudgeVerdict schema（必须保持现有 v2：0~5+penalty+gated）"
+        ]
+    },
+    "deliverables": [
+        {
+            "type": "doc_patch",
+            "path": "Agent/.context/AGENT.md",
+            "description": "版本号 v2.1；Rule Router 增加 task_type 路由条目与 launch_mode 路由条目；Quick Rules 补充 solo pane 独立性约束"
+        },
+        {
+            "type": "doc_patch",
+            "path": "Agent/.context/rules/git_collab.md",
+            "description": "BranchInitSpec executor_type→task_type（copywriting|solo|multi_agent）；PR 模板移除 session_mode；PR 模板的 Judge Score 输出对齐 Rdloop/schemas/judge_verdict_v2.json（0~5，不出现 X/10）"
+        },
+        {
+            "type": "doc_patch",
+            "paths": [
+                "Agent/.context/rules/design_contract.md",
+                "Agent/.context/rules/session_mgmt.md",
+                "Agent/.context/rules/startup.md",
+                "Agent/.context/rules/collab_context.md"
+            ],
+            "description": "清理 executor_type/session_mode 相关叙述并对齐 v5.1：task_type/launch_mode/solo pane/role switching coordinator-controlled"
+        },
+        {
+            "type": "new_doc",
+            "paths": [
+                "Agent/.context/rules/solo_pane.md",
+                "Agent/.context/rules/launch_mode.md"
+            ],
+            "description": "补齐 v5.1 要求的两份规则文件，并在 AGENT.md Rule Router 中加入触发条目"
+        },
+        {
+            "type": "new_tool",
+            "path": "Agent/.context/tools/check_agent_rules_v21.sh",
+            "description": "规则一致性校验：必需文件存在；禁止废弃字段残留；关键路由条目存在。输出 rc=0/非0 + 明确报错"
+        },
+        {
+            "type": "evidence",
+            "required": [
+                "changes.diff 或 PR link",
+                "test_report.txt（至少包含 check_agent_rules_v21.sh 的执行命令与输出）"
+            ]
+        }
+    ],
+    "requirements": {
+        "functional": [
+            {
+                "id": "F1",
+                "description": "AGENT.md v2.1 + Rule Router 对齐 v5.1 概念",
+                "acceptance": [
+                    "AGENT.md 顶部版本号从 v2.0 更新为 v2.1",
+                    "Rule Router 中出现 task_type 路由条目（solo/copywriting/multi_agent）",
+                    "Rule Router 中出现 launch_mode 路由条目（ccb/bridge）并指向 rules/launch_mode.md",
+                    "Quick Rules/Constraints 中明确 solo pane 独立性硬约束（禁止跨 pane 共享历史上下文）"
+                ]
+            },
+            {
+                "id": "F2",
+                "description": "git_collab 协议字段升级：executor_type/session_mode 不再作为协议字段",
+                "acceptance": [
+                    "git_collab.md 中 BranchInitSpec.workers[].executor_type 字段改为 task_type",
+                    "枚举值严格为 copywriting | solo | multi_agent（不出现 api_call/solo_agent/multi_agent 混用）",
+                    "PR description 模板不再出现 session_mode 字段",
+                    "git_collab.md 的任何示例或表述不再要求 executor_type/session_mode"
+                ]
+            },
+            {
+                "id": "F3",
+                "description": "PR 模板对齐 JudgeVerdict v2（0~5 评分体系），禁止 0~10 与 threshold0-1",
+                "acceptance": [
+                    "PR 模板的 Judge 输出使用 0~5 体系字段（示例至少包含：decision、final_score_0_5、final_score_0_100、top_issues、fix_suggestions）",
+                    "PR 模板中不得出现 “judge overall: X / 10” 或任何 0~10 评分描述",
+                    "不得引入 auto_pass_threshold 0~1 一类阈值字段或比较逻辑（本任务仅文档与模板，保持 Judge v2 体系不变）",
+                    "若提及评分规则，引用 Rdloop/schemas/judge_verdict_v2.json 的字段结构（不发明新字段）"
+                ]
+            },
+            {
+                "id": "F4",
+                "description": "startup.md 增加 git_collab 激活路由",
+                "acceptance": [
+                    "startup.md STEP 1 增加：git_collab explicitly requested → load git_collab.md, KEEP full session; mode=git_collab",
+                    "明确 git_collab 与 cli_collab 的互斥关系（同一 session mode 固定）"
+                ]
+            },
+            {
+                "id": "F5",
+                "description": "collab_context.md / session_mgmt.md / design_contract.md 对齐 v5.1 术语与约束",
+                "acceptance": [
+                    "collab_context.md WORKER RULES 增加：solo 模式 pane 独立性 + 角色切换由 coordinator 控制（worker 不可自行切换）",
+                    "session_mgmt.md 中 _meta.json 字段描述改为 task_id, goal, acceptance, task_type, launch_mode, attempt_count（删除 executor_type/session_mode）",
+                    "design_contract.md Scope 注释从 executor_type: multi_agent 改为 task_type: multi_agent，并补充 copywriting 跳过 Designer（如文档结构需要）"
+                ]
+            },
+            {
+                "id": "F6",
+                "description": "新增两份规则文件：solo_pane.md 与 launch_mode.md",
+                "acceptance": [
+                    "Agent/.context/rules/solo_pane.md 存在，并包含硬约束：禁止跨 pane 共享历史上下文；pane 只认当前角色；不得请求“把另一个 pane 的内容发我”",
+                    "Agent/.context/rules/launch_mode.md 存在，并包含：CCB/Bridge 的行为差异、coordinator 绝对调度权、输出边界（RDLOOP_REQ）要求（仅描述协议，不实现工具）",
+                    "AGENT.md Rule Router 中存在对应触发条目指向这两份文件"
+                ]
+            }
+        ],
+        "non_functional": [
+            {
+                "id": "N1",
+                "description": "可机械校验（避免文档漂移）",
+                "acceptance": [
+                    "check_agent_rules_v21.sh 在干净工作区可运行（chmod +x）",
+                    "脚本检查：必需规则文件存在；关键路由条目存在；禁止词汇不存在（至少包含：executor_type、session_mode、api_call、solo_agent、judge overall:、/10、auto_pass_threshold）",
+                    "脚本失败时输出清晰定位（文件 + 行/匹配项）并返回非 0"
+                ]
+            }
+        ]
+    },
+    "constraints": {
+        "must": [
+            "本任务不得修改 Rdloop/schemas/judge_verdict_v2.json 以及任何 JudgeVerdict v2 的评分体系（0~5 + penalty + gated）",
+            "不得引入 threshold 0~1 的自动通过阈值字段或概念",
+            "本任务只改 Agent/.context 文档与 Agent/.context/tools 下新增校验脚本",
+            "更新后的文档不得再出现 executor_type/session_mode 作为协议字段"
+        ],
+        "should": [
+            "尽量用最小 diff 完成升级（只改必要段落/示例，不做无关重排）",
+            "所有新增规则文件顶部写清 Trigger/After use/Mode（与现有规则格式一致）"
+        ]
+    },
+    "forbidden": [
+        "在 Agent 文档中重新引入 api_call/solo_agent 这类旧 executor_type 枚举",
+        "把 Judge 分数显示改成 0~10 或把 PR 模板绑定到 overall_score 字段",
+        "把本任务扩展成 coordinator 落地实现（应由 v5.1.2 处理）"
+    ],
+    "acceptance_tests": [
+        {
+            "id": "AT1",
+            "name": "Agent rules consistency check",
+            "steps": [
+                "bash Agent/.context/tools/check_agent_rules_v21.sh"
+            ],
+            "pass_criteria": [
+                "rc=0",
+                "输出确认：required files present；no deprecated tokens; router entries present"
+            ]
+        },
+        {
+            "id": "AT2",
+            "name": "Diff spot-check (human)",
+            "steps": [
+                "Review changes.diff focusing on: AGENT.md version/router; git_collab BranchInitSpec; PR template judge section; new solo_pane/launch_mode rules"
+            ],
+            "pass_criteria": [
+                "No coordinator/tools/gui changes included",
+                "No judge scoring system changes included"
+            ]
+        }
+    ],
+    "implementation_plan": {
+        "phases": [
+            {
+                "phase": "P1",
+                "name": "Doc upgrades (GAP-01~07)",
+                "tasks": [
+                    "Update Agent/.context/AGENT.md to v2.1 and patch Rule Router + Quick Rules",
+                    "Patch rules/git_collab.md: BranchInitSpec field rename + PR template updates + remove session_mode",
+                    "Patch rules/design_contract.md, rules/session_mgmt.md, rules/startup.md, rules/collab_context.md to remove deprecated terms and add v5.1 constraints"
+                ]
+            },
+            {
+                "phase": "P2",
+                "name": "Add missing rule files (GAP-08)",
+                "tasks": [
+                    "Create rules/solo_pane.md",
+                    "Create rules/launch_mode.md",
+                    "Add router entries in AGENT.md to load these files"
+                ]
+            },
+            {
+                "phase": "P3",
+                "name": "Add mechanical checker + evidence",
+                "tasks": [
+                    "Implement Agent/.context/tools/check_agent_rules_v21.sh",
+                    "Run checker and capture output into test_report.txt",
+                    "Provide changes.diff or PR link"
+                ]
+            }
+        ]
+    },
+    "evidence_bundle": {
+        "required_files": [
+            "task_spec.json (this file)",
+            "changes.diff OR PR link",
+            "test_report.txt (commands + outputs + conclusion)"
+        ],
+        "nice_to_have": [
+            "Before/after snippets for git_collab BranchInitSpec and PR template section"
+        ]
+    }
+}

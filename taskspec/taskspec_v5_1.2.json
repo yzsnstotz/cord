@@ -1,0 +1,333 @@
+{
+    "task_spec_version": "v5.1.2",
+    "task_id": "RDLOOP-V51-GAP-BRIDGE-001",
+    "title": "Bridge v5.1 gaps: migrate routing to task_type+launch_mode, add session_id/req_code, solo role-commit, GUI updates, migration tooling",
+    "context": {
+        "architecture_doc": "integrated_architecture_v5.1.md",
+        "source_code": "cord-5.1.zip",
+        "baseline_assumption": "Current codebase still routes by executor_type × session_mode and lacks v5.1 migration/tooling.",
+        "target_state": "Codebase implements v5.1 task schema + routing, launch_mode selection/lock, unified session_id + req_code, solo role-commit workflow, and GUI support."
+    },
+    "scope": {
+        "in_scope": [
+            "Introduce v5.1 task schema fields: task_type, launch_mode, launch_mode_locked",
+            "Deprecate routing dependence on executor_type and session_mode (backward-compat allowed via migration layer)",
+            "Implement Launch Mode selection logic (CCB/Bridge) including lock behavior",
+            "Implement unified session_id generation and REQ CODE derivation for CCB",
+            "Implement RDLOOP_REQ boundary markers in CCB output handling",
+            "Implement solo mode constraints: per-role isolation + role switch requires git role-commit + knowledge injection hook point",
+            "Add v5.1 migration tooling and schema file",
+            "Update GUI Task Editor to support task_type + launch_mode + launch_mode_locked and remove reliance on deprecated fields"
+        ],
+        "out_of_scope": [
+            "Refactoring OpenClaw upstream code or adding new OpenClaw commands beyond what rdloop needs",
+            "Implementing a full knowledge-agent retrieval service (only add hook points + interface contract)",
+            "Rewriting tmux/pane infrastructure beyond necessary changes for v5.1 semantics",
+            "Adding new models/providers"
+        ]
+    },
+    "deliverables": [
+        {
+            "type": "schema",
+            "path": "Rdloop/docs/schema/task_schema_v51.json",
+            "description": "JSON Schema for v5.1 task.json including task_type, launch_mode, launch_mode_locked, deprecation notes for executor_type/session_mode"
+        },
+        {
+            "type": "tool",
+            "path": "Rdloop/tools/migrate_task_json_v51.sh",
+            "description": "Migration script converting v5.0/v5.0.2 style tasks to v5.1 fields deterministically; idempotent"
+        },
+        {
+            "type": "tool",
+            "path": "Rdloop/tools/session_id_gen.sh",
+            "description": "Deterministic session_id generator per task+role+attempt (format per v5.1)"
+        },
+        {
+            "type": "tool",
+            "path": "Rdloop/tools/req_code_gen.sh",
+            "description": "REQ code derivation from session_id for CCB channel; stable mapping"
+        },
+        {
+            "type": "code",
+            "paths": [
+                "Rdloop/coordinator/run_task.sh",
+                "Rdloop/coordinator/lib/*"
+            ],
+            "description": "Coordinator routing migrated to task_type + launch_mode (+ lock), with backward-compat via migration layer"
+        },
+        {
+            "type": "code",
+            "path": "Rdloop/tools/git_ops.sh",
+            "description": "Add role-commit subcommand; used by solo role switch protocol"
+        },
+        {
+            "type": "docs",
+            "paths": [
+                "Agent/.context/rules/solo_pane.md",
+                "Agent/.context/rules/launch_mode.md"
+            ],
+            "description": "Agent-side operational rules required by v5.1"
+        },
+        {
+            "type": "gui",
+            "paths": [
+                "Rdloop/gui/src/TaskEditor.jsx",
+                "Rdloop/gui/server.js"
+            ],
+            "description": "GUI supports task_type + launch_mode + launch_mode_locked; server exposes needed endpoints"
+        },
+        {
+            "type": "tests",
+            "paths": [
+                "Rdloop/tests/v51_schema.test.*",
+                "Rdloop/tests/migrate_task_json_v51.test.*",
+                "Rdloop/tests/session_id_req_code.test.*",
+                "Rdloop/tests/run_task_routing_v51.test.*",
+                "Rdloop/tests/gui_task_editor_v51.test.*"
+            ],
+            "description": "Golden/contract tests for schema, migration, routing, session/req, and GUI serialization"
+        }
+    ],
+    "requirements": {
+        "functional": [
+            {
+                "id": "F1",
+                "description": "Coordinator must route tasks by task_type ∈ {copywriting, solo, multi_agent} and launch_mode ∈ {ccb, bridge} per v5.1",
+                "acceptance": [
+                    "Given a v5.1 task.json with task_type=solo and launch_mode=ccb, run_task.sh chooses solo execution flow and uses CCB channel",
+                    "Given launch_mode_locked=false, GUI/run path prompts user to pick launch_mode at runtime; choice persists into the run record",
+                    "Given launch_mode_locked=true, no prompt occurs and the configured launch_mode is enforced"
+                ]
+            },
+            {
+                "id": "F2",
+                "description": "Backward compatibility: v5.0 tasks with executor_type/session_mode must still run via migration layer",
+                "acceptance": [
+                    "migrate_task_json_v51.sh converts v5.0 task to v5.1 fields deterministically (no random values except timestamped IDs where specified)",
+                    "Converted file validates against task_schema_v51.json",
+                    "run_task.sh can consume either legacy or v5.1 task.json, but internal routing uses v5.1 fields only"
+                ]
+            },
+            {
+                "id": "F3",
+                "description": "Unified session_id and REQ CODE boundary markers for CCB",
+                "acceptance": [
+                    "session_id_gen.sh generates IDs in the v5.1 format T01-<role>-<NN>-<timestampOrAttempt> (exact format documented + tested)",
+                    "req_code_gen.sh maps session_id -> req_code deterministically (documented + tested)",
+                    "CCB output includes [RDLOOP_REQ:<req_code>:START] and [RDLOOP_REQ:<req_code>:END] boundaries and coordinator can extract the segment between them"
+                ]
+            },
+            {
+                "id": "F4",
+                "description": "Solo mode role-switch protocol with role-commit",
+                "acceptance": [
+                    "git_ops.sh role-commit exists and creates a commit with standardized message template including role, session_id, and attempt id",
+                    "In solo flow, before switching role, coordinator calls role-commit and persists evidence pointers for the next role",
+                    "A hook point exists for 'knowledge injection' (can be a no-op implementation) and is invoked on role switch with structured input"
+                ]
+            },
+            {
+                "id": "F5",
+                "description": "GUI supports v5.1 fields and no longer depends on deprecated fields",
+                "acceptance": [
+                    "TaskEditor shows Task Type dropdown (copywriting/solo/multi_agent)",
+                    "TaskEditor shows Launch Mode dropdown (ccb/bridge) + launch_mode_locked checkbox",
+                    "Saving a task produces v5.1 task.json (task_type/launch_mode/launch_mode_locked present)",
+                    "Legacy fields (executor_type/session_mode) are not required for saving; if present, GUI flags them as deprecated (non-blocking)"
+                ]
+            }
+        ],
+        "non_functional": [
+            {
+                "id": "N1",
+                "description": "Determinism and auditability",
+                "acceptance": [
+                    "All generated IDs (session_id/req_code) are reproducible given documented inputs",
+                    "All migrations are idempotent (running twice yields identical output)",
+                    "Coordinator writes an event log entry for: migration applied, launch_mode chosen, session_id assigned, req_code assigned, role-commit done"
+                ]
+            },
+            {
+                "id": "N2",
+                "description": "Minimal surface area change and safe rollout",
+                "acceptance": [
+                    "Default behavior for existing tasks remains unchanged unless migrated or explicitly set",
+                    "A feature flag (env or config) can force legacy routing OFF after migration (for future cleanup), but default keeps compat ON"
+                ]
+            }
+        ]
+    },
+    "constraints": {
+        "must": [
+            "Do not break existing v5.0 task execution paths; route internally via v5.1 after migration",
+            "Add tests for every new script and every routing branch",
+            "No silent fallback: if task_type/launch_mode missing after migration, fail with explicit error and remediation hint",
+            "All new scripts must be executable (chmod +x) and shellcheck-clean where applicable"
+        ],
+        "should": [
+            "Keep changes localized: coordinator + tools + gui; avoid broad refactors",
+            "Prefer pure bash for tools to match existing conventions",
+            "Prefer contract tests (golden fixtures) for migration and routing"
+        ]
+    },
+    "forbidden": [
+        "Do not introduce new external runtime dependencies (python/node packages) just for migration/tooling",
+        "Do not remove executor_type/session_mode fields from legacy tasks in-place unless writing a migrated copy or explicit overwrite flag is set",
+        "Do not implement 'knowledge agent' as a networked service in this task (hook only)"
+    ],
+    "implementation_plan": {
+        "phases": [
+            {
+                "phase": "P0",
+                "name": "Inventory + fixtures",
+                "tasks": [
+                    "Add fixtures for legacy v5.0 tasks and expected migrated v5.1 outputs",
+                    "Add baseline routing tests that characterize current behavior (golden) to prevent regressions"
+                ]
+            },
+            {
+                "phase": "P1",
+                "name": "Schema + migration tooling",
+                "tasks": [
+                    "Create task_schema_v51.json",
+                    "Implement migrate_task_json_v51.sh (idempotent) + tests"
+                ]
+            },
+            {
+                "phase": "P2",
+                "name": "Session ID + REQ CODE tooling",
+                "tasks": [
+                    "Implement session_id_gen.sh + req_code_gen.sh",
+                    "Implement RDLOOP_REQ boundary insertion/extraction utilities",
+                    "Add tests for boundary parsing and edge cases"
+                ]
+            },
+            {
+                "phase": "P3",
+                "name": "Coordinator routing migration",
+                "tasks": [
+                    "Update run_task.sh to normalize task.json to v5.1 in-memory before routing",
+                    "Implement launch_mode selection + lock behavior",
+                    "Implement task_type routing branches and map to existing execution engines"
+                ]
+            },
+            {
+                "phase": "P4",
+                "name": "Solo role-commit protocol",
+                "tasks": [
+                    "Add git_ops.sh role-commit",
+                    "Insert role-switch checkpoints in solo flow (role-commit + knowledge hook + next pane)",
+                    "Add tests verifying role-commit and event logging"
+                ]
+            },
+            {
+                "phase": "P5",
+                "name": "GUI updates",
+                "tasks": [
+                    "Update TaskEditor.jsx to support v5.1 fields",
+                    "Add server endpoints if needed (e.g., runtime prompt persistence)",
+                    "Add GUI serialization tests"
+                ]
+            },
+            {
+                "phase": "P6",
+                "name": "Regression + docs",
+                "tasks": [
+                    "Add Agent rules docs: solo_pane.md and launch_mode.md",
+                    "Run full regression suite and produce test_report.txt",
+                    "Provide changes.diff or PR link"
+                ]
+            }
+        ]
+    },
+    "acceptance_tests": [
+        {
+            "id": "AT1",
+            "name": "Schema validation",
+            "steps": [
+                "Validate all v5.1 tasks against Rdloop/docs/schema/task_schema_v51.json",
+                "Validate migrated outputs against schema"
+            ],
+            "pass_criteria": [
+                "All fixtures validate; invalid fixtures fail with expected errors"
+            ]
+        },
+        {
+            "id": "AT2",
+            "name": "Migration idempotency",
+            "steps": [
+                "Run migrate_task_json_v51.sh twice on the same legacy fixture"
+            ],
+            "pass_criteria": [
+                "Second output is byte-identical to first output"
+            ]
+        },
+        {
+            "id": "AT3",
+            "name": "Routing correctness",
+            "steps": [
+                "Run coordinator in dry-run mode (or test harness) for each combination of task_type and launch_mode",
+                "Ensure internal routing selects the correct execution path"
+            ],
+            "pass_criteria": [
+                "Logs/events show task_type-based path and launch_mode-based channel selection"
+            ]
+        },
+        {
+            "id": "AT4",
+            "name": "REQ boundary extraction",
+            "steps": [
+                "Simulate CCB output containing RDLOOP_REQ START/END markers with noise around it",
+                "Parse and extract payload"
+            ],
+            "pass_criteria": [
+                "Extracted payload matches expected and parser handles missing END/START with explicit error"
+            ]
+        },
+        {
+            "id": "AT5",
+            "name": "Solo role-commit workflow",
+            "steps": [
+                "Simulate solo run with two roles (coder -> judge) in harness",
+                "Verify role-commit invoked at switch"
+            ],
+            "pass_criteria": [
+                "A commit exists with required metadata; event log contains ROLE_COMMIT and KNOWLEDGE_INJECT hook call"
+            ]
+        },
+        {
+            "id": "AT6",
+            "name": "GUI v5.1 task save/load",
+            "steps": [
+                "Open TaskEditor, create task with task_type+launch_mode+locked, save",
+                "Reload task and verify fields persist"
+            ],
+            "pass_criteria": [
+                "Saved JSON contains v5.1 fields; GUI renders them correctly on reload"
+            ]
+        }
+    ],
+    "evidence_bundle": {
+        "required_files": [
+            "task_spec.json (this file)",
+            "changes.diff OR PR link",
+            "test_report.txt (commands + outputs + conclusion)",
+            "out/events.log (or equivalent) showing key v5.1 events"
+        ],
+        "nice_to_have": [
+            "Before/after examples of task.json migration",
+            "Screenshots of GUI TaskEditor showing new controls"
+        ]
+    },
+    "notes": {
+        "migration_mapping_guidance": {
+            "legacy_to_v51": {
+                "executor_type/session_mode": "Mapped to task_type and launch_mode via deterministic mapping table documented in migrate_task_json_v51.sh; ambiguous cases must fail loudly with remediation hints",
+                "channel_type/run_surface": "Mapped to launch_mode when possible; otherwise requires explicit override"
+            }
+        },
+        "future_cleanup": [
+            "After this task lands and passes regression, plan a follow-up to remove deprecated fields and code paths behind a flag"
+        ]
+    }
+}

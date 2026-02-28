@@ -1,8 +1,8 @@
 {
-  "default_coder": "ccb",
-  "default_judge": "ccb",
-  "default_coder_model": "codex",
-  "default_judge_model": "gemini",
+  "default_coder": "codex",
+  "default_judge": "codex",
+  "default_coder_model": null,
+  "default_judge_model": null,
   "default_run_surface": "visual_ccb",
   "agent_root": "/Users/yzliu/work/Cord/Agent",
   "ccb_path": "/Users/yzliu/work/Cord/CCB",

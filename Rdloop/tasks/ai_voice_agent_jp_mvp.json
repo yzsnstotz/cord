@@ -1,5 +1,5 @@
 {
-  "schema_version": "v1",
+  "schema_version": "v51",
   "task_id": "ai_voice_agent_jp_mvp",
   "repo_path": "out/requirements_doc/calljp/",
   "base_ref": "main",
@@ -27,7 +27,7 @@
   "coder_timeout_seconds": 600,
   "judge_timeout_seconds": 300,
   "test_timeout_seconds": 300,
-  "task_type": "requirements_doc",
+  "task_type": "multi_agent",
   "scoring_mode": "rubric_analytic",
   "rubric_thresholds": {
     "clarity": 3,
@@ -41,5 +41,13 @@
   },
   "coder_model": "gemini-3.1-pro-high",
   "judge_model": "gemini-3.1-pro-high",
-  "attempt_context_mode": "iterative"
+  "attempt_context_mode": "iterative",
+  "launch_mode": "ccb",
+  "launch_mode_locked": false,
+  "collab_roles": {
+    "pm": "claude",
+    "designer": "claude",
+    "executor": "claude",
+    "reviewer": "claude"
+  }
 }

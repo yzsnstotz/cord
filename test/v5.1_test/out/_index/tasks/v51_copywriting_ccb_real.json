@@ -1,0 +1,9 @@
+{
+  "task_id": "v51_copywriting_ccb_real",
+  "state": "READY_FOR_REVIEW",
+  "updated_at": "2026-02-27T20:27:12Z",
+  "state_version": 3,
+  "paths": {
+    "status_json": "v51_copywriting_ccb_real/status.json"
+  }
+}

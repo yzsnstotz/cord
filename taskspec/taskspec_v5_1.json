@@ -1,0 +1,481 @@
+{
+  "project": "闭环AI自主研发体系 — 整合架构 v5.1 升级",
+  "version": "5.1",
+  "created_at": "2026-02-28T00:00:00Z",
+  "description": "基于 integrated_architecture_v5_1.md，完成以下升级：（1）废弃 executor_type × session_mode，引入 task_type（copywriting / solo / multi_agent）+ launch_mode（ccb / bridge）路由；（2）全面 Coding Agent 化，废弃 cliproxy/api_call；（3）统一 Session 标识体系（session_id + req_code 派生）；（4）Coordinator 绝对调度权确立，CCB/Bridge 降级为纯通信通道；（5）角色工作流完整化（PM/Designer/Executor/Reviewer/Inspiration），coordinator 负责角色切换时 git 操作与 knowledge agent 调用；（6）新增 git_ops.sh role-commit、session_id_gen.sh、req_code_gen.sh；（7）GUI 升级（Task Type 控件 / Pane 状态面板 / Launch Mode 对话框）。共 13 个 task。",
+  "base_version": "v5.0（Beta）",
+  "arch_doc": "Arch/v5/integrated_architecture_v5_1.md",
+  "migration_script": "tools/migrate_task_json_v51.sh",
+
+  "tasks": [
+
+    {
+      "task_id": "T01",
+      "title": "task.json schema 升级 — 废弃 executor_type/session_mode，引入 task_type / launch_mode / launch_mode_locked",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "更新 task.json 的 schema 定义与校验逻辑。废弃 executor_type（api_call/solo_agent/multi_agent）和 session_mode（fresh/iterative/continuous）字段，新增 task_type（copywriting/solo/multi_agent）、launch_mode（ccb/bridge）、launch_mode_locked（boolean）字段。session_mode 相关约束逻辑随废弃一并移除。迁移脚本 migrate_task_json_v51.sh 实现向后兼容。",
+      "acceptance_criteria": [
+        "task.json schema 包含 task_type、launch_mode、launch_mode_locked 三个新字段",
+        "task_type 枚举值：copywriting | solo | multi_agent",
+        "launch_mode 枚举值：ccb | bridge",
+        "launch_mode_locked 为 boolean 类型，默认 false",
+        "executor_type、session_mode 字段从 schema 中移除（包括 required 数组）",
+        "collab_roles：copywriting 只需 executor/reviewer；solo 所有角色共用同一 provider；multi_agent 各角色独立 provider",
+        "agent_config 保留不变（max_attempts、auto_pass_threshold、knowledge_shards、provider）",
+        "schema 校验脚本对非法 task_type 值、缺失 launch_mode 均返回非零 rc 并输出明确错误信息",
+        "migrate_task_json_v51.sh 将 executor_type=api_call → task_type=copywriting、solo_agent → solo、multi_agent → multi_agent",
+        "migrate_task_json_v51.sh 删除 executor_type、session_mode 字段，新增 launch_mode=ccb（默认），launch_mode_locked=false",
+        "迁移脚本幂等，可对已迁移文件重复执行",
+        "提供至少 3 个迁移前后的示例 JSON（覆盖三种 task_type）"
+      ],
+      "output_files": [
+        "docs/schema/task_schema_v51.json",
+        "tools/migrate_task_json_v51.sh",
+        "tests/test_task_schema_v51.sh"
+      ],
+      "test_cmd": "bash tests/test_task_schema_v51.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "所有后续 task 的 schema 基础，T02～T13 均依赖本 task 定义的字段命名。迁移脚本需覆盖 cord-5 中现有的 my_task.json（当前为旧格式）。"
+    },
+
+    {
+      "task_id": "T02",
+      "title": "coordinator/run_task.sh — task_type + launch_mode 路由替代 executor_type × session_mode 路由",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T01"],
+      "description": "重构 run_task.sh 核心路由逻辑。废弃 executor_type/session_mode 双参数 case 分支，替换为 task_type（copywriting/solo/multi_agent）+ launch_mode（ccb/bridge）两参数路由。引入 role_transition() 函数实现角色切换（挂起当前 pane、role-commit、knowledge agent 查询、启动下一 pane）。废弃 cliproxy/api_call 相关适配器调用路径。",
+      "acceptance_criteria": [
+        "从 task.json 读取 task_type，缺失时报错退出（非零 rc）",
+        "从 task.json 读取 launch_mode，缺失时默认 ccb",
+        "task_type=copywriting → 角色序列：pm → executor → reviewer（跳过 designer）",
+        "task_type=solo → 角色序列：pm → designer → executor → reviewer，同一 provider 多 pane，上下文独立",
+        "task_type=multi_agent → 角色序列：pm → designer → executor → reviewer，各角色独立 provider",
+        "launch_mode=ccb → 每个角色 pane 通过 ccb_launch_pane 启动",
+        "launch_mode=bridge → 每个角色 pane 通过 bridge_launch_pane 启动",
+        "实现 role_transition() 函数：①暂停当前 pane ②git_ops.sh role-commit ③knowledge_agent_query 构建下一角色上下文 ④launch 下一 pane 并注入 session_id",
+        "废弃 call_coder_cliproxy.sh 调用路径（保留文件但不在路由中触达）",
+        "executor_type / session_mode 相关路由代码全部移除",
+        "回归测试：三种 task_type × 两种 launch_mode 共 6 条路由路径均通过",
+        "events.jsonl 中 role_transition 事件包含 from、to、session_id 字段"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh",
+        "tests/test_run_task_routing_v51.sh"
+      ],
+      "test_cmd": "bash tests/test_run_task_routing_v51.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "role_transition() 是本次最核心的新函数。solo 模式中所有角色虽共用同一 provider，每个 pane 必须独立上下文（不共享历史对话）。"
+    },
+
+    {
+      "task_id": "T03",
+      "title": "统一 Session 标识体系 — session_id_gen.sh + req_code_gen.sh",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T01"],
+      "description": "新增两个工具脚本，建立统一 Session 标识体系。session_id_gen.sh 按格式 {task_id}-{role}-{pane_idx:02d}-{unix_ts} 生成唯一标识；req_code_gen.sh 从 session_id 派生 CCB REQ CODE（RC- + sha256前8位大写）。两个脚本供 run_task.sh 和 call_coder_ccb.sh 调用，替代 v5.0 中各自独立的标识逻辑。",
+      "acceptance_criteria": [
+        "session_id_gen.sh 接受参数 task_id、role、pane_idx，输出格式：{task_id}-{role}-{pane_idx:02d}-{unix_ts}",
+        "session_id 中 pane_idx 补零到两位（如 00、01、02）",
+        "连续调用两次（间隔 1 秒以上）生成的 session_id 不同（unix_ts 保证唯一性）",
+        "req_code_gen.sh 接受 session_id，输出格式：RC- + sha256(session_id)[:8].upper()",
+        "示例验证：T01-executor-01-1740700800 → RC-XXXXXXXX（8位大写十六进制）",
+        "两脚本均可独立执行，无外部依赖（只用 sha256sum 或 openssl）",
+        "run_task.sh 中每个 pane 启动时调用 session_id_gen.sh，结果写入 task_state.json sessions 字段",
+        "CCB 通道的 pane 启动时调用 req_code_gen.sh，将 req_code 注入指令模板",
+        "Bridge 通道直接以 session_id 作为请求跟踪键，不生成 req_code",
+        "events.jsonl 中每条 role_start / role_end 事件携带 session_id 字段",
+        "GUI 的 Pane 状态面板展示 session_id（截断显示）"
+      ],
+      "output_files": [
+        "tools/session_id_gen.sh",
+        "tools/req_code_gen.sh",
+        "tests/test_session_id.sh"
+      ],
+      "test_cmd": "bash tests/test_session_id.sh",
+      "coder_timeout_seconds": 300,
+      "notes": "Bridge 通道不需要 REQ CODE（bridge 协议有自己的消息边界）。task_state.json 的 sessions 字段格式：{ 'executor-01': 'T01-executor-01-1740700800' }。"
+    },
+
+    {
+      "task_id": "T04",
+      "title": "git_ops.sh — 新增 role-commit 子命令",
+      "owner_subsystem": "rdloop",
+      "priority": "P0",
+      "depends_on": ["T02"],
+      "description": "在现有 git_ops.sh 中新增 role-commit 子命令，供 coordinator 在角色切换时提交当前阶段产出。role-commit 负责将当前 worker 分支的变更以约定格式提交，确保下一角色能通过 git 读取前一角色产出。保留现有 create-branches / merge-pr / review-prep 子命令不变。",
+      "acceptance_criteria": [
+        "git_ops.sh role-commit --task <task_id> --role <role> --message <msg> 正确执行 git add + git commit",
+        "提交信息格式：role/<role>: <msg>（如 role/designer: phase complete）",
+        "role-commit 在 dirty worktree 时正确 commit；若 worktree 无变更则输出 no-op 提示并以 rc=0 退出",
+        "role-commit 后产出文件可通过 git show HEAD:<file> 读取",
+        "coordinator 在 role_transition() 中于 launch 下一 pane 前调用 role-commit",
+        "events.jsonl 记录 role_commit 事件，包含 task_id、role、commit_sha、timestamp",
+        "现有 create-branches / merge-pr / review-prep 子命令回归测试通过"
+      ],
+      "output_files": [
+        "tools/git_ops.sh",
+        "tests/test_git_ops_role_commit.sh"
+      ],
+      "test_cmd": "bash tests/test_git_ops_role_commit.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "依赖 T02 的 role_transition() 函数调用约定。role-commit 是角色切换的原子操作之一，必须在 launch 下一 pane 前完成。"
+    },
+
+    {
+      "task_id": "T05",
+      "title": "call_coder_ccb.sh — 注入统一 Session ID 与 REQ CODE，废弃旧标识逻辑",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T03"],
+      "description": "重构 call_coder_ccb.sh，使其从外部接收 session_id（由 coordinator 生成）和 req_code（由 req_code_gen.sh 派生），而非内部自生成。将 req_code 注入指令模板的 RDLOOP_REQ 边界标记中。废弃 call_coder_ccb.sh 内部旧的 REQ CODE 生成逻辑。",
+      "acceptance_criteria": [
+        "call_coder_ccb.sh 接受 --session-id 和 --req-code 参数（必填）",
+        "指令模板中植入：[RDLOOP_REQ:{req_code}:START] 和 [RDLOOP_REQ:{req_code}:END]",
+        "coordinator 解析产出时以 req_code 定位 START/END 边界，截取有效内容",
+        "call_coder_ccb.sh 内部不再自行生成任何标识符（无 uuidgen / date-based 自生成）",
+        "events.jsonl 记录的 ccb_call 事件包含 session_id 和 req_code 字段",
+        "call_judge_ccb.sh 同步升级，接受 session_id 和 req_code 参数",
+        "回归测试：v5 Beta 已有 CCB 场景端到端通过（multi_agent 任务）"
+      ],
+      "output_files": [
+        "coordinator/lib/call_coder_ccb.sh",
+        "coordinator/lib/call_judge_ccb.sh",
+        "tests/test_ccb_session_id.sh"
+      ],
+      "test_cmd": "bash tests/test_ccb_session_id.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "session_id 和 req_code 由 coordinator (run_task.sh) 在 pane 启动时生成并传入，ccb 脚本本身无需感知生成逻辑。"
+    },
+
+    {
+      "task_id": "T06",
+      "title": "call_coder_bridge.sh（solo-bridge）— 注入统一 Session ID，对齐双通道追踪体系",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T03"],
+      "description": "重构 solo_bridge.sh / call_coder_bridge.sh，使其从外部接收 session_id（由 coordinator 生成）作为请求跟踪键，不使用 REQ CODE。Bridge 通道通过 session_id 在 events.jsonl 和 GUI 中与 CCB 通道保持一致的追踪接口。脚本重命名为 bridge.sh（保留 solo_bridge.sh 作为软链接），逻辑不变。",
+      "acceptance_criteria": [
+        "call_coder_bridge.sh 接受 --session-id 参数（必填）",
+        "bridge 响应存储时以 session_id 为 key（替代旧的内部生成标识）",
+        "events.jsonl 记录的 bridge_call 事件包含 session_id 字段",
+        "solo_bridge.sh 软链接指向 bridge.sh，向后兼容",
+        "call_judge_bridge.sh 同步升级，接受 session_id 参数",
+        "GUI 的 Pane 状态面板中 Bridge pane 显示 ⚙ 图标，且能通过 session_id 聚合事件",
+        "回归测试：solo 任务通过 bridge 通道端到端执行通过"
+      ],
+      "output_files": [
+        "coordinator/lib/bridge.sh",
+        "coordinator/lib/call_judge_bridge.sh",
+        "tests/test_bridge_session_id.sh"
+      ],
+      "test_cmd": "bash tests/test_bridge_session_id.sh",
+      "coder_timeout_seconds": 300,
+      "notes": "solo_bridge.sh 重命名为 bridge.sh，但逻辑不变（架构文档 9.4 节明确）。Bridge 不需要 REQ CODE 边界定位，直接用 session_id 追踪。"
+    },
+
+    {
+      "task_id": "T07",
+      "title": "launch_mode 选择机制 — coordinator 侧 launch_mode_locked 判断逻辑",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T02"],
+      "description": "在 coordinator 侧实现 launch_mode_locked 判断逻辑：任务 run 时若 launch_mode_locked=false，由 GUI 弹出选择对话框后将用户选择写入 task.json launch_mode；若 launch_mode_locked=true，直接读取 settings 预设。coordinator 的 run_task.sh 在读取 launch_mode 前等待该字段确定（通过信号或文件写入通知）。",
+      "acceptance_criteria": [
+        "run_task.sh 启动时读取 launch_mode_locked 字段",
+        "launch_mode_locked=true 时直接使用 task.json 中 launch_mode 值，不等待 GUI",
+        "launch_mode_locked=false 时 run_task.sh 等待 GUI 写入 launch_mode（超时 60s 默认使用 ccb）",
+        "GUI 选择确认后原子写入 task.json launch_mode 字段",
+        "settings 中 default_launch_mode（ccb / bridge）作为 launch_mode_locked=true 时的预设来源",
+        "events.jsonl 记录 launch_mode_selected 事件，包含 launch_mode 和 locked 字段",
+        "单元测试：locked=true / locked=false 两条路径均通过"
+      ],
+      "output_files": [
+        "coordinator/run_task.sh",
+        "tests/test_launch_mode_selection.sh"
+      ],
+      "test_cmd": "bash tests/test_launch_mode_selection.sh",
+      "coder_timeout_seconds": 300,
+      "notes": "GUI 侧实现见 T11。本 task 只实现 coordinator 侧的等待/读取逻辑，可用 mock GUI 写入脚本完成单元测试。"
+    },
+
+    {
+      "task_id": "T08",
+      "title": "AGENT.md 升级至 v2.1 — task_type 路由、solo pane 独立性规则、Inspiration 角色",
+      "owner_subsystem": "agent",
+      "priority": "P1",
+      "depends_on": ["T01"],
+      "description": "更新 Agent/.context/AGENT.md 至 v2.1，同步新增 rules/solo_pane.md 和 rules/launch_mode.md 两个规则文件。废弃 executor_type/session_mode 相关说明，替换为 task_type/launch_mode 路由描述。完整化 Inspiration 角色定义（触发条件、产出约束）。",
+      "acceptance_criteria": [
+        "AGENT.md 版本号标记为 v2.1",
+        "AGENT.md 任务类型描述替换为：copywriting / solo / multi_agent",
+        "AGENT.md 废弃 api_call / executor_type / session_mode 相关所有描述",
+        "rules/solo_pane.md 新增：solo 模式每个角色独立 pane，上下文不共享，coordinator 控制切换",
+        "rules/launch_mode.md 新增：CCB（visual）与 Bridge（non-visual）两通道定义；coordinator 绝对调度权原则；CCB/Bridge 不具备自调度能力的约束",
+        "rules/collab_context.md 补充 Inspiration 角色：触发条件（Reviewer 评分低 + 多次未达标）、产出约束（不直接产出代码/文案，只产出创意建议）",
+        "rules/git_collab.md 补充 role-commit 说明（角色切换时由 coordinator 发起，agent 不直接执行 git commit）",
+        "validate_markdown.sh 检查新规则文件格式通过"
+      ],
+      "output_files": [
+        "Agent/.context/AGENT.md",
+        "Agent/.context/rules/solo_pane.md",
+        "Agent/.context/rules/launch_mode.md",
+        "Agent/.context/rules/collab_context.md",
+        "Agent/.context/rules/git_collab.md"
+      ],
+      "test_cmd": "bash Agent/tests/validate_markdown.sh",
+      "coder_timeout_seconds": 400,
+      "notes": "rules/exceptions.md / file_ops.md / model_routing.md / network_authority.md / init.md / startup.md 不变（架构文档 9.4 节明确）。"
+    },
+
+    {
+      "task_id": "T09",
+      "title": "GUI server.js — task_type 联动校验、Pane 状态 API、launch_mode 选择接口",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T01", "T07"],
+      "description": "升级 gui/server.js，新增 task_type 联动校验（collab_roles 按 task_type 约束）、Pane 状态查询 API（GET /api/task/:id/panes）、launch_mode 选择接口（POST /api/task/:id/launch-mode）。废弃 executor_type/session_mode 相关的 schema 校验，保留 workflow_mode 向后兼容映射。",
+      "acceptance_criteria": [
+        "POST /api/tasks（创建/更新任务）校验 task_type 枚举值，非法值返回 400",
+        "task_type=copywriting 时，collab_roles 只允许 executor / reviewer，其余角色返回 400",
+        "task_type=solo 时，collab_roles 中所有角色的 provider 必须相同（或只填 provider 字段）",
+        "task_type=multi_agent 时，collab_roles 中各角色可独立指定 provider",
+        "GET /api/task/:id/panes 返回当前任务所有 pane 的状态列表（pane、状态、session_id、launch_mode）",
+        "POST /api/task/:id/launch-mode 接受 { launch_mode: 'ccb' | 'bridge' } 并原子写入 task.json",
+        "executor_type / session_mode 字段在 POST 请求体中仍被接受但映射为 task_type（向后兼容，输出警告日志）",
+        "GET /api/tasks 列表接口返回包含 task_type 和 launch_mode 字段",
+        "单元测试：task_type 三种值 × collab_roles 约束矩阵全覆盖"
+      ],
+      "output_files": [
+        "coordinator/gui/server.js",
+        "tests/gui/test_gui_endpoints_v51.sh"
+      ],
+      "test_cmd": "bash tests/gui/test_gui_endpoints_v51.sh",
+      "coder_timeout_seconds": 500,
+      "notes": "Pane 状态数据来源于 task_state.json 的 sessions 字段（由 T03 定义）。POST launch-mode 需要通知 run_task.sh（见 T07 的等待机制）。"
+    },
+
+    {
+      "task_id": "T10",
+      "title": "GUI TaskEditor.jsx — Task Type 下拉替代 Executor Type × Session Mode",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T09"],
+      "description": "升级 gui/src/TaskEditor.jsx，废弃 Executor Type + Session Mode 联动下拉，替换为 Task Type 单下拉（Copywriting / Solo / Multi Agent）。同步更新 collab_roles 配置区随 Task Type 联动变化（copywriting 只显示 executor/reviewer；solo 显示统一 provider 选择；multi_agent 显示各角色独立选择）。保留 workflow_mode 回显用于旧任务显示。",
+      "acceptance_criteria": [
+        "TaskEditor.jsx 中 Executor Type / Session Mode 两个下拉控件替换为 Task Type 单下拉",
+        "Task Type 选项：Copywriting / Solo / Multi Agent",
+        "选择 Copywriting → collab_roles 区域只显示 executor、reviewer 两个角色输入",
+        "选择 Solo → collab_roles 区域显示单一 provider 选择框（所有角色共用）",
+        "选择 Multi Agent → collab_roles 区域显示 pm、designer、executor、reviewer 各自独立 provider 选择",
+        "旧任务（含 workflow_mode 字段）在只读展示模式下仍正确回显（映射为对应 task_type 标签）",
+        "表单提交时生成包含 task_type 而非 executor_type/session_mode 的 task.json",
+        "Launch Mode 选项（CCB / Bridge）保留在表单中（独立于 Task Type）",
+        "Checkbox "使用默认启动模式" 控制 launch_mode_locked 字段写入"
+      ],
+      "output_files": [
+        "coordinator/gui/src/TaskEditor.jsx"
+      ],
+      "test_cmd": "echo 'manual UI review required'",
+      "coder_timeout_seconds": 400,
+      "notes": "Solo Agent Progress 面板（基于 session_id 聚合事件）在本 task 中不需要新增，见 T11 的 Pane 状态面板实现。"
+    },
+
+    {
+      "task_id": "T11",
+      "title": "GUI — Pane 状态面板 + Launch Mode 选择对话框",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T09", "T10"],
+      "description": "在任务详情页新增两个 GUI 组件：（1）Pane 状态面板：展示当前任务所有活跃 pane 的状态、session_id 和通道图标（CCB 👁 / Bridge ⚙）；（2）Launch Mode 选择对话框：launch_mode_locked=false 时在 Run 操作触发时弹出，用户选择后写入 task.json 并通知 coordinator。",
+      "acceptance_criteria": [
+        "Pane 状态面板展示列：pane（角色名）、状态（waiting/running/done/failed）、session_id（截断显示）、通道图标",
+        "CCB pane 显示 👁 图标，Bridge pane 显示 ⚙ 图标",
+        "Pane 状态面板数据每 5s 自动刷新（调用 GET /api/task/:id/panes）",
+        "Launch Mode 对话框在 launch_mode_locked=false 且点击 Run 时弹出",
+        "对话框选项：CCB (Visual) / Bridge (Non-Visual)，含简短说明文字",
+        "对话框含 checkbox "记住选择（使用 Settings 预设）" → 勾选后写 launch_mode_locked=true",
+        "确认后调用 POST /api/task/:id/launch-mode 写入选择，再触发 run",
+        "launch_mode_locked=true 时 Run 按钮直接触发（不弹对话框）",
+        "Pane 状态面板和对话框均有对应的组件文件，可独立 import"
+      ],
+      "output_files": [
+        "coordinator/gui/src/PaneStatusPanel.jsx",
+        "coordinator/gui/src/LaunchModeDialog.jsx",
+        "coordinator/gui/src/TaskDetail.jsx"
+      ],
+      "test_cmd": "echo 'manual UI review required'",
+      "coder_timeout_seconds": 400,
+      "notes": "Pane 状态数据来源于 T09 新增的 GET /api/task/:id/panes 接口。对话框确认后调用 T09 的 POST /api/task/:id/launch-mode 接口。"
+    },
+
+    {
+      "task_id": "T12",
+      "title": "废弃 cliproxy 调用路径 — call_coder_cliproxy.sh 存档，run_task.sh 移除 api_call 分支",
+      "owner_subsystem": "rdloop",
+      "priority": "P1",
+      "depends_on": ["T02"],
+      "description": "正式废弃 cliproxy / api_call 执行路径。call_coder_cliproxy.sh 和 call_judge_cliproxy.sh 移动到 coordinator/lib/deprecated/ 目录存档，不删除但不在路由中触达。run_task.sh 移除 executor_type=api_call 相关分支（T02 已完成路由重构，此 task 做最终清理和存档）。更新 MIGRATION_QUEUE_TO_CLIAPI.md 说明废弃状态。",
+      "acceptance_criteria": [
+        "call_coder_cliproxy.sh 移动至 coordinator/lib/deprecated/call_coder_cliproxy.sh",
+        "call_judge_cliproxy.sh 移动至 coordinator/lib/deprecated/call_judge_cliproxy.sh",
+        "run_task.sh 中无任何触达 deprecated/ 目录下脚本的代码路径",
+        "MIGRATION_QUEUE_TO_CLIAPI.md 更新，注明 cliproxy 已在 v5.1 废弃，存档于 deprecated/",
+        "self_check.sh 更新检查列表，不再验证 cliproxy 可用性",
+        "回归测试：三种 task_type 的正常执行路径均不触及 deprecated/ 目录（grep 验证）"
+      ],
+      "output_files": [
+        "coordinator/lib/deprecated/call_coder_cliproxy.sh",
+        "coordinator/lib/deprecated/call_judge_cliproxy.sh",
+        "coordinator/adapters/MIGRATION_QUEUE_TO_CLIAPI.md",
+        "coordinator/self_check.sh"
+      ],
+      "test_cmd": "bash tests/test_deprecated_not_called.sh",
+      "coder_timeout_seconds": 200,
+      "notes": "存档而不删除是为了保留参考。T02 已完成路由重构，本 task 只做物理清理和文档更新。"
+    },
+
+    {
+      "task_id": "T13",
+      "title": "迁移验证 — cord-5 现有任务和测试全量通过 v5.1 路由",
+      "owner_subsystem": "rdloop",
+      "priority": "P2",
+      "depends_on": ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10", "T11", "T12"],
+      "description": "端到端验证 v5.1 升级完整性。运行迁移脚本将 cord-5 中所有现有 task.json 迁移至 v5.1 格式，确保所有集成测试通过。验证三种 task_type × 两种 launch_mode 的完整执行路径，及 session_id 在 events.jsonl 和 GUI 中的一致性。",
+      "acceptance_criteria": [
+        "migrate_task_json_v51.sh 批量迁移 cord-5 中所有 task.json（含 Rdloop/tasks/my_task.json），无报错",
+        "迁移后所有 task.json 通过 task_schema_v51.json 校验",
+        "copywriting + ccb 端到端 mock 测试通过",
+        "solo + bridge 端到端 mock 测试通过",
+        "multi_agent + ccb 端到端 mock 测试通过",
+        "events.jsonl 中所有 role_start / role_transition / role_commit 事件均含 session_id",
+        "GUI Pane 状态面板在三种 task_type 下均正确展示 pane 列表和 session_id",
+        "自检脚本 self_check.sh 全部检查项通过",
+        "validate_schema.sh 对所有迁移后 task.json 返回 rc=0",
+        "回归测试集（test_run_task_routing_v51.sh / test_task_schema_v51.sh / test_session_id.sh / test_git_ops_role_commit.sh）全部通过"
+      ],
+      "output_files": [
+        "tests/integration/test_e2e_v51.sh",
+        "tests/integration/fixtures/mock_project_v51/"
+      ],
+      "test_cmd": "bash tests/integration/test_e2e_v51.sh",
+      "coder_timeout_seconds": 600,
+      "notes": "本 task 是 v5.1 升级的收口验证。建议在 mock 环境中运行 E2E 测试，不依赖真实 coding agent。需要准备三种 task_type 的 mock fixture。"
+    }
+
+  ],
+
+  "v51_field_mapping": {
+    "description": "v5.0 (Beta) → v5.1 task.json 字段变更对照",
+    "deprecated": [
+      "executor_type",
+      "session_mode",
+      "run_surface",
+      "workflow_mode"
+    ],
+    "added": [
+      "task_type",
+      "launch_mode",
+      "launch_mode_locked"
+    ],
+    "retained": [
+      "task_id",
+      "goal",
+      "acceptance",
+      "test_cmd",
+      "max_attempts",
+      "agent_config",
+      "collab_roles",
+      "judge_enabled",
+      "repo_path",
+      "schema_version"
+    ],
+    "task_type_mapping": {
+      "api_call + fresh/iterative": "copywriting",
+      "solo_agent + continuous": "solo",
+      "multi_agent + continuous": "multi_agent"
+    },
+    "launch_mode_mapping": {
+      "run_surface=visual_ccb": "launch_mode=ccb",
+      "run_surface=bridge": "launch_mode=bridge",
+      "execution_mode=semi-auto (inferred)": "launch_mode=ccb",
+      "execution_mode=auto (inferred)": "launch_mode=bridge"
+    }
+  },
+
+  "v51_example_tasks": {
+    "copywriting_example": {
+      "schema_version": "v51",
+      "task_id": "copy_01",
+      "task_type": "copywriting",
+      "launch_mode": "ccb",
+      "launch_mode_locked": false,
+      "judge_enabled": true,
+      "agent_config": {
+        "max_attempts": 3,
+        "auto_pass_threshold": 0.80,
+        "knowledge_shards": [],
+        "provider": "claude"
+      },
+      "collab_roles": {
+        "executor": "claude",
+        "reviewer": "claude"
+      },
+      "repo_path": "/path/to/project",
+      "goal": "撰写产品发布公告文案",
+      "acceptance": "语言简洁，突出核心价值，300字以内",
+      "test_cmd": "true"
+    },
+    "solo_example": {
+      "schema_version": "v51",
+      "task_id": "solo_01",
+      "task_type": "solo",
+      "launch_mode": "bridge",
+      "launch_mode_locked": true,
+      "judge_enabled": true,
+      "agent_config": {
+        "max_attempts": 5,
+        "auto_pass_threshold": 0.85,
+        "knowledge_shards": ["auth", "api"],
+        "provider": "claude"
+      },
+      "collab_roles": {
+        "pm": "claude",
+        "designer": "claude",
+        "executor": "claude",
+        "reviewer": "claude"
+      },
+      "repo_path": "/path/to/project",
+      "goal": "实现用户登录模块",
+      "acceptance": "单元测试覆盖率 > 80%，符合 design_contract",
+      "test_cmd": "npm test"
+    },
+    "multi_agent_example": {
+      "schema_version": "v51",
+      "task_id": "multi_01",
+      "task_type": "multi_agent",
+      "launch_mode": "ccb",
+      "launch_mode_locked": false,
+      "judge_enabled": true,
+      "agent_config": {
+        "max_attempts": 5,
+        "auto_pass_threshold": 0.85,
+        "knowledge_shards": ["auth", "api"],
+        "provider": "claude"
+      },
+      "collab_roles": {
+        "pm": "claude",
+        "designer": "claude",
+        "executor": "codex",
+        "reviewer": "gemini"
+      },
+      "repo_path": "/path/to/project",
+      "goal": "实现支付网关集成",
+      "acceptance": "通过集成测试，符合 PCI DSS 要求",
+      "test_cmd": "bash tests/test_payment.sh"
+    }
+  }
+}

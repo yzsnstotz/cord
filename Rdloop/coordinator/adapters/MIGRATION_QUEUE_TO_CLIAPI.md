@@ -2,6 +2,9 @@
 
 用于审查当前报错与从 queue CLI 切换到 API（coder/judge）的完整过程。
 
+> v5.1 更新：`call_coder_cliproxy.sh` 与 `call_judge_cliproxy.sh` 已废弃并存档到 `coordinator/lib/deprecated/`，
+> coordinator 路由不再触达 cliproxy 适配器。
+
 ---
 
 ## 一、当前问题描述

@@ -1,0 +1,21 @@
+{
+  "task_id": "v51_multi_agent_bridge_real",
+  "state": "READY_FOR_REVIEW",
+  "decision": "READY_FOR_REVIEW",
+  "last_decision": "READY_FOR_REVIEW",
+  "current_attempt": 1,
+  "max_attempts": 1,
+  "message": "v5.1 role flow complete",
+  "questions_for_user": [],
+  "pause_category": "",
+  "pause_reason_code": "",
+  "final_head_commit": "",
+  "updated_at": "2026-02-27T20:27:22Z",
+  "state_version": 3,
+  "final_score_0_100": null,
+  "verdict_summary": null,
+  "paths": {
+    "status_json": "status.json",
+    "final_summary_json": "final_summary.json"
+  }
+}
